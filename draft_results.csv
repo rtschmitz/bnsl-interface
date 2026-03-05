@@ -1,0 +1,310 @@
+id,pick_label,round,pick,team,player_id,name,position,dob,franchise,mlbamid,mlb_org,fg_30,fg_fv,mlb_30,mlb_fv,fg100,mlb100,drafted_at
+1,1.01,1,1,"New York Mets",1049,"Cam Schlittler",P,2001-02-05,"New York Mets",693645,"New York Yankees",,,,,,,2025-10-17T19:57:07
+2,1.02,1,2,"Seattle Mariners",3704,"Eli Willits",SS,2007-12-09,"Seattle Mariners",816113,"Washington Nationals",2,50,1,60,27,15,2025-10-18T21:13:40
+3,1.03,1,3,"Texas Rangers",3629,"Ethan Holliday",SS,2007-02-23,"Texas Rangers",815787,"Colorado Rockies",1,55,1,60,21,19,2025-10-18T23:20:07
+4,1.04,1,4,"New York Yankees",2284,"Aiva Arquette",SS,2003-10-17,"New York Yankees",804109,"Miami Marlins",2,50,2,55,37,41,2025-10-19T01:50:45
+5,1.05,1,5,"Tampa Bay Rays",4842,"Josuar Gonzalez",SS,2007-10-16,"Tampa Bay Rays",829034,"San Francisco Giants",2,50,2,55,28,82,2025-10-19T12:53:45
+6,1.06,1,6,"Minnesota Twins",2726,"Kade Anderson",P,2004-07-06,"Minnesota Twins",807739,"Seattle Mariners",2,50,2,55,34,23,2025-10-19T12:57:49
+7,1.07,1,7,"Los Angeles Angels",3641,"Seth Hernandez",P,2006-06-28,"Los Angeles Angels",815825,"Pittsburgh Pirates",5,47,3,55,125,27,2025-10-20T20:21:21
+8,1.08,1,8,"Milwaukee Brewers",1533,"Jamie Arnold",P,2004-03-21,"Milwaukee Brewers",701364,Athletics,3,45,2,55,,38,2025-10-21T04:51:39
+9,1.09,1,9,"Washington Nationals",4417,"Liam Doyle",P,2004-06-03,"Washington Nationals",824604,"St. Louis Cardinals",2,55,2,55,19,36,2025-10-20T21:44:49
+10,1.10,1,10,"Pittsburgh Pirates",4698,"JoJo Parker",SS,2006-08-08,"Pittsburgh Pirates",828098,"Toronto Blue Jays",5,45,2,55,,43,2025-10-20T21:44:51
+11,1.11,1,11,"Philadelphia Phillies",2341,"Kyson Witherspoon",P,2004-08-12,"Philadelphia Phillies",804817,"Boston Red Sox",3,50,4,55,66,89,2025-10-21T09:36:02
+12,1.12,1,12,"Atlanta Braves",3634,"Billy Carlson",SS,2006-07-29,"Atlanta Braves",815814,"Chicago White Sox",4,47,3,55,125,71,2025-10-21T11:21:48
+13,1.13,1,13,"Chicago White Sox",2262,"Tyler Bremner",P,2004-04-20,"Chicago White Sox",803285,"Los Angeles Angels",1,50,1,55,67,91,2025-10-21T13:58:58
+14,1.14,1,14,"Baltimore Orioles",3597,"Kayson Cunningham",SS,2006-06-25,"Baltimore Orioles",815617,"Arizona Diamondbacks",2,50,3,50,75,,2025-10-21T15:12:07
+15,1.15,1,15,"Arizona Diamondbacks",4690,"Dax Kilby",SS,2006-11-17,"Arizona Diamondbacks",828076,"New York Yankees",4,45,7,50,,,2025-10-21T15:22:00
+16,1.16,1,16,"Cleveland Guardians",1093,"Trey Gibson",P,2002-05-18,"Cleveland Guardians",694346,"Baltimore Orioles",2,50,12,45,52,,2025-10-21T15:39:31
+17,1.17,1,17,"Boston Red Sox",379,"Shane Smith",P,2000-04-04,"Boston Red Sox",681343,"Milwaukee Brewers",,,,,,,2025-10-21T16:04:56
+18,1.18,1,18,"Cincinnati Reds",1434,"Brandon Clarke",P,2003-04-10,"Cincinnati Reds",700251,"Boston Red Sox",4,50,5,50,85,,2025-10-21T17:50:00
+19,1.19,1,19,"Oakland Athletics",3419,"Wehiwa Aloy",SS,2004-02-04,"Oakland Athletics",814450,"Baltimore Orioles",4,47,5,50,125,,2025-10-21T17:59:22
+20,1.20,1,20,"San Diego Padres",4841,"Elian Peña",SS,2007-10-19,"San Diego Padres",829033,"New York Mets",9,45,10,45,,,2025-10-21T19:29:02
+21,1.21,1,21,"Los Angeles Dodgers",4501,"Nate George",OF,2006-06-04,"Los Angeles Dodgers",825582,"Baltimore Orioles",39,40,8,45,,,2025-10-21T19:32:29
+22,1.22,1,22,"St. Louis Cardinals",4881,"Kevin Defrank",P,2008-08-11,"St. Louis Cardinals",829074,"Miami Marlins",12,45,9,45,,,2025-10-21T21:33:46
+23,1.23,1,23,"Toronto Blue Jays",2518,"Gage Wood",P,2003-12-15,"Toronto Blue Jays",805906,"Philadelphia Phillies",7,45,4,50,,,2025-10-22T00:49:23
+24,1.24,1,24,"Colorado Rockies",3513,"Marcus Phillips",P,2004-07-26,"Colorado Rockies",815071,"Boston Red Sox",7,47,12,45,125,,2025-10-22T05:17:56
+25,1.25,1,25,"Kansas City Royals",4845,"Kevin Alvarez",OF,2008-01-13,"Kansas City Royals",829037,"Houston Astros",2,47,8,45,125,,2025-10-22T12:32:33
+26,1.26,1,26,"Chicago Cubs",1349,"Esmerlyn Valdez",OF,2004-01-27,"Chicago Cubs",699013,"Pittsburgh Pirates",59,35,15,45,,,2025-10-22T13:49:10
+27,1.27,1,27,"Miami Marlins",4906,"Steele Hall",SS,2007-07-24,"Miami Marlins",829162,"Cincinnati Reds",9,42,4,55,,79,2025-10-22T14:39:37
+28,1.28,1,28,"San Francisco Giants",4731,"Ethan Conrad",OF,2004-07-05,"San Francisco Giants",828255,"Chicago Cubs",6,45,6,50,,,2025-10-22T18:24:08
+29,1.29,1,29,"Houston Astros",4507,"Juan Sanchez",SS,2007-09-27,"Houston Astros",825646,"Toronto Blue Jays",22,40,19,45,,,2025-10-22T20:27:56
+30,1.30,1,30,"Detroit Tigers",1726,"Jace LaViolette",OF,2003-12-04,"Detroit Tigers",702593,"Cleveland Guardians",14,45,7,50,,,2025-10-24T09:05:25
+31,2.01,2,1,"Tampa Bay Rays",5360,"Kendry Chourio",P,2007-10-01,"Tampa Bay Rays",830402,"Kansas City Royals",46,35,8,50,,,2025-10-23T13:42:40
+32,2.02,2,2,"Milwaukee Brewers",4729,"Kruz Schoolcraft",P,2007-04-18,"Milwaukee Brewers",828244,"San Diego Padres",7,42,2,55,,95,2025-10-23T19:01:22
+33,2.03,2,3,"Texas Rangers",1740,"Andrew Fischer",3B,2004-05-25,"Texas Rangers",702652,"Milwaukee Brewers",9,45,6,50,,,2025-10-23T19:01:22
+34,2.04,2,4,"Washington Nationals",1436,"Miguel Mendez",P,2002-07-01,"Washington Nationals",700280,"San Diego Padres",2,47,5,50,125,,2025-10-23T19:01:22
+35,2.05,2,5,"New York Yankees",3089,"Ixan Henderson",P,2002-01-29,"New York Yankees",809100,"St. Louis Cardinals",13,42,15,45,,,2025-10-24T00:00:23
+36,2.06,2,6,"Pittsburgh Pirates",3637,"Gavin Fien",SS,2007-03-08,"Pittsburgh Pirates",815818,"Texas Rangers",10,42,2,50,,,2025-10-23T19:01:22
+37,2.07,2,7,"Minnesota Twins",3645,"Xavier Neyens",SS,2006-10-29,"Minnesota Twins",815832,"Houston Astros",4,45,3,50,,,2025-10-23T19:01:22
+38,2.08,2,8,"Seattle Mariners",4860,"Diego Tornes",OF,2008-07-03,"Seattle Mariners",829053,"Atlanta Braves",4,47,15,45,125,,2025-10-23T20:12:34
+39,2.09,2,9,"Tampa Bay Rays",1528,"Marek Houston",SS,2004-04-14,"Tampa Bay Rays",701339,"Minnesota Twins",13,45,7,50,,,2025-10-23T21:03:04
+40,2.10,2,10,"Atlanta Braves",4843,"Andrew Salas",SS,2008-03-04,"Atlanta Braves",829035,"Miami Marlins",8,45,6,50,,,2025-10-23T21:07:32
+41,2.11,2,11,"Los Angeles Angels",4692,"Daniel Pierce",SS,2006-08-04,"Los Angeles Angels",828084,"Tampa Bay Rays",23,42,4,50,,,2025-10-24T02:05:22
+42,2.12,2,12,"New York Mets",76,"Carlos Narváez",C,1998-11-26,"New York Mets",665966,"New York Yankees",,,,,,,2025-10-24T02:14:43
+43,2.13,2,13,"Los Angeles Angels",4846,"Cris Rodriguez",OF,2008-01-28,"Los Angeles Angels",829038,"Detroit Tigers",8,45,8,50,,,2025-10-24T02:21:42
+44,2.14,2,14,"Arizona Diamondbacks",4923,"Nick Becker",SS,2006-12-04,"Arizona Diamondbacks",829306,"Seattle Mariners",12,42,13,45,,,2025-10-24T03:25:39
+45,2.15,2,15,"Minnesota Twins",4847,"Dorian Soto",SS,2008-02-14,"Minnesota Twins",829039,"Boston Red Sox",8,45,11,45,,,2025-10-24T03:42:23
+46,2.16,2,16,"Cleveland Guardians",3638,"Sean Gamble",OF,2006-07-06,"Cleveland Guardians",815819,"Kansas City Royals",8,42,3,50,,,2025-10-24T04:25:16
+47,2.17,2,17,"Boston Red Sox",596,"Isaac Collins",LF,1997-07-22,"Boston Red Sox",686555,"Milwaukee Brewers",,,,,,,2025-10-24T04:31:25
+48,2.18,2,18,"Cincinnati Reds",2412,"Devin Taylor",OF,2004-01-06,"Cincinnati Reds",805127,Athletics,6,45,6,45,,,2025-10-24T16:20:50
+49,2.19,2,19,"Boston Red Sox",1115,"Chad Patrick",P,1998-08-14,"Boston Red Sox",694477,"Milwaukee Brewers",,,,,,,2025-10-24T17:46:35
+50,2.20,2,20,"San Diego Padres",2355,"Brendan Summerhill",OF,2003-11-13,"San Diego Padres",804911,"Tampa Bay Rays",20,42,8,50,,,2025-10-24T18:50:05
+51,2.21,2,21,"Los Angeles Dodgers",3649,"Josh Hammond",SS,2006-09-21,"Los Angeles Dodgers",815843,"Kansas City Royals",10,42,4,50,,,2025-10-24T19:23:14
+52,2.22,2,22,"Texas Rangers",2562,"Luke Stevenson",C,2004-07-22,"Texas Rangers",806233,"Seattle Mariners",14,42,10,50,,,2025-10-24T19:43:14
+53,2.23,2,23,"Toronto Blue Jays",1810,"Cam Cannarella",OF,2003-09-06,"Toronto Blue Jays",703448,"Miami Marlins",11,45,7,50,,,2025-10-24T20:04:37
+54,2.24,2,24,"Colorado Rockies",2421,"Caden Bodine",C,2003-12-02,"Colorado Rockies",805207,"Baltimore Orioles",12,45,10,45,,,2025-10-25T04:34:01
+55,2.25,2,25,"Tampa Bay Rays",2316,"Charles Davalan",OF,2003-12-16,"Tampa Bay Rays",804560,"Los Angeles Dodgers",14,42,15,50,,,2025-10-25T11:09:17
+56,2.26,2,26,"Los Angeles Dodgers",2369,"Riley Quick",P,2004-04-29,"Los Angeles Dodgers",804981,"Minnesota Twins",17,42,11,50,,,2025-10-25T12:49:50
+57,2.27,2,27,"San Diego Padres",4716,"Slater de Brun",OF,2007-06-08,"San Diego Padres",828173,"Baltimore Orioles",20,42,6,50,,,2025-10-25T16:49:13
+58,2.28,2,28,"Washington Nationals",4810,"Ching-Hsien Ko",OF,2006-08-11,"Washington Nationals",828667,"Los Angeles Dodgers",36,37,10,50,,,2025-10-25T16:51:20
+59,2.29,2,29,"Houston Astros",1603,"Tanner McDougal",P,2003-04-09,"Houston Astros",701780,"Chicago White Sox",6,45,7,45,,,2025-10-25T17:55:49
+60,2.30,2,30,"Detroit Tigers",2302,"Patrick Forbes",P,2004-07-11,"Detroit Tigers",804467,"Arizona Diamondbacks",12,42,8,45,,,2025-10-25T23:54:20
+61,C2.01,2,31,"Atlanta Braves",5078,"Adrian Pena",P,2008-05-02,"Atlanta Braves",829763,"Miami Marlins",13,45,,,,,2025-10-26T01:06:51
+62,C2.02,2,32,"Chicago White Sox",4733,"Jaden Fauske",OF,2006-11-21,"Chicago White Sox",828262,"Chicago White Sox",7,42,6,50,,,2025-10-26T21:18:23
+63,C2.03,2,33,"Kansas City Royals",3648,"Quentin Young",SS,2007-03-02,"Kansas City Royals",815839,"Minnesota Twins",19,42,13,45,,,2025-10-27T00:20:25
+64,C2.04,2,34,"Chicago Cubs",3566,"Josh Adamczewski",SS,2005-05-10,"Chicago Cubs",815304,"Milwaukee Brewers",13,42,13,45,,,2025-10-27T16:11:32
+65,C2.05,2,35,"Houston Astros",5688,"Michael Oliveto",C,2007-02-03,"Houston Astros",834672,"Detroit Tigers",12,42,18,40,,,2025-10-27T18:23:43
+66,C2.06,2,36,"Detroit Tigers",3683,"Angel Cervantes",P,2007-08-21,"Detroit Tigers",815979,zzz_amateur,,,,,,,2025-10-27T18:36:46
+67,3.01,3,1,"New York Yankees",2283,"Devin Fitz-Gerald",SS,2005-08-17,"New York Yankees",803849,"Texas Rangers",6,45,12,45,,,2025-10-27T19:06:53
+68,3.02,3,2,"Milwaukee Brewers",3700,"Landon Harmon",P,2006-09-09,"Milwaukee Brewers",816102,"Washington Nationals",9,45,6,50,,,2025-10-27T20:54:09
+69,3.03,3,3,"Texas Rangers",4540,"Aaron Watson",P,2007-01-05,"Texas Rangers",826209,"Cincinnati Reds",15,42,10,50,,,2025-10-27T21:04:25
+70,3.04,3,4,"Washington Nationals",4876,"Elorky Rodriguez",OF,2007-12-26,"Washington Nationals",829069,"Texas Rangers",31,37,10,45,,,2025-10-27T22:14:31
+71,3.05,3,5,"New York Yankees",1839,"Ethan Frey",OF,2004-03-15,"New York Yankees",703676,"Houston Astros",26,37,9,45,,,2025-10-28T03:47:27
+72,3.06,3,6,"Pittsburgh Pirates",3361,"Humberto Cruz",P,2006-12-18,"Pittsburgh Pirates",814232,"San Diego Padres",3,45,3,50,,,2025-10-28T03:51:22
+73,3.07,3,7,"Minnesota Twins",450,"Luis Mey",P,2001-06-24,"Minnesota Twins",682825,"Cincinnati Reds",,,,,,,2025-10-28T04:13:30
+74,3.08,3,8,"Seattle Mariners",3112,"Bryce Mayer",P,2002-02-11,"Seattle Mariners",809343,"Houston Astros",6,45,11,45,,,2025-10-28T14:07:52
+75,3.09,3,9,"Philadelphia Phillies",3087,"Murf Gray",3B,2003-12-30,"Philadelphia Phillies",809092,"Pittsburgh Pirates",10,45,23,45,,,2025-10-28T14:47:18
+76,3.10,3,10,"Atlanta Braves",3703,"Tate Southisene",SS,2006-10-06,"Atlanta Braves",816111,"Atlanta Braves",9,42,3,50,,,2025-10-28T17:03:54
+77,3.11,3,11,"Los Angeles Angels",3820,"Hayden Alvarez",OF,2007-03-19,"Los Angeles Angels",820986,"Los Angeles Angels",13,40,24,40,,,2025-10-28T17:14:53
+78,3.12,3,12,"Texas Rangers",1373,"Bradgley Rodriguez",P,2003-11-16,"Texas Rangers",699134,"San Diego Padres",8,42,6,45,,,2025-10-28T17:25:04
+79,3.13,3,13,"St. Louis Cardinals",3600,"Jack Bauer",P,2007-01-08,"St. Louis Cardinals",815627,zzz_amateur,,,,,,,2025-10-28T17:35:32
+80,3.14,3,14,"Tampa Bay Rays",1537,"Marco Dinges",C,2003-09-05,"Tampa Bay Rays",701392,"Milwaukee Brewers",23,40,10,45,,,2025-10-28T17:39:50
+81,3.15,3,15,"Baltimore Orioles",3965,"Dauri Fernandez",2B,2007-03-07,"Baltimore Orioles",821171,"Cleveland Guardians",19,42,22,40,,,2025-10-28T18:47:18
+82,3.16,3,16,"Los Angeles Angels",4239,"Alex Lodise",SS,2004-03-10,"Los Angeles Angels",822676,"Atlanta Braves",14,40,4,50,,,2025-10-28T18:51:39
+83,3.17,3,17,"Boston Red Sox",58,"Jake Mangum",LF,1996-03-08,"Boston Red Sox",663968,"Tampa Bay Rays",,,,,,,2025-10-28T19:04:36
+84,3.18,3,18,"Cincinnati Reds",2266,"Christian Oppor",P,2004-07-23,"Cincinnati Reds",803291,"Chicago White Sox",9,42,8,45,,,2025-10-28T22:07:40
+85,3.19,3,19,"Oakland Athletics",5564,"Matthew Fisher",P,2006-03-14,"Oakland Athletics",832455,"Philadelphia Phillies",8,45,10,45,,,2025-10-29T12:37:33
+86,3.20,3,20,"San Diego Padres",2280,"Jordan Yost",SS,2006-12-21,"San Diego Padres",803723,"Detroit Tigers",9,42,9,50,,,2025-10-29T15:47:19
+87,3.21,3,21,"Los Angeles Dodgers",2488,"AJ Russell",P,2004-06-29,"Los Angeles Dodgers",805706,"Texas Rangers",16,42,5,45,,,2025-10-29T15:56:18
+88,3.22,3,22,"Chicago White Sox",4853,"Yorger Bautista",OF,2007-09-19,"Chicago White Sox",829045,"Seattle Mariners",11,45,11,45,,,2025-10-29T16:03:27
+89,3.23,3,23,"Toronto Blue Jays",1714,"Zachary Root",P,2004-02-06,"Toronto Blue Jays",702539,"Los Angeles Dodgers",26,40,14,50,,,2025-10-29T16:30:30
+90,3.24,3,24,"Baltimore Orioles",3663,"Edgar Montero",SS,2006-11-21,"Baltimore Orioles",815911,"Oakland Athletics",13,40,24,40,,,2025-10-29T17:11:46
+91,3.25,3,25,"Kansas City Royals",614,"Ryan Bergert",P,2000-03-08,"Kansas City Royals",686701,"San Diego Padres",,,,,,,2025-10-29T18:52:04
+92,3.26,3,26,"Chicago Cubs",2237,"Sam Antonacci",IF,2003-02-06,"Chicago Cubs",803011,"Chicago White Sox",44,35,11,45,,,2025-10-30T13:14:59
+93,3.27,3,27,"Cleveland Guardians",1704,"J.D. Thompson",P,2003-09-28,"Cleveland Guardians",702505,"Milwaukee Brewers",12,45,14,45,,,2025-10-30T14:25:49
+94,3.28,3,28,"Tampa Bay Rays",4865,"Gabriel Davalillo",C,2007-11-06,"Tampa Bay Rays",829058,"Los Angeles Angels",20,40,11,45,,,2025-10-30T14:38:33
+95,3.29,3,29,"Houston Astros",3865,"Roldy Brito",3B,2007-04-08,"Houston Astros",821041,"Colorado Rockies",,,,,,,2025-10-30T16:02:16
+96,3.30,3,30,"Detroit Tigers",3101,"Anthony Eyanson",P,2004-10-09,"Detroit Tigers",809254,"Boston Red Sox",18,42,13,45,,,2025-10-30T16:22:41
+97,C3.01,3,31,"Chicago Cubs",3434,"Ethan Pecko",P,2002-08-25,"Chicago Cubs",814490,"Houston Astros",9,42,12,45,,,2025-10-30T17:28:56
+98,C3.02,3,32,"Detroit Tigers",3642,"Ryan Mitchell",OF,2007-01-21,"Detroit Tigers",815829,"St. Louis Cardinals",16,42,10,45,,,2025-10-30T18:08:38
+99,4.01,4,1,"Tampa Bay Rays",2675,"Nathan Flewelling",C,2006-11-11,"Tampa Bay Rays",807083,"Tampa Bay Rays",34,40,27,40,,,2025-10-30T18:11:02
+100,4.02,4,2,"Milwaukee Brewers",3536,"Nestor German",P,2002-02-26,"Milwaukee Brewers",815148,"Baltimore Orioles",9,45,14,45,,,2025-10-31T04:29:56
+101,4.03,4,3,"Texas Rangers",1699,"Mitch Voit",2B,2004-09-30,"Texas Rangers",702491,"New York Mets",13,40,9,45,,,2025-10-31T05:11:55
+102,4.04,4,4,"Washington Nationals",4838,"Briggs McKenzie",P,2006-10-11,"Washington Nationals",828987,"Atlanta Braves",29,37,5,50,,,2025-10-31T12:23:36
+103,4.05,4,5,"New York Yankees",1378,"Leandro Lopez",P,2002-06-17,"New York Yankees",699214,"Texas Rangers",51,35,30,40,,,2025-10-31T15:10:17
+104,4.06,4,6,"Pittsburgh Pirates",2314,"Braden Nett",P,2002-06-18,"Pittsburgh Pirates",804556,"San Diego Padres",10,42,4,50,,,2025-10-31T16:14:07
+105,4.07,4,7,"Minnesota Twins",4726,"Alec Blair",OF,2006-10-26,"Minnesota Twins",828231,zzz_amateur,,,,,,,2025-10-31T16:17:50
+106,4.08,4,8,"Seattle Mariners",4839,"Johnny Slawinski",P,2007-02-26,"Seattle Mariners",828989,"Los Angeles Angels",17,40,4,50,,,2025-10-31T16:31:05
+107,4.09,4,9,"Philadelphia Phillies",4867,"Deivid Coronil",SS,2007-10-04,"Philadelphia Phillies",829060,"San Diego Padres",6,42,9,45,,,2025-10-31T21:44:08
+108,4.10,4,10,"Atlanta Braves",1100,"T.J. Nichols",P,2002-06-24,"Atlanta Braves",694375,"Tampa Bay Rays",39,40,20,45,,,2025-10-31T20:54:08
+109,4.11,4,11,"Los Angeles Angels",4727,"Cooper Flemming",SS,2006-08-05,"Los Angeles Angels",828237,"Tampa Bay Rays",30,40,16,45,,,2025-10-31T21:11:59
+110,4.12,4,12,"Texas Rangers",2261,"Max Belyeu",OF,2003-12-15,"Texas Rangers",803284,"Colorado Rockies",29,40,7,50,,,2025-10-31T21:37:52
+111,4.13,4,13,"St. Louis Cardinals",3130,"Kaeden Kent",SS,2003-08-29,"St. Louis Cardinals",809763,"New York Yankees",14,40,12,40,,,2025-11-01T01:03:39
+112,4.14,4,14,"Arizona Diamondbacks",3552,"Keyner Martinez",P,2004-08-16,"Arizona Diamondbacks",815212,"San Francisco Giants",31,37,11,45,,,2025-11-01T01:14:44
+113,4.15,4,15,"Tampa Bay Rays",1929,"Wellington Aracena",P,2004-12-27,"Tampa Bay Rays",800286,"New York Mets",15,45,29,40,,,2025-11-01T01:18:42
+114,4.16,4,16,"Pittsburgh Pirates",3636,"Brady Ebel",SS,2007-07-25,"Pittsburgh Pirates",815816,"Milwaukee Brewers",27,40,11,45,,,2025-11-01T01:22:55
+115,4.17,4,17,"Boston Red Sox",207,"Jack Dreyer",P,1999-02-27,"Boston Red Sox",676263,"Los Angeles Dodgers",,,,,,,2025-11-01T03:39:31
+116,4.18,4,18,"Cincinnati Reds",4342,"Kane Kepley",OF,2004-02-14,"Cincinnati Reds",823807,"Chicago Cubs",18,40,12,45,,,2025-11-01T16:22:52
+117,4.19,4,19,"Oakland Athletics",1347,"Antwone Kelly",P,2003-09-01,"Oakland Athletics",699008,"Pittsburgh Pirates",,,,,,,2025-11-01T18:54:10
+118,4.20,4,20,"Texas Rangers",3643,"Dean Moss",OF,2006-04-17,"Texas Rangers",815830,"Tampa Bay Rays",25,42,14,45,,,2025-11-01T19:01:19
+119,4.21,4,21,"Los Angeles Dodgers",4732,"Cameron Appenzeller",P,2007-01-18,"Los Angeles Dodgers",828258,zzz_amateur,,,,,,,2025-11-01T20:52:53
+120,4.22,4,22,"Chicago White Sox",2906,"Jose Urbina",P,2005-11-02,"Chicago White Sox",808250,"Tampa Bay Rays",16,42,12,45,,,2025-11-01T21:10:30
+121,4.23,4,23,"Minnesota Twins",5034,"Darell Morel",SS,2007-09-15,"Minnesota Twins",829716,"Pittsburgh Pirates",27,40,16,45,,,2025-11-01T21:22:27
+122,4.24,4,24,"Colorado Rockies",3471,"Henry Ford",OF,2004-07-27,"Colorado Rockies",814822,zzz_amateur,,,,,,,2025-11-01T22:11:56
+123,4.25,4,25,"Kansas City Royals",5482,"Josh Owens",TWP,2007-01-08,"Kansas City Royals",831384,"Texas Rangers",13,42,9,45,,,2025-11-02T15:48:16
+124,4.26,4,26,"Chicago Cubs",4866,"Johan De Los Santos",SS,2008-07-24,"Chicago Cubs",829059,"Pittsburgh Pirates",23,42,,,,,2025-11-03T15:10:14
+125,4.27,4,27,"Cleveland Guardians",3196,"Jack Wenninger",P,2002-03-14,"Cleveland Guardians",811307,"New York Mets",14,40,13,45,,,2025-11-03T15:38:30
+126,4.28,4,28,"Texas Rangers",508,"Jesus Rodriguez",C,2002-04-23,"Texas Rangers",683679,"New York Yankees",9,42,16,45,,,2025-11-03T15:56:03
+127,4.29,4,29,"Houston Astros",2375,"Henry Godbout",SS,2003-11-06,"Houston Astros",804995,"Boston Red Sox",14,42,19,45,,,2025-11-03T16:58:44
+128,4.30,4,30,"Detroit Tigers",2540,"Dean Curley",SS,2004-04-15,"Detroit Tigers",806053,"Cleveland Guardians",32,40,10,45,,,2025-11-03T17:04:54
+129,C4.01,4,31,"Detroit Tigers",1840,"Brandon Compton",OF,2003-10-27,"Detroit Tigers",703680,"Miami Marlins",35,40,13,45,,,2025-11-03T17:05:03
+130,5.01,5,1,"Toronto Blue Jays",4557,"Ronny Cruz",SS,2006-08-24,"Toronto Blue Jays",826723,"Washington Nationals",14,42,17,45,,,2025-11-03T22:56:27
+131,5.02,5,2,"Milwaukee Brewers",2559,"Alfonsin Rosario",OF,2004-06-21,"Milwaukee Brewers",806210,"Chicago Cubs",31,40,12,45,,,2025-11-04T04:54:03
+132,5.03,5,3,"Toronto Blue Jays",801,"Braxton Bragg",P,2000-10-28,"Toronto Blue Jays",688867,"Baltimore Orioles",10,45,15,45,,,2025-11-04T05:09:34
+133,5.04,5,4,"Washington Nationals",5102,"Miguel Hernandez",SS,2008-06-02,"Washington Nationals",829791,"St. Louis Cardinals",,,,,,,2025-11-04T15:14:03
+134,5.05,5,5,"New York Yankees",5350,"Aaron Walton",OF,2004-05-14,"New York Yankees",830239,"Cleveland Guardians",38,40,19,40,,,2025-11-04T17:01:02
+135,5.06,5,6,"Pittsburgh Pirates",3685,"Coy James",SS,2007-02-16,"Pittsburgh Pirates",815983,"Washington Nationals",15,42,9,45,,,2025-11-04T17:06:29
+136,5.07,5,7,"Minnesota Twins",4815,"Taitn Gray",C,2007-08-16,"Minnesota Twins",828685,"Tampa Bay Rays",22,42,26,40,,,2025-11-04T17:08:36
+137,5.08,5,8,"Seattle Mariners",4864,"Cristopher Polanco",SS,2008-01-03,"Seattle Mariners",829057,"Toronto Blue Jays",6,45,,,,,2025-11-04T18:01:13
+138,5.09,5,9,"Philadelphia Phillies",2432,"Cade Obermueller",P,2003-07-28,"Philadelphia Phillies",805261,"Philadelphia Phillies",21,40,7,50,,,2025-11-04T19:18:31
+139,5.10,5,10,"Atlanta Braves",2631,"Sheng-En Lin",SS,2005-09-01,"Atlanta Braves",806823,"Cincinnati Reds",14,42,14,45,,,2025-11-04T19:22:34
+140,5.11,5,11,"Los Angeles Angels",5658,"Ryan Wideman",OF,2003-11-04,"Los Angeles Angels",834240,"San Diego Padres",,,13,40,,,2025-11-04T19:42:21
+141,5.12,5,12,"New York Mets",749,"Bryan King",P,1996-11-05,"New York Mets",687911,"Houston Astros",,,,,,,2025-11-04T19:56:16
+142,5.13,5,13,"St. Louis Cardinals",4878,"Warren Calcaño",SS,2007-10-17,"St. Louis Cardinals",829071,"Kansas City Royals",17,40,17,40,,,2025-11-04T20:07:23
+143,5.14,5,14,"Arizona Diamondbacks",4751,"Dean Livingston",P,2006-09-07,"Arizona Diamondbacks",828344,"Arizona Diamondbacks",,,16,45,,,2025-11-04T20:11:51
+144,5.15,5,15,"Baltimore Orioles",4673,"Wei-En Lin",P,2005-11-04,"Baltimore Orioles",827734,Athletics,,,20,40,,,2025-11-04T20:49:43
+145,5.16,5,16,"Cleveland Guardians",5667,"Jake Cook",OF,2003-07-13,"Cleveland Guardians",834404,"Toronto Blue Jays",24,40,11,45,,,2025-11-05T02:20:07
+146,5.17,5,17,"Boston Red Sox",5128,"Juan Tomas",SS,2007-11-28,"Boston Red Sox",829823,"Chicago Cubs",12,42,16,45,,,2025-11-05T03:52:18
+147,5.18,5,18,"Cincinnati Reds",2363,"Gage Stanifer",P,2003-11-18,"Cincinnati Reds",804948,"Toronto Blue Jays",,,6,45,,,2025-11-05T16:11:13
+148,5.19,5,19,"Oakland Athletics",1742,"Korbyn Dickerson",OF,2003-10-30,"Oakland Athletics",702668,"Seattle Mariners",17,40,17,45,,,2025-11-05T17:43:09
+149,5.20,5,20,"San Diego Padres",2309,"Joseph Dzierwa",P,2004-04-21,"San Diego Padres",804530,"Baltimore Orioles",32,40,16,45,,,2025-11-05T20:27:52
+150,5.21,5,21,"Los Angeles Dodgers",4880,"Brailyn Antunez",OF,2007-11-30,"Los Angeles Dodgers",829073,"Milwaukee Brewers",26,40,22,45,,,2025-11-05T20:57:20
+151,5.22,5,22,"Los Angeles Angels",4184,"A.J. Causey",P,2002-11-19,"Los Angeles Angels",822067,"Kansas City Royals",33,37,,,,,2025-11-05T21:01:25
+152,5.23,5,23,"St. Louis Cardinals",1718,"Mason Morris",P,2003-08-21,"St. Louis Cardinals",702568,"Cincinnati Reds",12,42,15,45,,,2025-11-06T10:57:42
+153,5.24,5,24,"Texas Rangers",966,"Henry Baez",P,2002-10-12,"Texas Rangers",692013,"San Diego Padres",25,37,8,45,,,2025-11-06T15:43:29
+154,5.25,5,25,"Kansas City Royals",2360,"Cam Leiter",P,2004-01-28,"Kansas City Royals",804942,"Los Angeles Dodgers",35,40,22,40,,,2025-11-06T15:44:58
+155,5.26,5,26,"Houston Astros",1388,"Jose Olivares",P,2003-01-18,"Houston Astros",699276,"Minnesota Twins",16,45,24,45,,,2025-11-06T17:38:03
+156,5.27,5,27,"Minnesota Twins",3604,"Brendan Tunink",OF,2005-10-02,"Minnesota Twins",815665,"Los Angeles Dodgers",62,35,19,45,,,2025-11-06T17:46:44
+157,5.28,5,28,"Cleveland Guardians",4218,"JB Middleton",P,2003-11-24,"Cleveland Guardians",822477,"Colorado Rockies",23,40,6,50,,,2025-11-06T17:50:09
+158,5.29,5,29,"Kansas City Royals",3640,"Josiah Hartshorn",OF,2007-02-02,"Kansas City Royals",815824,"Chicago Cubs",13,40,15,45,,,2025-11-06T19:44:41
+159,5.30,5,30,"Kansas City Royals",3647,"Zach Strickland",P,2006-06-25,"Kansas City Royals",815837,zzz_amateur,,,,,,,2025-11-06T21:58:17
+160,6.01,6,1,"Tampa Bay Rays",4289,"Yhoiker Fajardo",P,2006-10-03,"Tampa Bay Rays",823369,"Chicago White Sox",33,37,25,40,,,2025-11-06T21:59:24
+161,6.02,6,2,"Milwaukee Brewers",3320,"Joseph Sullivan",OF,2002-07-01,"Milwaukee Brewers",813896,"Houston Astros",12,42,6,45,,,2025-11-07T04:56:21
+162,6.03,6,3,"Texas Rangers",4638,"Kyle Lodise",SS,2003-10-17,"Texas Rangers",827517,"Chicago White Sox",17,40,9,45,,,2025-11-07T05:27:47
+163,6.04,6,4,"Washington Nationals",5079,"Santiago Castellanos",P,2008-07-17,"Washington Nationals",829764,"Minnesota Twins",38,40,,,,,2025-11-07T15:19:53
+164,6.05,6,5,"New York Yankees",3414,"Ryan Galanie",3B,2000-06-20,"New York Yankees",814436,"Chicago White Sox",,,,,,,2025-11-07T17:02:59
+165,6.06,6,6,"Pittsburgh Pirates",2394,"Yunior Marte",P,2003-08-09,"Pittsburgh Pirates",805074,"Kansas City Royals",13,42,27,40,,,2025-11-07T17:13:24
+166,6.07,6,7,"Minnesota Twins",4851,"Wilfri De La Cruz",SS,2007-09-15,"Minnesota Twins",829043,"Baltimore Orioles",38,40,24,40,,,2025-11-07T17:21:30
+167,6.08,6,8,"Seattle Mariners",4995,"Colin Yeaman",SS,2004-04-15,"Seattle Mariners",829649,"Baltimore Orioles",17,45,17,45,,,2025-11-07T18:25:53
+168,6.09,6,9,"Philadelphia Phillies",1192,"Alimber Santa",P,2003-05-03,"Philadelphia Phillies",695001,"Houston Astros",10,42,13,45,,,2025-11-07T22:07:10
+169,6.10,6,10,"Atlanta Braves",4712,"Conor Essenburg",OF,2006-09-18,"Atlanta Braves",828148,"Atlanta Braves",30,37,10,45,,,2025-11-07T22:08:18
+170,6.11,6,11,"Los Angeles Angels",2104,"Chris Suero",C,2004-01-27,"Los Angeles Angels",801523,"New York Mets",17,40,15,40,,,2025-11-07T22:11:18
+171,6.12,6,12,"New York Mets",993,"Parks Harber",3B,2001-09-25,"New York Mets",692238,"New York Yankees",62,35,,,,,2025-11-08T04:16:07
+172,6.13,6,13,"St. Louis Cardinals",3279,"Michael Lombardi",P,2003-09-20,"St. Louis Cardinals",813533,"Kansas City Royals",24,40,15,45,,,2025-11-08T14:11:36
+173,6.14,6,14,"Arizona Diamondbacks",4898,"Sadbiel Delzine",P,2008-01-09,"Arizona Diamondbacks",829094,"Boston Red Sox",17,42,24,40,,,2025-11-08T15:00:06
+174,6.15,6,15,"Baltimore Orioles",1028,"Omar Alfonzo",C,2003-08-03,"Baltimore Orioles",692657,"Pittsburgh Pirates",12,42,19,40,,,2025-11-08T15:34:17
+175,6.16,6,16,"Milwaukee Brewers",3436,"Will Watson",P,2002-11-07,"Milwaukee Brewers",814492,"New York Mets",12,42,11,45,,,2025-11-08T17:06:42
+176,6.17,6,17,"Boston Red Sox",5063,"Daniel Hernandez",C,2008-02-16,"Boston Red Sox",829747,"Washington Nationals",13,42,24,40,,,2025-11-08T17:17:15
+177,6.18,6,18,"Cincinnati Reds",5017,"Marconi German",SS,2007-09-09,"Cincinnati Reds",829699,"Washington Nationals",26,40,27,40,,,2025-11-08T17:28:39
+178,6.19,6,19,"Oakland Athletics",1948,"Sean Paul Liñan",P,2004-11-07,"Oakland Athletics",800344,"Los Angeles Dodgers",18,40,15,45,,,2025-11-08T19:09:56
+179,6.20,6,20,"San Diego Padres",1667,"Nolan Schubart",OF,2004-05-10,"San Diego Padres",702278,"Cleveland Guardians",51,37,27,40,,,2025-11-08T20:32:06
+180,6.21,6,21,"Los Angeles Dodgers",5562,"Kaleb Wing",P,2007-01-12,"Los Angeles Dodgers",832453,"Chicago Cubs",36,37,13,45,,,2025-11-08T21:47:46
+181,6.22,6,22,"Chicago White Sox",2124,"Liomar Martinez",P,2005-06-25,"Chicago White Sox",801737,"Miami Marlins",,,29,40,,,2025-11-09T21:53:46
+182,6.23,6,23,"Toronto Blue Jays",4997,"Shotaro Morii",SS,2006-12-15,"Toronto Blue Jays",829679,Athletics,15,40,22,40,,,2025-11-09T21:58:32
+183,6.24,6,24,"Toronto Blue Jays",3292,"Khadim Diaw",C,2003-08-23,"Toronto Blue Jays",813715,"Minnesota Twins",29,40,22,45,,,2025-11-09T22:00:20
+184,6.25,6,25,"Milwaukee Brewers",4707,"Miguel Sime Jr.",P,2007-05-08,"Milwaukee Brewers",828137,"Washington Nationals",32,37,16,45,,,2025-11-10T04:47:53
+185,6.26,6,26,"Chicago Cubs",3545,"Wilder Dalis",SS,2006-07-30,"Chicago Cubs",815195,"Colorado Rockies",51,35,,,,,2025-11-10T18:30:59
+186,6.27,6,27,"Cleveland Guardians",1092,"Matt Svanson",P,1999-01-31,"Cleveland Guardians",694335,"St. Louis Cardinals",34,37,,,,,2025-11-10T18:35:58
+187,6.28,6,28,"San Francisco Giants",3702,"Brock Sell",OF,2006-10-27,"San Francisco Giants",816109,zzz_amateur,,,,,,,2025-11-10T19:16:49
+188,6.29,6,29,"San Diego Padres",5159,"Luis Arana",SS,2008-03-19,"San Diego Padres",829854,"Miami Marlins",72,35,,,,,2025-11-10T19:36:15
+189,6.30,6,30,"Detroit Tigers",4297,"Daniel Dickinson",SS,2003-12-05,"Detroit Tigers",823658,"Milwaukee Brewers",24,40,23,40,,,2025-11-10T19:48:53
+190,7.01,7,1,"Toronto Blue Jays",4848,"Juan Cabada",SS,2008-04-30,"Toronto Blue Jays",829040,"Chicago Cubs",21,40,14,45,,,2025-11-10T19:58:51
+191,7.02,7,2,"Milwaukee Brewers",4179,"River Hamilton",P,2006-10-04,"Milwaukee Brewers",821932,"Detroit Tigers",27,40,25,40,,,2025-11-11T04:00:08
+192,7.03,7,3,"Texas Rangers",3286,"Jack Gurevitch",1B,2004-03-09,"Texas Rangers",813668,"St. Louis Cardinals",15,42,20,40,,,2025-11-11T04:35:49
+193,7.04,7,4,"Washington Nationals",5425,"Freddy Contreras",P,2008-08-10,"Washington Nationals",830469,"Kansas City Royals",,,,,,,2025-11-11T17:00:22
+194,7.05,7,5,"New York Yankees",2673,"Will Hynes",P,2007-07-07,"New York Yankees",807077,"Cleveland Guardians",44,37,25,40,,,2025-11-11T17:00:23
+195,7.06,7,6,"Pittsburgh Pirates",4912,"Ty Harvey",C,2006-07-28,"Pittsburgh Pirates",829210,"San Diego Padres",18,37,12,40,,,2025-11-11T17:25:14
+196,7.07,7,7,"Minnesota Twins",1703,"Eli Serrano III",OF,2003-05-01,"Minnesota Twins",702501,"New York Mets",10,42,12,40,,,2025-11-11T17:32:39
+197,7.08,7,8,"Seattle Mariners",1732,"Griffin Herring",P,2003-05-07,"Seattle Mariners",702622,"Colorado Rockies",20,40,9,45,,,2025-11-12T22:58:41
+198,7.09,7,9,"Philadelphia Phillies",1717,"Austin Overn",OF,2003-05-10,"Philadelphia Phillies",702556,"Baltimore Orioles",23,42,30,40,,,2025-11-11T21:30:45
+199,7.10,7,10,"Atlanta Braves",4423,"Tyson Hardin",P,2001-11-19,"Atlanta Braves",824620,"Milwaukee Brewers",18,42,20,45,,,2025-11-11T22:36:52
+200,7.11,7,11,"Los Angeles Angels",1333,"Yasmil Bucce",C,2004-08-13,"Los Angeles Angels",698935,"Baltimore Orioles",,,,,,,2025-11-12T01:16:09
+201,7.12,7,12,"New York Mets",2315,"Raudi Rodriguez",OF,2003-07-07,"New York Mets",804558,"Los Angeles Angels",,,,,,,2025-11-12T02:43:44
+202,7.13,7,13,"St. Louis Cardinals",765,"David Morgan",P,1999-10-26,"St. Louis Cardinals",688158,"San Diego Padres",,,,,,,2025-11-12T11:41:11
+203,7.14,7,14,"Arizona Diamondbacks",3229,"Landyn Vidourek",OF,2003-11-06,"Arizona Diamondbacks",811716,"Los Angeles Dodgers",39,37,,,,,2025-11-12T12:22:41
+204,7.15,7,15,"Baltimore Orioles",1672,"RJ Schreck",LF,2000-07-12,"Baltimore Orioles",702302,"Toronto Blue Jays",9,42,10,40,,,2025-11-12T16:45:07
+205,7.16,7,16,"Detroit Tigers",5599,"Uli Fernsler",P,2007-08-01,"Detroit Tigers",832725,zzz_amateur,,,,,,,2025-11-12T16:46:18
+206,7.17,7,17,"Boston Red Sox",167,"Jordan Leasure",P,1998-08-15,"Boston Red Sox",673929,"Chicago White Sox",,,,,,,2025-11-12T18:31:23
+207,7.18,7,18,"Cincinnati Reds",4774,"Ethan Dorchies",P,2006-10-22,"Cincinnati Reds",828475,"Milwaukee Brewers",57,35,21,45,,,2025-11-12T18:36:06
+208,7.19,7,19,"Oakland Athletics",1923,"Manolfi Jimenez",OF,2004-11-14,"Oakland Athletics",800272,"Philadelphia Phillies",,,,,,,2025-11-12T21:38:02
+209,7.20,7,20,"Texas Rangers",2487,"Keaton Anthony",OF,2001-06-24,"Texas Rangers",805704,"Philadelphia Phillies",43,35,15,45,,,2025-11-12T21:50:58
+210,7.21,7,21,"Los Angeles Dodgers",3527,"Tanner Franklin",P,2004-05-25,"Los Angeles Dodgers",815119,"St. Louis Cardinals",40,37,19,40,,,2025-11-12T21:52:02
+211,7.22,7,22,"Chicago White Sox",3939,"Handelfry Encarnacion",OF,2007-06-08,"Chicago White Sox",821136,"Milwaukee Brewers",,,,,,,2025-11-13T03:03:58
+212,7.23,7,23,"San Diego Padres",1580,"Nathan Church",LF,2000-07-12,"San Diego Padres",701675,"St. Louis Cardinals",39,37,14,45,,,2025-11-13T20:00:49
+213,7.24,7,24,"Colorado Rockies",4718,"Jack Lafflam",P,2006-10-06,"Colorado Rockies",828177,zzz_amateur,,,,,,,2025-11-13T17:07:50
+214,7.25,7,25,"Tampa Bay Rays",1300,"Wilber Dotel",P,2002-09-25,"Tampa Bay Rays",696062,"Pittsburgh Pirates",59,35,28,40,,,2025-11-13T17:07:50
+215,7.26,7,26,"Chicago Cubs",3784,"Stharlin Torres",P,2006-06-19,"Chicago Cubs",820941,"Cincinnati Reds",,,,,,,2025-11-13T17:20:25
+216,7.27,7,27,"St. Louis Cardinals",3867,"Richard Matic",3B,2007-07-26,"St. Louis Cardinals",821043,"New York Yankees",27,37,,,,,2025-11-13T17:40:40
+217,7.28,7,28,"San Francisco Giants",4717,"Brock Ketelsen",OF,2007-07-21,"San Francisco Giants",828176,zzz_amateur,,,,,,,2025-11-13T20:01:51
+218,7.29,7,29,"Houston Astros",410,"Kody Funderburk",P,1996-11-27,"Houston Astros",681892,"Minnesota Twins",,,,,,,2025-11-13T21:16:35
+219,7.30,7,30,"Detroit Tigers",3686,"Brayden Jaksa",C,2007-01-26,"Detroit Tigers",815984,zzz_amateur,,,,,,,2025-11-13T21:38:08
+220,8.01,8,1,"San Diego Padres",5058,"Sebastian Dos Santos",SS,2008-01-29,"San Diego Padres",829741,"St. Louis Cardinals",,,,,,,2025-11-13T23:04:43
+221,8.02,8,2,"Milwaukee Brewers",3331,"Talon Haley",P,2006-01-22,"Milwaukee Brewers",813989,"Los Angeles Angels",28,37,12,45,,,2025-11-14T05:00:50
+222,8.03,8,3,"Texas Rangers",192,"Juan Mejia",P,2000-07-04,"Texas Rangers",675848,"Colorado Rockies",,,,,,,2025-11-14T14:46:20
+223,8.04,8,4,"Washington Nationals",248,"Pete Hansen",P,2000-07-28,"Washington Nationals",677337,"St. Louis Cardinals",10,45,,,,,2025-11-14T17:00:14
+224,8.05,8,5,"New York Yankees",4870,"Jhoan De La Cruz",SS,2007-11-16,"New York Yankees",829063,"San Diego Padres",12,40,16,40,,,2025-11-14T17:00:15
+225,8.06,8,6,"Pittsburgh Pirates",822,"Anthony Nunez",P,2001-07-10,"Pittsburgh Pirates",689296,"New York Mets",30,42,,,,,2025-11-14T18:08:08
+226,8.07,8,7,"Minnesota Twins",3446,"Patrick Copen",P,2002-02-15,"Minnesota Twins",814527,"Los Angeles Dodgers",20,42,17,45,,,2025-11-14T18:18:12
+227,8.08,8,8,"Seattle Mariners",3077,"Bryan Balzer",P,2004-10-27,"Seattle Mariners",808893,"San Diego Padres",11,40,15,40,,,2025-11-17T22:20:52
+228,8.09,8,9,"Philadelphia Phillies",4703,"Gustavo Melendez",SS,2007-10-20,"Philadelphia Phillies",828116,"Pittsburgh Pirates",22,42,26,40,,,2025-11-14T22:02:05
+229,8.10,8,10,"Atlanta Braves",5213,"Raudy Reyes",P,2008-08-22,"Atlanta Braves",829909,"Atlanta Braves",13,42,,,,,2025-11-14T22:12:04
+230,8.11,8,11,"Los Angeles Angels",3687,"Ty Peeples",OF,2006-10-17,"Los Angeles Angels",815985,zzz_amateur,,,,,,,2025-11-14T23:32:13
+231,8.12,8,12,"New York Mets",2135,"James Hicks",P,2001-05-09,"New York Mets",801802,"Houston Astros",24,37,26,40,,,2025-11-15T13:16:53
+232,8.13,8,13,"St. Louis Cardinals",5992,"Wyatt Nadeau",P,2006-09-11,"St. Louis Cardinals",,zzz_amateur,,,,,,,2025-11-15T13:46:15
+233,8.14,8,14,"Arizona Diamondbacks",5355,"Adrian Torres",P,2008-01-23,"Arizona Diamondbacks",830397,"Los Angeles Dodgers",62,35,,,,,2025-11-15T14:41:50
+234,8.15,8,15,"Tampa Bay Rays",4684,"Frank Cairone",P,2007-09-14,"Tampa Bay Rays",827980,"Milwaukee Brewers",28,40,26,40,,,2025-11-15T15:22:17
+235,8.16,8,16,"San Diego Padres",4550,"Brian Curley",P,2003-06-01,"San Diego Padres",826536,"Arizona Diamondbacks",29,40,17,45,,,2025-11-15T17:32:06
+236,8.17,8,17,"Boston Red Sox",200,"Janson Junk",P,1996-01-15,"Boston Red Sox",676083,"Oakland Athletics",,,,,,,2025-11-15T19:59:16
+237,8.18,8,18,"Cincinnati Reds",4108,"Cristian Arguelles",OF,2007-06-30,"Cincinnati Reds",821692,"Colorado Rockies",51,35,,,,,2025-11-15T20:09:49
+238,8.19,8,19,"Oakland Athletics",2983,"Kelvis Salcedo",P,2006-01-23,"Oakland Athletics",808383,"Detroit Tigers",20,40,29,40,,,2025-11-15T21:17:03
+239,8.20,8,20,"San Diego Padres",5067,"Angel De Los Santos",SS,2008-03-03,"San Diego Padres",829751,"Detroit Tigers",,,,,,,2025-11-15T22:33:11
+240,8.21,8,21,"Los Angeles Dodgers",4900,"Ramcell Medina",SS,2007-11-13,"Los Angeles Dodgers",829096,"Kansas City Royals",46,35,19,40,,,2025-11-15T23:40:09
+241,8.22,8,22,"Chicago White Sox",3596,"Marcos Paz",P,2006-11-20,"Chicago White Sox",815602,zzz_amateur,,,,,,,2025-11-17T02:17:41
+242,8.23,8,23,"Minnesota Twins",2202,"Malachi Witherspoon",P,2004-08-12,"Minnesota Twins",802412,"Detroit Tigers",26,40,12,45,,,2025-11-17T03:01:14
+243,8.24,8,24,"Colorado Rockies",2358,"Austin Peterson",P,1999-09-19,"Colorado Rockies",804926,"Cleveland Guardians",17,42,30,40,,,2025-11-17T08:31:50
+244,8.25,8,25,"Kansas City Royals",4710,"Aidan West",SS,2007-04-24,"Kansas City Royals",828140,"Los Angeles Dodgers",38,37,29,40,,,2025-11-17T14:49:00
+245,8.26,8,26,"Chicago Cubs",3234,"Deniel Ortiz",3B,2004-08-24,"Chicago Cubs",811765,"St. Louis Cardinals",,,23,40,,,2025-11-17T15:22:44
+246,8.27,8,27,"Toronto Blue Jays",3149,"Jakob Wright",P,2003-05-30,"Toronto Blue Jays",809915,"Los Angeles Dodgers",28,40,28,40,,,2025-11-17T19:17:18
+247,8.28,8,28,"San Francisco Giants",3646,"Jacob Parker",OF,2006-08-08,"San Francisco Giants",815834,zzz_amateur,,,,,,,2025-11-17T20:18:14
+248,8.29,8,29,"Houston Astros",3246,"Marlon Nieves",P,2005-06-10,"Houston Astros",812363,"Los Angeles Dodgers",34,40,,,,,2025-11-17T20:59:06
+249,8.30,8,30,"Detroit Tigers",1747,"Easton Carmichael",C,2003-11-03,"Detroit Tigers",702695,"Pittsburgh Pirates",35,40,20,45,,,2025-11-17T21:05:13
+250,9.01,9,1,"Tampa Bay Rays",4193,"Carlos De La Rosa",P,2007-11-30,"Tampa Bay Rays",822215,"San Francisco Giants",62,35,26,40,,,2025-11-17T21:10:18
+251,9.02,9,2,"Milwaukee Brewers",1159,"Josh Ekness",P,2002-02-07,"Milwaukee Brewers",694795,"Miami Marlins",18,42,21,40,,,2025-11-18T04:31:39
+252,9.03,9,3,"San Francisco Giants",3701,"Mason Pike",P,2006-08-28,"San Francisco Giants",816107,zzz_amateur,,,,,,,2025-11-18T14:04:23
+253,9.04,9,4,"Washington Nationals",775,"Zach Fruit",P,2000-04-12,"Washington Nationals",688396,"Baltimore Orioles",14,45,,,,,2025-11-18T17:00:35
+254,9.05,9,5,"New York Yankees",2815,"Jostin Florentino",P,2004-12-01,"New York Yankees",808062,"Chicago Cubs",,,,,,,2025-11-18T17:00:35
+255,9.06,9,6,"Pittsburgh Pirates",4795,"Blaine Bullard",OF,2006-08-16,"Pittsburgh Pirates",828557,"Toronto Blue Jays",,,15,45,,,2025-11-18T17:06:11
+256,9.07,9,7,"Chicago White Sox",4689,"William Patrick",OF,2006-06-11,"Chicago White Sox",828065,zzz_amateur,,,,,,,2025-11-18T18:45:44
+257,9.08,9,8,"Seattle Mariners",4849,"Mani Cedeno",SS,2008-08-14,"Seattle Mariners",829041,"New York Yankees",36,37,21,40,,,2025-11-18T18:54:45
+258,9.09,9,9,"Philadelphia Phillies",4142,"Argenis Cayama",P,2006-09-15,"Philadelphia Phillies",821783,"San Francisco Giants",32,37,10,45,,,2025-11-19T22:39:23
+259,9.10,9,10,"Atlanta Braves",4852,"Maykel Coret",OF,2007-09-24,"Atlanta Braves",829044,"Tampa Bay Rays",35,40,,,,,2025-11-18T23:27:20
+260,9.11,9,11,"Los Angeles Angels",4503,"Angel Salio",SS,2008-02-16,"Los Angeles Angels",825620,"Cincinnati Reds",,,,,,,2025-11-18T23:46:28
+261,9.12,9,12,"New York Mets",3305,"Will Bush",C,2004-03-04,"New York Mets",813844,"Houston Astros",30,37,18,40,,,2025-11-19T13:59:45
+262,9.13,9,13,"Toronto Blue Jays",5665,"Mason Ligenza",OF,2007-01-15,"Toronto Blue Jays",834397,zzz_amateur,,,,,,,2025-11-19T14:29:12
+263,9.14,9,14,"Arizona Diamondbacks",5009,"Pedro Montero",P,2007-07-11,"Arizona Diamondbacks",829691,"Miami Marlins",43,37,,,,,2025-11-19T14:30:28
+264,9.15,9,15,"Baltimore Orioles",3556,"Luis De La Torre",P,2003-09-06,"Baltimore Orioles",815219,"San Francisco Giants",26,40,25,40,,,2025-11-19T16:22:39
+265,9.16,9,16,"Kansas City Royals",5377,"Ruben Castillo",OF,2008-01-04,"Kansas City Royals",830419,"New York Yankees",12,42,,,,,2025-11-19T17:23:15
+266,9.17,9,17,"Boston Red Sox",3829,"Dexters Peralta",SS,2007-07-11,"Boston Red Sox",820996,"New York Yankees",11,42,,,,,2025-11-19T18:44:47
+267,9.18,9,18,"Cincinnati Reds",3271,"Dylan Jordan",P,2005-10-15,"Cincinnati Reds",813335,"Los Angeles Angels",16,40,16,40,,,2025-11-19T18:57:54
+268,9.19,9,19,"Oakland Athletics",63,"Nathan Lukes",RF,1994-07-12,"Oakland Athletics",664770,"Toronto Blue Jays",,,,,,,2025-11-19T19:46:17
+269,9.20,9,20,"Baltimore Orioles",2636,"Carlos Gutierrez",OF,2004-08-22,"Baltimore Orioles",806872,"San Francisco Giants",34,37,21,40,,,2025-11-19T20:49:04
+270,9.21,9,21,"Los Angeles Dodgers",3601,"Carson Brumbaugh",SS,2006-09-20,"Los Angeles Dodgers",815630,zzz_amateur,,,,,,,2025-11-19T20:51:33
+271,9.22,9,22,"Cincinnati Reds",1538,"Zach Ehrhard",OF,2003-01-21,"Cincinnati Reds",701394,"Boston Red Sox",31,40,27,40,,,2025-11-19T22:53:53
+272,9.23,9,23,"Tampa Bay Rays",4858,"Liberts Aponte",SS,2007-11-08,"Tampa Bay Rays",829051,"Cincinnati Reds",36,37,19,40,,,2025-11-19T22:55:05
+273,9.24,9,24,"Colorado Rockies",2027,"Ben Jacobs",P,2004-06-11,"Colorado Rockies",800624,"Detroit Tigers",17,40,19,40,,,2025-11-20T07:23:24
+274,9.25,9,25,"Kansas City Royals",3950,"Enddy Azocar",OF,2007-02-24,"Kansas City Royals",821150,"Boston Red Sox",31,37,29,40,,,2025-11-20T13:05:41
+275,9.26,9,26,"Chicago Cubs",1625,"Trevor Cohen",OF,2003-10-29,"Chicago Cubs",701906,"San Francisco Giants",,,22,40,,,2025-11-20T14:31:11
+276,9.27,9,27,"Miami Marlins",4451,"Nick Dumesnil",OF,2004-03-27,"Miami Marlins",825094,"Detroit Tigers",,,24,40,,,2025-11-20T15:09:04
+277,9.28,9,28,"San Francisco Giants",4724,"Nico Partida",SS,2006-11-06,"San Francisco Giants",828223,zzz_amateur,,,,,,,2025-11-20T23:22:10
+278,9.29,9,29,"Houston Astros",2255,"Eliazar Dishmey",P,2004-10-25,"Houston Astros",803244,"Miami Marlins",,,,,,,2025-11-20T21:38:49
+279,9.30,9,30,"Detroit Tigers",1832,"Max Williams",OF,2004-08-18,"Detroit Tigers",703637,"Miami Marlins",50,37,,,,,2025-11-20T21:47:45
+280,10.01,10,1,"San Diego Padres",5585,"Matt Barr",P,2006-01-16,"San Diego Padres",832699,"Minnesota Twins",39,37,23,45,,,2025-11-20T23:22:10
+281,10.02,10,2,"Milwaukee Brewers",2511,"Joel Hurtado",P,2001-02-06,"Milwaukee Brewers",805871,"Los Angeles Angels",9,42,22,40,,,2025-11-21T04:39:14
+282,10.03,10,3,"Miami Marlins",1051,"Spencer Miles",P,2000-07-26,"Miami Marlins",693686,"San Francisco Giants",51,37,,,,,2025-11-21T08:46:38
+283,10.04,10,4,"Washington Nationals",4922,"Aiden Stillman",P,2006-12-14,"Washington Nationals",829305,zzz_amateur,,,,,,,2025-11-21T16:01:31
+284,10.05,10,5,"Miami Marlins",2550,"Kyle Henley",OF,2004-12-15,"Miami Marlins",806120,"Cincinnati Reds",37,37,,,,,2025-11-21T17:01:12
+285,10.06,10,6,"Pittsburgh Pirates",4697,"Peter Kussow",P,2006-12-08,"Pittsburgh Pirates",828097,"New York Mets",33,37,27,40,,,2025-11-21T17:35:08
+286,10.07,10,7,"Colorado Rockies",1531,"Chris Arroyo",1B,2004-09-17,"Colorado Rockies",701360,"Miami Marlins",22,42,,,,,2025-11-21T19:35:46
+287,10.08,10,8,"Seattle Mariners",2840,"Andruw Musett",C,2005-11-21,"Seattle Mariners",808104,"Boston Red Sox",15,42,,,,,2025-11-21T20:03:15
+288,10.09,10,9,"Miami Marlins",816,"Owen Ayers",C,2001-06-07,"Miami Marlins",689196,"Chicago Cubs",,,,,,,2025-11-21T20:28:40
+289,10.10,10,10,"Atlanta Braves",698,"Brent Headrick",P,1997-12-17,"Atlanta Braves",687396,"Minnesota Twins",,,,,,,2025-11-21T22:37:22
+290,10.11,10,11,"Los Angeles Angels",1582,"Braedon Karpathios",OF,2003-06-19,"Los Angeles Angels",701682,"San Diego Padres",39,35,29,40,,,2025-11-21T23:03:25
+291,10.12,10,12,"New York Mets",3688,"Tim Piasentin",3B,2007-03-25,"New York Mets",815992,"Toronto Blue Jays",,,21,40,,,2025-11-22T04:06:00
+292,10.13,10,13,"Miami Marlins",4595,"Ramon Marquez",P,2005-09-19,"Miami Marlins",827408,"Philadelphia Phillies",,,26,40,,,2025-11-22T11:01:15
+293,10.14,10,14,"Arizona Diamondbacks",975,"José Rodríguez",P,2001-07-18,"Arizona Diamondbacks",692064,"Los Angeles Dodgers",19,42,,,,,2025-11-22T12:22:56
+294,10.15,10,15,"Minnesota Twins",855,"Andrew Walters",P,2000-12-08,"Minnesota Twins",689958,"Cleveland Guardians",21,42,20,40,,,2025-11-22T17:05:23
+295,10.16,10,16,"San Francisco Giants",4303,"Ramiro Dominguez",IF,2007-03-26,"San Francisco Giants",823719,"Minnesota Twins",,,,,,,2025-11-25T00:08:11
+296,10.17,10,17,"Boston Red Sox",5584,"Cameron Millar",P,2007-05-05,"Boston Red Sox",832698,"Kansas City Royals",31,37,30,40,,,2025-11-22T20:04:49
+297,10.18,10,18,"Cincinnati Reds",550,"Andrew Saalfrank",P,1997-08-18,"Cincinnati Reds",685314,"Arizona Diamondbacks",57,37,,,,,2025-11-22T21:20:22
+298,10.19,10,19,"Oakland Athletics",2655,"Angel Cepeda",SS,2005-10-29,"Oakland Athletics",806980,"Chicago Cubs",46,35,24,40,,,2025-11-22T21:26:37
+299,10.20,10,20,"Los Angeles Dodgers",4868,"Haritzon Castillo",SS,2008-03-23,"Los Angeles Dodgers",829061,"Minnesota Twins",25,40,,,,,2025-11-22T21:41:25
+300,10.21,10,21,"Los Angeles Dodgers",4884,"Kenly Hunter",OF,2008-05-09,"Los Angeles Dodgers",829077,"St. Louis Cardinals",59,35,29,40,,,2025-11-22T21:43:12
+301,10.22,10,22,"Chicago White Sox",5634,"James Quinn-Irons",OF,2003-06-28,"Chicago White Sox",833397,"Tampa Bay Rays",40,40,,,,,2025-11-24T00:16:05
+302,10.23,10,23,"Kansas City Royals",2201,"JT Quinn",P,2004-04-22,"Kansas City Royals",802411,"Baltimore Orioles",54,37,28,40,,,2025-11-24T00:33:30
+303,10.24,10,24,"Colorado Rockies",3067,"Andrew Sears",P,2002-08-30,"Colorado Rockies",808825,"Detroit Tigers",,,15,45,,,2025-11-24T01:44:55
+304,10.25,10,25,"Cleveland Guardians",2428,"Otto Kemp",1B,1999-09-09,"Cleveland Guardians",805249,"Philadelphia Phillies",,,,,,,2025-11-24T01:57:01
+305,10.26,10,26,"Los Angeles Dodgers",3179,"Andrew Tess",C,2006-08-18,"Los Angeles Dodgers",811083,"Baltimore Orioles",,,,,,,2025-11-24T02:00:50
+306,10.27,10,27,"Miami Marlins",3098,"Jaron DeBerry",P,2002-08-28,"Miami Marlins",809229,"Milwaukee Brewers",,,,,,,2025-11-24T14:59:18
+307,10.28,10,28,"San Francisco Giants",126,"Ryan Ward",LF,1998-02-23,"San Francisco Giants",669899,"Los Angeles Dodgers",,,,,,,2025-11-24T16:01:06
+308,10.29,10,29,"Houston Astros",1173,"Brendan Girton",P,2001-11-10,"Houston Astros",694858,"New York Mets",,,,,,,2025-11-24T21:59:49
+309,10.30,10,30,"Detroit Tigers",1731,"Luke Hill",3B,2004-04-09,"Detroit Tigers",702619,"Cleveland Guardians",,,26,40,,,2025-11-24T22:11:07

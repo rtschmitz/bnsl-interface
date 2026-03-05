@@ -1,0 +1,58 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>BNSL</title>
+  <style>
+    body { font-family: system-ui; margin: 16px; }
+    .tabs { display:flex; gap:8px; margin-bottom: 10px; }
+    .btn { padding: 8px 10px; border:1px solid #333; background:#fff; border-radius:8px; cursor:pointer; }
+    .active { background:#f2f2f2; }
+    iframe { width: 100%; height: calc(100vh - 70px); border: 1px solid #eee; border-radius: 10px; }
+    .hidden { display:none; }
+  </style>
+</head>
+<body>
+  <div class="tabs">
+    <button class="btn" id="tab-draft">Draft</button>
+    <button class="btn" id="tab-rulev">Rule V Draft</button>
+    <button class="btn" id="tab-fa">Free Agency</button>
+  </div>
+
+  <iframe id="frame-draft" src="/draft/"></iframe>
+  <iframe id="frame-rulev" src="/rulev/" class="hidden"></iframe>
+  <iframe id="frame-fa" src="/fa/" class="hidden"></iframe>
+
+  <script>
+    const tDraft = document.getElementById("tab-draft");
+    const tRulev = document.getElementById("tab-rulev");
+    const tFa    = document.getElementById("tab-fa");
+
+    const fDraft = document.getElementById("frame-draft");
+    const fRulev = document.getElementById("frame-rulev");
+    const fFa    = document.getElementById("frame-fa");
+
+    function show(which){
+      const isDraft = which === "draft";
+      const isRulev = which === "rulev";
+      const isFa    = which === "fa";
+
+      fDraft.classList.toggle("hidden", !isDraft);
+      fRulev.classList.toggle("hidden", !isRulev);
+      fFa.classList.toggle("hidden", !isFa);
+
+      tDraft.classList.toggle("active", isDraft);
+      tRulev.classList.toggle("active", isRulev);
+      tFa.classList.toggle("active", isFa);
+    }
+
+    tDraft.onclick = () => show("draft");
+    tRulev.onclick = () => show("rulev");
+    tFa.onclick    = () => show("fa");
+
+    // Default tab on load (pick your preference)
+    show("fa");
+  </script>
+</body>
+</html>
