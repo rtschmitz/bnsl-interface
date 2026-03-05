@@ -4,7 +4,7 @@ import math
 import sqlite3
 from datetime import datetime, timedelta
 from typing import List, Dict, Any, Optional
-
+from ui_skin import BNSL_GAME_CSS
 from flask import Blueprint, current_app, request, jsonify, render_template_string
 from zoneinfo import ZoneInfo
 
@@ -23,85 +23,91 @@ ORDER_HTML = r"""
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Rule V Draft Order</title>
-  <style>
-    body { font-family: system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif; margin: 24px; }
-    a { color: #184a7d; text-decoration: none; }
-    .nav { margin-bottom: 16px; display:flex; gap:12px; align-items:center; }
-    .pill { padding: 6px 10px; border-radius: 999px; background: #f2f2f2; display: inline-block; }
-    table { border-collapse: collapse; width: 100%; }
-    th, td { border-bottom: 1px solid #e5e5e5; padding: 8px 10px; text-align: left; }
-    th { background: #fafafa; position: sticky; top: 0; z-index: 1; }
-    .muted { color: #666; }
-    .pagination { margin-top: 14px; display: flex; gap: 8px; align-items: center; }
-    .btn { padding: 6px 10px; border: 1px solid #333; background: #fff; border-radius: 6px; cursor: pointer; }
-    .btn[disabled]{opacity: 0.5; cursor: not-allowed;}
-    select { padding:6px 8px; border:1px solid #ddd; border-radius:6px; }
-    .controls { display:flex; gap:12px; align-items:center; margin: 12px 0; }
-  </style>
+__BNSL_GAME_CSS__
+<style>
+  /* Order-page-only tweaks */
+  .controls { display:flex; gap:12px; align-items:center; flex-wrap:wrap; margin: 12px 0; }
+  .pagination { margin-top: 14px; display:flex; gap: 10px; align-items:center; flex-wrap:wrap; }
+  .navrow { display:flex; gap:12px; align-items:center; flex-wrap:wrap; }
+</style>
 </head>
 <body>
-  <div class="nav">
-    <a href="/rulev/">← Back to Rule V Draft</a>
-    <span class="pill">Rule V Draft Order</span>
-  </div>
+  <div class="page">
+    <div class="brand">
+      <div>
+        <h1>RULE V ORDER</h1>
+        <div class="sub">Times shown in ET • Missed picks roll to the end of the day (7:00 PM). If that is missed, they roll to the end of the next day, and so on.</div>
+      </div>
+      <div class="right">
+        <a class="btn" href="/rulev/">← Back</a>
+        <span class="badge">SCHEDULE</span>
+      </div>
+    </div>
 
-  <form class="controls" method="get" action="/rulev/order">
-    <label class="pill" style="background:#fff;">
-      <span style="margin-right:6px;">Filter by Team:</span>
-      <select name="team" onchange="this.form.submit()">
-        <option value="">All Teams</option>
-        {% for t in teams %}
-          <option value="{{ t }}" {% if t == team %}selected{% endif %}>{{ t }}</option>
-        {% endfor %}
-      </select>
-    </label>
-    <input type="hidden" name="per" value="{{ per }}">
-    <input type="hidden" name="page" value="1">
-  </form>
+    <div class="panel pad">
 
-  <p class="muted">
-    Times shown in ET. (Rule V demo scheduler: one pick per hour starting at {{ start_display }}.)
-  </p>
+      <form class="controls" method="get" action="/rulev/order">
+        <label class="pill" style="background: rgba(0,0,0,.16);">
+          <span style="margin-right:8px;">Filter by Team:</span>
+          <select name="team" onchange="this.form.submit()">
+            <option value="">All Teams</option>
+            {% for t in teams %}
+              <option value="{{ t }}" {% if t == team %}selected{% endif %}>{{ t }}</option>
+            {% endfor %}
+          </select>
+        </label>
+        <input type="hidden" name="per" value="{{ per }}">
+        <input type="hidden" name="page" value="1">
+      </form>
 
-  <table>
-    <thead>
-      <tr>
-        <th style="width:14%;">Pick</th>
-        <th style="width:26%;">Team</th>
-        <th style="width:34%;">Time / Player</th>
-        <th style="width:26%;">Status</th>
-      </tr>
-    </thead>
-    <tbody>
-      {% for row in rows %}
-      <tr>
-        <td>{{ row.pick_label }}</td>
-        <td>{{ row.team }}</td>
-        <td>
-          {% if row.player %}
-            {{ row.player }}
-          {% else %}
-            {{ row.time_display }}
-          {% endif %}
-        </td>
-        <td class="muted">{{ row.status }}</td>
-      </tr>
-      {% endfor %}
-    </tbody>
-  </table>
+      <hr class="sep"/>
 
-  <div class="pagination">
-    <form method="get">
-      <input type="hidden" name="per" value="{{ per }}">
-      <input type="hidden" name="team" value="{{ team }}">
-      <button class="btn" name="page" value="{{ prev_page }}" {% if prev_page < 1 %}disabled{% endif %}>Prev</button>
-      <span>Page {{ page }} / {{ pages }}</span>
-      <button class="btn" name="page" value="{{ next_page }}" {% if next_page > pages %}disabled{% endif %}>Next</button>
-    </form>
-  </div>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th style="width:14%;">Pick</th>
+              <th style="width:26%;">Team</th>
+              <th style="width:34%;">Time / Player</th>
+              <th style="width:26%;">Status</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for row in rows %}
+            <tr class="row-hover">
+              <td><b>{{ row.pick_label }}</b></td>
+              <td>{{ row.team }}</td>
+              <td>
+                {% if row.player %}
+                  {{ row.player }}
+                {% else %}
+                  {{ row.time_display }}
+                {% endif %}
+              </td>
+              <td class="muted">{{ row.status }}</td>
+            </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+
+      <div class="pagination">
+        <form method="get" class="navrow">
+          <input type="hidden" name="per" value="{{ per }}">
+          <input type="hidden" name="team" value="{{ team }}">
+          <button class="btn" name="page" value="{{ prev_page }}" {% if prev_page < 1 %}disabled{% endif %}>Prev</button>
+          <span class="pill">Page <b>{{ page }}</b> / <b>{{ pages }}</b></span>
+          <button class="btn" name="page" value="{{ next_page }}" {% if next_page > pages %}disabled{% endif %}>Next</button>
+        </form>
+      </div>
+
+    </div> <!-- /panel -->
+  </div>   <!-- /page -->
 </body>
 </html>
 """
+ORDER_HTML = ORDER_HTML.replace("__BNSL_GAME_CSS__", BNSL_GAME_CSS)
+
 
 
 def get_conn() -> sqlite3.Connection:

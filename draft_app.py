@@ -56,7 +56,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Dict, Any, List
 from draft_order_page import order_bp, EASTERN, next_non_sunday_date, END_OF_DAY_MISS_HOUR
-
+from ui_skin import BNSL_GAME_CSS
 import unicodedata
 from flask import (
     Flask, request, jsonify, session, redirect, url_for, render_template_string, abort
@@ -90,7 +90,7 @@ from flask import current_app
 # --- Blueprint-safe accessors (no global `app` here) ---
 def get_db_path() -> Path:
     # Use the Flask app's config if set (factory pattern), else fall back.
-    cfg = current_app.config.get("DB_PATH")
+    cfg = current_app.config.get("DRAFT_DB_PATH")
     return Path(cfg) if cfg else DB_PATH
 
 @draft_bp.before_app_request
@@ -1401,6 +1401,7 @@ if DRAFT_ORDER_CSV.exists() and order_count == 0:
 # Routes / API
 # -------------------------
 
+
 QUEUE_HTML = r"""
 <!doctype html>
 <html>
@@ -1408,248 +1409,259 @@ QUEUE_HTML = r"""
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Draft Queue</title>
-  <style>
-    body { font-family: system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif; margin: 24px; }
-    a { color: #184a7d; text-decoration: none; }
-    .pill { padding: 6px 10px; border-radius: 999px; background: #f2f2f2; display: inline-flex; gap:8px; align-items:center; }
-    .btn { padding: 6px 10px; border: 1px solid #333; background: #fff; border-radius: 6px; cursor: pointer; }
-    .btn[disabled]{opacity:.5; cursor:not-allowed;}
-    .row { display:flex; gap:16px; align-items:center; margin:12px 0; flex-wrap:wrap; }
-    .muted { color:#666; }
-    table { border-collapse: collapse; width: 100%; margin-top: 12px; }
-    th, td { border-bottom: 1px solid #e5e5e5; padding: 8px 10px; text-align: left; }
-    th { background: #fafafa; position: sticky; top: 0; z-index: 1; }
-    .controls { display:flex; gap:6px; }
-    .owned { opacity: 0.45; }
-  </style>
+__BNSL_GAME_CSS__
+<style>
+  th.sortable { cursor: pointer; user-select: none; }
+  th.sortable .sort-ind { opacity: 0.75; margin-left: 6px; font-size: 11px; }
+  .row { display:flex; gap:12px; align-items:center; flex-wrap:wrap; }
+  .controls { display:flex; gap:8px; align-items:center; }
+</style>
 </head>
 <body>
-  <div class="row">
-    <a href="/draft/">← Back to Player Draft</a>
-    <span class="pill">Draft Queue</span>
-    <span id="team-pill" class="pill"></span>
+<div class="page">
+  <div class="brand">
+    <div>
+      <h1>LEAGUE DRAFT</h1>
+    </div>
+    <div class="right">
+      <span class="badge">DRAFT ROOM</span>
+      <span class="badge" id="draft-phase">LIVE</span>
+    </div>
   </div>
 
-  <div class="row">
-    <label class="pill" style="background:#fff;">
-      <input type="radio" name="mode" id="mode-start"> Use queue at start of clock
-    </label>
-    <label class="pill" style="background:#fff;">
-      <input type="radio" name="mode" id="mode-end"> Use queue at end of clock (default)
-    </label>
-    <button id="save-mode" class="btn">Save Mode</button>
-    <span class="muted">Queue order is top → bottom.</span>
-  </div>
+  <div class="panel pad">
+    <div class="row">
+      <a class="btn" href="/draft/">← Back</a>
+      <span class="pill">Draft Queue</span>
+      <span id="team-pill" class="pill"></span>
+    </div>
 
-  <table>
-    <thead>
-      <tr>
-        <th style="width:6%;">#</th>
-        <th style="width:7%;">MLBAMID</th>
-        <th style="width:18%;">Name</th>
-        <th style="width:6%;">Bats</th>
-        <th style="width:6%;">Throws</th>
-        <th style="width:7%;">Pos</th>
-        <th style="width:12%;">DOB</th>
-        <th style="width:14%;">MLB Org</th>
-        <th style="width:6%;">FG 30</th>
-        <th style="width:6%;">FG FV</th>
-        <th style="width:6%;">MLB 30</th>
-        <th style="width:6%;">MLB FV</th>
-        <th style="width:6%;">FG100</th>
-        <th style="width:6%;">MLB100</th>
-        <th style="width:10%;">Actions</th>
-      </tr>
-    </thead>
-    <tbody id="queue-body"></tbody>
-  </table>
+    <div class="row">
+      <label class="pill" style="background: rgba(0,0,0,.16);">
+        <input type="radio" name="mode" id="mode-start"> Use queue at start of clock
+      </label>
+      <label class="pill" style="background: rgba(0,0,0,.16);">
+        <input type="radio" name="mode" id="mode-end"> Use queue at end of clock (default)
+      </label>
+      <button id="save-mode" class="btn primary">Save Mode</button>
+      <span class="muted">Queue order is top → bottom.</span>
+    </div>
 
-  <script>
-    const tbody = document.getElementById('queue-body');
-    const saveModeBtn = document.getElementById('save-mode');
-    const modeStart = document.getElementById('mode-start');
-    const modeEnd = document.getElementById('mode-end');
-    const teamPill = document.getElementById('team-pill');
+    <hr class="sep"/>
 
-    let queue = [];
-    let team = "";
-    let useStart = false;
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th style="width:6%;">#</th>
+            <th style="width:7%;">MLBAMID</th>
+            <th style="width:18%;">Name</th>
+            <th style="width:6%;">Bats</th>
+            <th style="width:6%;">Throws</th>
+            <th style="width:7%;">Pos</th>
+            <th style="width:12%;">DOB</th>
+            <th style="width:14%;">MLB Org</th>
+            <th style="width:6%;">FG 30</th>
+            <th style="width:6%;">FG FV</th>
+            <th style="width:6%;">MLB 30</th>
+            <th style="width:6%;">MLB FV</th>
+            <th style="width:6%;">FG100</th>
+            <th style="width:6%;">MLB100</th>
+            <th style="width:10%;">Actions</th>
+          </tr>
+        </thead>
+        <tbody id="queue-body"></tbody>
+      </table>
+    </div>
 
-    async function load() {
-      const res = await fetch('/draft/api/queue');
-      if (!res.ok) {
-        if (res.status === 401) {
-          alert('Please login from the main page first.');
-          location.href = '/draft/';
+    <script>
+      const tbody = document.getElementById('queue-body');
+      const saveModeBtn = document.getElementById('save-mode');
+      const modeStart = document.getElementById('mode-start');
+      const modeEnd = document.getElementById('mode-end');
+      const teamPill = document.getElementById('team-pill');
+
+      let queue = [];
+      let team = "";
+      let useStart = false;
+
+      async function load() {
+        const res = await fetch('/draft/api/queue');
+        if (!res.ok) {
+          if (res.status === 401) {
+            alert('Please login from the main page first.');
+            location.href = '/draft/';
+            return;
+          }
+          const msg = await res.text();
+          alert('Failed to load queue: ' + msg);
           return;
         }
-        const msg = await res.text();
-        alert('Failed to load queue: ' + msg);
-        return;
-      }
-      const data = await res.json();
-      team = data.team;
-      useStart = !!data.use_at_start;
-      queue = data.items || [];
-      render();
-    }
-
-    function show(x){ return (x === null || x === undefined) ? '' : x; }
-
-    function dobText(p){
-      if (p.dob && p.dob.length) return p.dob;
-      if (p.dob_year && p.dob_month && p.dob_day) {
-        const y = String(p.dob_year).padStart(4,'0');
-        const m = String(p.dob_month).padStart(2,'0');
-        const d = String(p.dob_day).padStart(2,'0');
-        return `${y}-${m}-${d}`;
-      }
-      return '';
-    }
-
-    function render() {
-      teamPill.textContent = team ? ('Team: ' + team) : '';
-      modeStart.checked = useStart;
-      modeEnd.checked = !useStart;
-
-      tbody.innerHTML = '';
-      queue.forEach((p, idx) => {
-        const tr = document.createElement('tr');
-        if (p.franchise) tr.classList.add('owned');
-
-        // index / queue position
-        const tdIdx = document.createElement('td');
-        tdIdx.textContent = String(idx + 1);
-
-        const tdMlbamid = document.createElement('td');
-        tdMlbamid.textContent = show(p.mlbamid);
-
-        const tdName = document.createElement('td');
-        tdName.textContent = p.name || '';
-
-        const tdBats = document.createElement('td');
-        tdBats.textContent = p.bats || '';
-
-        const tdThrows = document.createElement('td');
-        tdThrows.textContent = p.throws || '';
-
-        const tdPos = document.createElement('td');
-        tdPos.textContent = p.position || '';
-
-        const tdDob = document.createElement('td');
-        tdDob.textContent = dobText(p);
-
-        const tdOrg = document.createElement('td');
-        tdOrg.textContent = p.mlb_org || '';
-
-        const tdFg30 = document.createElement('td');
-        tdFg30.textContent = show(p.fg_30);
-
-        const tdFgFv = document.createElement('td');
-        tdFgFv.textContent = show(p.fg_fv);
-
-        const tdMlb30 = document.createElement('td');
-        tdMlb30.textContent = show(p.mlb_30);
-
-        const tdMlbFv = document.createElement('td');
-        tdMlbFv.textContent = show(p.mlb_fv);
-
-        const tdFg100 = document.createElement('td');
-        tdFg100.textContent = show(p.fg100);
-
-        const tdMlb100 = document.createElement('td');
-        tdMlb100.textContent = show(p.mlb100);
-
-        const tdAct = document.createElement('td');
-        const ctrls = document.createElement('div');
-        ctrls.className = 'controls';
-        const up = document.createElement('button');
-        up.className = 'btn';
-        up.textContent = '↑';
-        up.disabled = idx === 0;
-        up.onclick = () => move(idx, -1);
-
-        const down = document.createElement('button');
-        down.className = 'btn';
-        down.textContent = '↓';
-        down.disabled = idx === queue.length - 1;
-        down.onclick = () => move(idx, +1);
-
-        const del = document.createElement('button');
-        del.className = 'btn';
-        del.textContent = 'Remove';
-        del.onclick = () => remove(p.player_id);
-
-        ctrls.appendChild(up);
-        ctrls.appendChild(down);
-        ctrls.appendChild(del);
-        tdAct.appendChild(ctrls);
-
-        tr.appendChild(tdIdx);
-        tr.appendChild(tdMlbamid);
-        tr.appendChild(tdName);
-        tr.appendChild(tdBats);
-        tr.appendChild(tdThrows);
-        tr.appendChild(tdPos);
-        tr.appendChild(tdDob);
-        tr.appendChild(tdOrg);
-        tr.appendChild(tdFg30);
-        tr.appendChild(tdFgFv);
-        tr.appendChild(tdMlb30);
-        tr.appendChild(tdMlbFv);
-        tr.appendChild(tdFg100);
-        tr.appendChild(tdMlb100);
-        tr.appendChild(tdAct);
-
-        tbody.appendChild(tr);
-      });
-    }
-
-    function move(i, delta) {
-      const j = i + delta;
-      if (j < 0 || j >= queue.length) return;
-      [queue[i], queue[j]] = [queue[j], queue[i]];
-      render();
-      saveOrder();
-    }
-
-    async function saveOrder() {
-      const order = queue.map(x => x.player_id);
-      await fetch('/draft/api/queue/reorder', {
-        method: 'POST',
-        headers: {'Content-Type':'application/json'},
-        body: JSON.stringify({ order })
-      });
-    }
-
-    async function remove(pid) {
-      const res = await fetch('/draft/api/queue/remove', {
-        method: 'POST',
-        headers: {'Content-Type':'application/json'},
-        body: JSON.stringify({ player_id: pid })
-      });
-      if (res.ok) {
-        queue = queue.filter(x => x.player_id !== pid);
+        const data = await res.json();
+        team = data.team;
+        useStart = !!data.use_at_start;
+        queue = data.items || [];
         render();
       }
-    }
 
-    saveModeBtn.onclick = async () => {
-      useStart = modeStart.checked;
-      await fetch('/draft/api/queue/mode', {
-        method: 'POST',
-        headers: {'Content-Type':'application/json'},
-        body: JSON.stringify({ use_at_start: useStart })
-      });
-      alert('Queue mode saved.');
-    };
+      function show(x){ return (x === null || x === undefined) ? '' : x; }
 
-    load();
-  </script>
+      function dobText(p){
+        if (p.dob && p.dob.length) return p.dob;
+        if (p.dob_year && p.dob_month && p.dob_day) {
+          const y = String(p.dob_year).padStart(4,'0');
+          const m = String(p.dob_month).padStart(2,'0');
+          const d = String(p.dob_day).padStart(2,'0');
+          return `${y}-${m}-${d}`;
+        }
+        return '';
+      }
+
+      function render() {
+        teamPill.textContent = team ? ('Team: ' + team) : '';
+        modeStart.checked = useStart;
+        modeEnd.checked = !useStart;
+
+        tbody.innerHTML = '';
+        queue.forEach((p, idx) => {
+          const tr = document.createElement('tr');
+          if (p.franchise) tr.classList.add('owned');
+
+          const tdIdx = document.createElement('td');
+          tdIdx.textContent = String(idx + 1);
+
+          const tdMlbamid = document.createElement('td');
+          tdMlbamid.textContent = show(p.mlbamid);
+
+          const tdName = document.createElement('td');
+          tdName.textContent = p.name || '';
+
+          const tdBats = document.createElement('td');
+          tdBats.textContent = p.bats || '';
+
+          const tdThrows = document.createElement('td');
+          tdThrows.textContent = p.throws || '';
+
+          const tdPos = document.createElement('td');
+          tdPos.textContent = p.position || '';
+
+          const tdDob = document.createElement('td');
+          tdDob.textContent = dobText(p);
+
+          const tdOrg = document.createElement('td');
+          tdOrg.textContent = p.mlb_org || '';
+
+          const tdFg30 = document.createElement('td');
+          tdFg30.textContent = show(p.fg_30);
+
+          const tdFgFv = document.createElement('td');
+          tdFgFv.textContent = show(p.fg_fv);
+
+          const tdMlb30 = document.createElement('td');
+          tdMlb30.textContent = show(p.mlb_30);
+
+          const tdMlbFv = document.createElement('td');
+          tdMlbFv.textContent = show(p.mlb_fv);
+
+          const tdFg100 = document.createElement('td');
+          tdFg100.textContent = show(p.fg100);
+
+          const tdMlb100 = document.createElement('td');
+          tdMlb100.textContent = show(p.mlb100);
+
+          const tdAct = document.createElement('td');
+          const ctrls = document.createElement('div');
+          ctrls.className = 'controls';
+
+          const up = document.createElement('button');
+          up.className = 'btn';
+          up.textContent = '↑';
+          up.disabled = idx === 0;
+          up.onclick = () => move(idx, -1);
+
+          const down = document.createElement('button');
+          down.className = 'btn';
+          down.textContent = '↓';
+          down.disabled = idx === queue.length - 1;
+          down.onclick = () => move(idx, +1);
+
+          const del = document.createElement('button');
+          del.className = 'btn danger';
+          del.textContent = 'Remove';
+          del.onclick = () => remove(p.player_id);
+
+          ctrls.appendChild(up);
+          ctrls.appendChild(down);
+          ctrls.appendChild(del);
+          tdAct.appendChild(ctrls);
+
+          tr.appendChild(tdIdx);
+          tr.appendChild(tdMlbamid);
+          tr.appendChild(tdName);
+          tr.appendChild(tdBats);
+          tr.appendChild(tdThrows);
+          tr.appendChild(tdPos);
+          tr.appendChild(tdDob);
+          tr.appendChild(tdOrg);
+          tr.appendChild(tdFg30);
+          tr.appendChild(tdFgFv);
+          tr.appendChild(tdMlb30);
+          tr.appendChild(tdMlbFv);
+          tr.appendChild(tdFg100);
+          tr.appendChild(tdMlb100);
+          tr.appendChild(tdAct);
+
+          tbody.appendChild(tr);
+        });
+      }
+
+      function move(i, delta) {
+        const j = i + delta;
+        if (j < 0 || j >= queue.length) return;
+        [queue[i], queue[j]] = [queue[j], queue[i]];
+        render();
+        saveOrder();
+      }
+
+      async function saveOrder() {
+        const order = queue.map(x => x.player_id);
+        await fetch('/draft/api/queue/reorder', {
+          method: 'POST',
+          headers: {'Content-Type':'application/json'},
+          body: JSON.stringify({ order })
+        });
+      }
+
+      async function remove(pid) {
+        const res = await fetch('/draft/api/queue/remove', {
+          method: 'POST',
+          headers: {'Content-Type':'application/json'},
+          body: JSON.stringify({ player_id: pid })
+        });
+        if (res.ok) {
+          queue = queue.filter(x => x.player_id !== pid);
+          render();
+        }
+      }
+
+      saveModeBtn.onclick = async () => {
+        useStart = modeStart.checked;
+        await fetch('/draft/api/queue/mode', {
+          method: 'POST',
+          headers: {'Content-Type':'application/json'},
+          body: JSON.stringify({ use_at_start: useStart })
+        });
+        alert('Queue mode saved.');
+      };
+
+      load();
+    </script>
+  </div> <!-- /panel -->
+</div>   <!-- /page -->
 </body>
 </html>
 """
-
+QUEUE_HTML = QUEUE_HTML.replace("__BNSL_GAME_CSS__", BNSL_GAME_CSS)
 
 
 @draft_bp.route("/queue")
@@ -1667,35 +1679,29 @@ INDEX_HTML = r"""
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>League Draft</title>
-  <style>
-    th.sortable { cursor: pointer; user-select: none; }
-    th.sortable .sort-ind { opacity: 0.6; margin-left: 4px; font-size: 12px; }
-    body { font-family: system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif; margin: 24px; }
-    .topbar { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; margin-bottom: 12px; }
-    .pill { padding: 6px 10px; border-radius: 999px; background: #f2f2f2; display: inline-flex; gap: 8px; align-items: center; }
-    .owned { opacity: 0.45; }
-    table { border-collapse: collapse; width: 100%; }
-    th, td { border-bottom: 1px solid #e5e5e5; padding: 8px 10px; text-align: left; }
-    th { background: #fafafa; position: sticky; top: 0; z-index: 1; }
-    .btn { padding: 6px 10px; border: 1px solid #333; background: #fff; border-radius: 6px; cursor: pointer; }
-    .btn[disabled] { opacity: 0.5; cursor: not-allowed; }
-    .muted { color: #666; }
-    .green { color: #0a7a0a; font-weight: 600; }
-    .danger { color: #b00020; }
-    .flex { display: flex; align-items: center; gap: 8px; }
-    .right { margin-left: auto; }
-    .badge { font-size: 12px; background: #eef7ff; color: #184a7d; border: 1px solid #cfe5ff; padding: 2px 6px; border-radius: 4px; }
-    .kbd { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace; border:1px solid #ccc; padding:2px 4px; border-radius:4px; background:#f9f9f9; }
-    .row-hover:hover { background: #fcfcfc; }
-  </style>
+__BNSL_GAME_CSS__
+<style>
+  /* Draft-only additions */
+  th.sortable { cursor: pointer; user-select: none; }
+  th.sortable .sort-ind { opacity: 0.75; margin-left: 6px; font-size: 11px; }
+</style>
+
 </head>
-  <div class="pill" style="display:inline-block; margin-bottom:12px;">
-    <a href="/draft/order" style="text-decoration:none; color:#184a7d;">View Draft Order & Times →</a>
-  </div>
+<body>
+  <div class="page">
+    <div class="brand">
+      <div>
+        <h1>AMATEUR DRAFT</h1>
+      </div>
+         <div class="right">
+        <a class="btn primary" href="/draft/order">Order & Times →</a>
+      </div>
+   </div>
+
+    <div class="panel pad">
   <p class="muted" style="margin-top:16px;">
     Tip: Use <span class="kbd">/</span> to focus search. Owned players are grayed out. Draft button appears only when your selected team is on the clock and the player is eligible.
   </p>
-<body>
   <h1>League Draft</h1>
   <div id="status" class="pill">
     <span>Current Pick:</span>
@@ -2136,10 +2142,12 @@ async function boot() {
 
 boot();
 </script>
+    </div> <!-- /panel -->
+  </div>   <!-- /page -->
 </body>
 </html>
 """
-
+INDEX_HTML = INDEX_HTML.replace("__BNSL_GAME_CSS__", BNSL_GAME_CSS)
 
 @draft_bp.route("/")
 def index():

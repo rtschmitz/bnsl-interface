@@ -878,38 +878,374 @@ def bootstrap_fa():
 
 
 # ---------- UI (templates) ----------
-BASE_STYLE = """
+BASE_STYLE = r"""
 <style>
-  body { font-family: system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif; margin: 24px; }
-  a { color: #184a7d; text-decoration: none; }
-  .topbar { display:flex; flex-wrap:wrap; gap:12px; align-items:center; margin-bottom:12px; }
-  .pill { padding: 6px 10px; border-radius: 999px; background: #f2f2f2; display: inline-flex; gap:8px; align-items:center; }
-  .btn { padding: 6px 10px; border: 1px solid #333; background: #fff; border-radius: 6px; cursor: pointer; }
-  .btn[disabled]{opacity:.5; cursor:not-allowed;}
-  .muted { color:#666; }
-  .badge { font-size:12px; background:#eef7ff; color:#184a7d; border:1px solid #cfe5ff; padding:2px 6px; border-radius:4px; }
-  table { border-collapse: collapse; width: 100%; margin-top: 12px; }
-  th, td { border-bottom: 1px solid #e5e5e5; padding: 8px 10px; text-align: left; }
-  th { background: #fafafa; position: sticky; top: 0; z-index: 1; }
-  tr.row-hover:hover { background: #fcfcfc; }
-  .signed { opacity: 0.55; }
-  .danger { color:#b00020; font-weight:600; }
-  .green { color:#0a7a0a; font-weight:600; }
-  .pimg { width: 28px; height: 28px; border-radius: 8px; object-fit: cover; border: 1px solid #eee; margin-right: 8px; vertical-align: middle; }
-  .pname { display:flex; align-items:center; gap:8px; }
-  .pname a, a .pname { color: inherit; text-decoration: none; }
-  a:hover .pname b { text-decoration: underline; }
+/* -----------------------------
+   BNSL Free Agency — Game UI
+   Drop-in CSS overhaul
+-------------------------------- */
 
-  dialog { border: 1px solid #ddd; border-radius: 12px; padding: 0; width: min(720px, 94vw); }
-  dialog::backdrop { background: rgba(0,0,0,0.35); }
-  .modal-head { padding: 14px 16px; border-bottom: 1px solid #eee; display:flex; gap:10px; align-items:center; justify-content:space-between; }
-  .modal-body { padding: 14px 16px; display:grid; gap: 12px; }
-  .modal-grid { display:grid; grid-template-columns: 1fr 1fr; gap: 12px; }
-  .field { display:grid; gap:6px; }
-  .field input, .field select { border:1px solid #ddd; padding:8px 10px; border-radius:8px; }
-  .modal-foot { padding: 14px 16px; border-top: 1px solid #eee; display:flex; gap:10px; justify-content:flex-end; }
-  .kv { display:flex; justify-content:space-between; gap:12px; padding:6px 10px; border:1px solid #eee; border-radius:10px; background:#fff; }
-  .kv b { font-weight: 650; }
+/* Optional font (safe fallback if blocked) */
+@import url('https://fonts.googleapis.com/css2?family=Rajdhani:wght@500;600;700&family=Inter:wght@400;500;600&display=swap');
+
+:root{
+  --bg0:#070A12;
+  --bg1:#0A1020;
+  --panel: rgba(18, 26, 48, .62);
+  --panel2: rgba(12, 18, 34, .70);
+  --stroke: rgba(140, 170, 255, .18);
+  --stroke2: rgba(255,255,255,.08);
+
+  --text:#EAF0FF;
+  --muted: rgba(234,240,255,.68);
+
+  --accent:#7C5CFF;
+  --accent2:#2EF2FF;
+  --good:#36F9A2;
+  --warn:#FF4D6D;
+  --gold:#FFD166;
+
+  --shadow: 0 18px 60px rgba(0,0,0,.55);
+  --shadow2: 0 10px 30px rgba(0,0,0,.45);
+
+  --r12: 12px;
+  --r16: 16px;
+  --r20: 20px;
+
+  --gap: 14px;
+}
+
+*{ box-sizing:border-box; }
+html, body{ height:100%; }
+body{
+  margin:0;
+  color: var(--text);
+  background:
+    radial-gradient(1100px 680px at 70% -10%, rgba(124,92,255,.25), transparent 55%),
+    radial-gradient(900px 620px at 20% 0%, rgba(46,242,255,.16), transparent 52%),
+    radial-gradient(900px 700px at 70% 80%, rgba(255,209,102,.08), transparent 55%),
+    linear-gradient(180deg, var(--bg0), var(--bg1));
+  font-family: Inter, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif;
+  overflow-x:hidden;
+}
+
+/* subtle animated aurora */
+body::before{
+  content:"";
+  position:fixed; inset:-40vmax;
+  background:
+    conic-gradient(from 210deg,
+      rgba(124,92,255,.10),
+      rgba(46,242,255,.10),
+      rgba(255,77,109,.08),
+      rgba(124,92,255,.10)
+    );
+  filter: blur(60px);
+  opacity:.65;
+  animation: drift 14s ease-in-out infinite alternate;
+  pointer-events:none;
+  z-index:-3;
+}
+@keyframes drift{
+  from{ transform: translate3d(-3%, -2%, 0) rotate(-4deg); }
+  to{   transform: translate3d( 3%,  2%, 0) rotate( 6deg); }
+}
+
+/* scanlines + grid */
+body::after{
+  content:"";
+  position:fixed; inset:0;
+  background:
+    linear-gradient(to bottom, rgba(255,255,255,.05), rgba(255,255,255,0) 2px) 0 0/100% 6px,
+    linear-gradient(to right, rgba(124,92,255,.10), rgba(0,0,0,0) 20%) 0 0/260px 260px,
+    radial-gradient(circle at 50% 50%, rgba(46,242,255,.10), transparent 55%);
+  mix-blend-mode: overlay;
+  opacity:.25;
+  pointer-events:none;
+  z-index:-2;
+}
+
+/* layout wrapper */
+.page{
+  max-width: 1240px;
+  margin: 0 auto;
+  padding: 22px 18px 40px;
+}
+
+a{ color: inherit; text-decoration:none; }
+a:hover{ text-decoration:none; }
+
+/* header brand */
+.brand{
+  display:flex; align-items:flex-end; justify-content:space-between;
+  gap: 18px;
+  margin: 10px 0 16px;
+}
+.brand h1{
+  margin:0;
+  font-family: Rajdhani, Inter, system-ui;
+  font-weight: 700;
+  letter-spacing: .6px;
+  font-size: 34px;
+  line-height: 1;
+}
+.brand .sub{
+  margin-top: 6px;
+  color: var(--muted);
+  font-size: 13px;
+}
+.brand .right{
+  display:flex; gap: 10px; align-items:center; flex-wrap:wrap;
+}
+
+/* panels */
+.panel{
+  background: var(--panel);
+  border: 1px solid var(--stroke);
+  border-radius: var(--r20);
+  box-shadow: var(--shadow);
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
+  overflow:hidden;
+}
+.panel.pad{ padding: 14px; }
+
+.topbar{
+  display:flex;
+  flex-wrap:wrap;
+  gap: 10px;
+  align-items:center;
+}
+
+.pill{
+  display:inline-flex;
+  gap:10px;
+  align-items:center;
+  padding: 10px 12px;
+  border-radius: 999px;
+  background: rgba(10, 16, 32, .55);
+  border: 1px solid var(--stroke2);
+  box-shadow: 0 6px 20px rgba(0,0,0,.25);
+  color: var(--text);
+}
+.pill strong{ font-weight:600; }
+.muted{ color: var(--muted); }
+
+.badge{
+  font-size: 12px;
+  padding: 4px 10px;
+  border-radius: 999px;
+  background: rgba(124,92,255,.14);
+  border: 1px solid rgba(124,92,255,.28);
+  color: rgba(234,240,255,.92);
+  letter-spacing:.2px;
+}
+
+/* inputs */
+select, input[type="text"], input[type="number"]{
+  background: rgba(5, 8, 16, .55);
+  color: var(--text);
+  border: 1px solid rgba(140,170,255,.22);
+  border-radius: 12px;
+  padding: 10px 12px;
+  outline: none;
+  transition: transform .12s ease, border-color .18s ease, box-shadow .18s ease;
+}
+select:focus, input:focus{
+  border-color: rgba(46,242,255,.55);
+  box-shadow: 0 0 0 3px rgba(46,242,255,.12);
+}
+input::placeholder{ color: rgba(234,240,255,.35); }
+
+/* buttons */
+.btn{
+  position:relative;
+  padding: 10px 12px;
+  border-radius: 14px;
+  border: 1px solid rgba(140,170,255,.22);
+  background:
+    linear-gradient(180deg, rgba(255,255,255,.08), rgba(255,255,255,.02));
+  color: var(--text);
+  cursor:pointer;
+  transition: transform .12s ease, box-shadow .18s ease, border-color .18s ease, filter .18s ease;
+  box-shadow: 0 10px 26px rgba(0,0,0,.25);
+}
+.btn:hover{
+  transform: translateY(-1px);
+  border-color: rgba(46,242,255,.45);
+  box-shadow: 0 14px 36px rgba(0,0,0,.35);
+}
+.btn:active{ transform: translateY(0px) scale(.99); }
+.btn[disabled]{
+  opacity:.45;
+  cursor:not-allowed;
+  transform:none;
+  box-shadow:none;
+}
+.btn.primary{
+  border-color: rgba(124,92,255,.55);
+  background:
+    linear-gradient(180deg, rgba(124,92,255,.55), rgba(124,92,255,.18));
+}
+.btn.good{
+  border-color: rgba(54,249,162,.50);
+  background:
+    linear-gradient(180deg, rgba(54,249,162,.35), rgba(54,249,162,.10));
+}
+.btn.danger{
+  border-color: rgba(255,77,109,.55);
+  background:
+    linear-gradient(180deg, rgba(255,77,109,.35), rgba(255,77,109,.10));
+}
+
+hr.sep{
+  border:none;
+  border-top: 1px solid rgba(255,255,255,.08);
+  margin: 14px 0;
+}
+
+/* data table -> “tactical grid” */
+.table-wrap{
+  overflow:auto;
+}
+table{
+  width:100%;
+  border-collapse:separate;
+  border-spacing:0;
+  min-width: 980px;
+}
+thead th{
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  text-align:left;
+  font-size: 12px;
+  letter-spacing:.5px;
+  text-transform: uppercase;
+  color: rgba(234,240,255,.78);
+  background: rgba(8, 12, 24, .85);
+  border-bottom: 1px solid rgba(140,170,255,.18);
+  padding: 12px 12px;
+}
+tbody td{
+  padding: 12px 12px;
+  border-bottom: 1px solid rgba(255,255,255,.06);
+  vertical-align: middle;
+}
+tr.row-hover{
+  background: linear-gradient(180deg, rgba(255,255,255,.02), rgba(255,255,255,.00));
+}
+tr.row-hover:hover{
+  background:
+    radial-gradient(900px 160px at 20% 50%, rgba(46,242,255,.10), transparent 60%),
+    linear-gradient(180deg, rgba(124,92,255,.10), rgba(255,255,255,0));
+}
+tr.signed{
+  opacity:.55;
+  filter:saturate(.7);
+}
+
+.pname{
+  display:flex;
+  align-items:center;
+  gap:10px;
+}
+.pimg{
+  width: 34px; height:34px;
+  border-radius: 12px;
+  object-fit: cover;
+  border: 1px solid rgba(140,170,255,.20);
+  box-shadow: 0 10px 22px rgba(0,0,0,.35);
+}
+
+/* status colors */
+.danger{ color: var(--warn); font-weight:700; }
+.green{ color: var(--good); font-weight:700; }
+
+/* modal -> glass + neon */
+dialog{
+  border:none;
+  border-radius: 22px;
+  padding:0;
+  width: min(760px, 94vw);
+  background: rgba(8, 12, 24, .72);
+  color: var(--text);
+  box-shadow: var(--shadow);
+  backdrop-filter: blur(14px);
+  -webkit-backdrop-filter: blur(14px);
+  overflow:hidden;
+}
+dialog::backdrop{
+  background: radial-gradient(circle at 50% 30%, rgba(124,92,255,.22), rgba(0,0,0,.70));
+}
+.modal-head{
+  padding: 16px 16px;
+  border-bottom: 1px solid rgba(255,255,255,.08);
+  display:flex;
+  gap:12px;
+  align-items:center;
+  justify-content:space-between;
+  background: linear-gradient(180deg, rgba(124,92,255,.18), rgba(255,255,255,0));
+}
+.modal-head #modal-title{
+  font-family: Rajdhani, Inter, system-ui;
+  font-weight: 700;
+  letter-spacing: .4px;
+  font-size: 18px;
+}
+.modal-body{
+  padding: 16px;
+  display:grid;
+  gap: 12px;
+}
+.modal-grid{
+  display:grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+}
+.field{ display:grid; gap:8px; }
+.field label{ color: rgba(234,240,255,.85); }
+.modal-foot{
+  padding: 16px;
+  border-top: 1px solid rgba(255,255,255,.08);
+  display:flex;
+  justify-content:flex-end;
+  gap:10px;
+  background: rgba(0,0,0,.18);
+}
+
+.kv{
+  display:flex;
+  justify-content:space-between;
+  gap:12px;
+  padding: 10px 12px;
+  border: 1px solid rgba(140,170,255,.18);
+  border-radius: 16px;
+  background: rgba(0,0,0,.16);
+}
+.kv b{
+  font-weight: 700;
+  letter-spacing:.2px;
+}
+
+/* checkbox */
+input[type="checkbox"]{
+  width: 16px; height: 16px;
+  accent-color: var(--accent2);
+}
+
+/* responsive improvements */
+@media (max-width: 840px){
+  .brand{ align-items:flex-start; flex-direction:column; }
+  .modal-grid{ grid-template-columns: 1fr; }
+  table{ min-width: 860px; }
+}
+
+/* reduce motion */
+@media (prefers-reduced-motion: reduce){
+  body::before{ animation:none; }
+  .btn, select, input{ transition:none; }
+}
 </style>
 """
 
@@ -923,9 +1259,18 @@ INDEX_HTML = f"""
   {BASE_STYLE}
 </head>
 <body>
-  <h1>Free Agency</h1>
+  <div class="page">
 
-  <div class="topbar">
+    <div class="brand">
+      <div>
+        <h1>FREE AGENCY</h1>
+        <div class="sub">Contract bids • 48h clock • Hometown bonus baked into value</div>
+      </div>
+    </div>
+
+    <div class="panel pad">
+      <div class="topbar">
+
     <label class="pill">Your Team:
       <select id="team-select" style="margin-left:8px;"></select>
     </label>
@@ -949,7 +1294,9 @@ INDEX_HTML = f"""
     <span id="login-status">🔒 Not logged in</span>
   </div>
 
-  <table>
+  <hr class="sep" />
+  <div class="table-wrap">
+    <table>
     <thead>
       <tr>
         <th style="width:22%;">Player</th>
@@ -963,7 +1310,8 @@ INDEX_HTML = f"""
     </thead>
     <tbody id="fa-body"></tbody>
   </table>
-
+  </div>
+  
   <dialog id="bid-modal">
     <div class="modal-head">
       <div>
@@ -1339,6 +1687,8 @@ loginBtn.addEventListener('click', async () => {{
   await fetchPlayers();
 }})();
 </script>
+  </div> <!-- /panel -->
+</div>   <!-- /page -->
 </body>
 </html>
 """
@@ -1352,6 +1702,17 @@ WATCHLIST_HTML = f"""
   <title>Watchlist</title>
   {BASE_STYLE}
 </head>
+<div class="page">
+  <div class="brand">
+    <div>
+      <h1>WATCHLIST</h1>
+      <div class="sub">Quick bid from your tracked players</div>
+    </div>
+    <div class="right"><span class="badge">TRACKING</span></div>
+  </div>
+
+  <div class="panel pad">
+    <!-- existing topbar/table -->
 <body>
   <div class="topbar">
     <a class="btn" href="./">← Back</a>
@@ -1626,6 +1987,8 @@ submitBidBtn.onclick = async () => {{
   await fetchWatchlist();
 }})();
 </script>
+  </div> <!-- /panel -->
+</div>   <!-- /page -->
 </body>
 </html>
 """
@@ -1639,6 +2002,17 @@ HISTORY_HTML = f"""
   <title>Bid History</title>
   {BASE_STYLE}
 </head>
+<div class="page">
+  <div class="brand">
+    <div>
+      <h1>WATCHLIST</h1>
+      <div class="sub">Quick bid from your tracked players</div>
+    </div>
+    <div class="right"><span class="badge">TRACKING</span></div>
+  </div>
+
+  <div class="panel pad">
+    <!-- existing topbar/table -->
 <body>
   <div class="topbar">
     <a class="btn" href="./">← Back</a>
@@ -1731,6 +2105,8 @@ refreshBtn.onclick = load;
 
 load();
 </script>
+  </div> <!-- /panel -->
+</div>   <!-- /page -->
 </body>
 </html>
 """

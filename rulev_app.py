@@ -11,6 +11,7 @@ from flask import Blueprint, current_app, request, jsonify, session, render_temp
 
 # Reuse teams + emails from your main draft app
 from draft_app import MLB_TEAMS, TEAM_EMAILS, emails_equal
+from ui_skin import BNSL_GAME_CSS
 
 rulev_bp = Blueprint("rulev", __name__)
 
@@ -178,60 +179,73 @@ INDEX_HTML = r"""
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Rule V Draft</title>
-  <style>
-    body { font-family: system-ui; margin: 24px; }
-    .topbar { display:flex; flex-wrap:wrap; gap:12px; align-items:center; margin-bottom: 12px; }
-    .pill { padding:6px 10px; border-radius:999px; background:#f2f2f2; display:inline-flex; gap:8px; align-items:center; }
-    .btn { padding:6px 10px; border:1px solid #333; background:#fff; border-radius:6px; cursor:pointer; }
-    .btn[disabled]{opacity:.5; cursor:not-allowed;}
-    .muted { color:#666; }
-    .badge { font-size:12px; background:#eef7ff; color:#184a7d; border:1px solid #cfe5ff; padding:2px 6px; border-radius:4px; }
-    table { border-collapse: collapse; width: 100%; }
-    th, td { border-bottom:1px solid #e5e5e5; padding:8px 10px; text-align:left; }
-    th { background:#fafafa; position:sticky; top:0; z-index:1; }
-    tr.row-hover:hover { background:#fcfcfc; }
-    .taken { opacity: 0.5; }
-  </style>
+__BNSL_GAME_CSS__
+<style>
+  /* Rule V only */
+  .taken { opacity: 0.55; }
+</style>
 </head>
-<div class="pill" style="display:inline-block; margin-bottom:12px;">
-  <a href="/rulev/order" style="text-decoration:none; color:#184a7d;">View Draft Order & Times →</a>
-</div>
 <body>
-  <h1>Rule V Draft</h1>
-
-  <div class="pill" id="status">
-    <span>Current Pick:</span>
-    <span id="cur">Loading…</span>
-    <span id="prog" class="badge"></span>
-  </div>
-
-  <div class="topbar">
-    <label class="pill">Your Team:
-      <select id="team"></select>
-    </label>
-    <button class="btn" id="login">Login</button>
-    <div class="pill" style="margin-left:auto;">
-      <span>Search:</span>
-      <input id="search" type="text" placeholder="Type a player name…" style="border:1px solid #ddd; padding:6px 8px; border-radius:6px; min-width:260px;" />
-      <span class="muted">(substring match)</span>
+  <div class="page">
+    <div class="brand">
+      <div>
+        <h1>RULE V DRAFT</h1>
+      </div>
+      <div class="right">
+        <a class="btn primary" href="/rulev/order">Order & Times →</a>
+      </div>
     </div>
-  </div>
 
-  <div class="pill"><span id="login-status">🔒 Not logged in</span></div>
+    <div class="panel pad">
+      <div class="topbar">
+        <div class="pill" id="status">
+          <span>Current Pick:</span>
+          <span id="cur">Loading…</span>
+          <span id="prog" class="badge"></span>
+        </div>
 
-  <table>
-    <thead>
-      <tr>
-        <th style="width:26%;">Name</th>
-        <th style="width:10%;">Pos</th>
-        <th style="width:12%;">Org</th>
-        <th style="width:26%;">Picked By</th>
-        <th style="width:16%;">Picked At</th>
-        <th style="width:10%;">Action</th>
-      </tr>
-    </thead>
-    <tbody id="body"></tbody>
-  </table>
+        <div class="pill" style="margin-left:auto;">
+          <span class="muted">Tip:</span>
+          <span>Login to unlock picks when your team is on the clock.</span>
+        </div>
+      </div>
+
+      <hr class="sep"/>
+
+      <div class="topbar">
+        <label class="pill">Your Team:
+          <select id="team" style="margin-left:8px;"></select>
+        </label>
+        <button class="btn primary" id="login">Login</button>
+
+        <div class="pill" style="margin-left:auto;">
+          <span>Search:</span>
+          <input id="search" type="text" placeholder="Type a player name…" style="min-width:260px;" />
+          <span class="muted">(substring)</span>
+        </div>
+      </div>
+
+      <div class="pill" style="margin-top:10px;">
+        <span id="login-status">🔒 Not logged in</span>
+      </div>
+
+      <hr class="sep"/>
+
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th style="width:26%;">Name</th>
+              <th style="width:10%;">Pos</th>
+              <th style="width:12%;">Org</th>
+              <th style="width:26%;">Picked By</th>
+              <th style="width:16%;">Picked At</th>
+              <th style="width:10%;">Action</th>
+            </tr>
+          </thead>
+          <tbody id="body"></tbody>
+        </table>
+      </div>
 
 <script>
 const teamSel = document.getElementById('team');
@@ -297,7 +311,7 @@ function render(){
     const action = document.createElement('td');
     if (canPickNow && !p.drafted_by){
       const btn = document.createElement('button');
-      btn.className = 'btn';
+      btn.className = 'btn good';
       btn.textContent = 'Pick';
       btn.onclick = async () => {
         const ok = confirm(`Pick ${p.name} for ${state.selectedTeam}?`);
@@ -360,9 +374,14 @@ loginBtn.addEventListener('click', async ()=>{
   await fetchPlayers();
 })();
 </script>
+
+    </div> <!-- /panel -->
+  </div>   <!-- /page -->
 </body>
 </html>
 """
+INDEX_HTML = INDEX_HTML.replace("__BNSL_GAME_CSS__", BNSL_GAME_CSS)
+
 
 
 @rulev_bp.before_app_request
