@@ -931,8 +931,8 @@ INDEX_HTML = f"""
     </label>
     <button id="login-btn" class="btn">Login</button>
 
-    <a class="btn" id="watchlist-link" href="/watchlist" style="display:none;">Watchlist</a>
-    <a class="btn" href="/history">Bid History</a>
+    <a class="btn" id="watchlist-link" href="watchlist" style="display:none;">Watchlist</a>
+    <a class="btn" href="history">Bid History</a>
 
     <label class="pill">
       <input type="checkbox" id="hide-signed" /> Hide signed
@@ -1116,10 +1116,13 @@ function renderPlayers() {{
     bidBtn.disabled = !state.authed || !!p.signed_team;
     bidBtn.onclick = () => openBidModal(p);
 
-    const wBtn = document.createElement('button');
-    wBtn.className = 'btn';
-    wBtn.textContent = '★ Watch';
-    wBtn.disabled = !state.authed;
+const wBtn = document.createElement('button');
+wBtn.className = 'btn';
+
+const alreadyWatching = !!p.in_watchlist;
+wBtn.textContent = alreadyWatching ? '★ Watching' : '★ Watch';
+wBtn.disabled = !state.authed || alreadyWatching;
+    
     wBtn.onclick = async () => {{
       const resp = await fetch('/fa/api/watchlist/add', {{
         method: 'POST',
@@ -1351,9 +1354,9 @@ WATCHLIST_HTML = f"""
 </head>
 <body>
   <div class="topbar">
-    <a class="btn" href="/">← Back</a>
+    <a class="btn" href="./">← Back</a>
     <span class="pill">Watchlist</span>
-    <a class="btn" href="/history">Bid History</a>
+    <a class="btn" href="history">Bid History</a>
   </div>
 
   <div class="pill" id="login-pill">
@@ -1638,7 +1641,7 @@ HISTORY_HTML = f"""
 </head>
 <body>
   <div class="topbar">
-    <a class="btn" href="/">← Back</a>
+    <a class="btn" href="./">← Back</a>
     <span class="pill">Bid History</span>
   </div>
 
