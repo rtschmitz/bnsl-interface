@@ -290,7 +290,8 @@ def api_players():
     roster_status = (request.args.get("roster_status") or "").strip()
     fa_class_filter = (request.args.get("fa_class") or "").strip()
     rulev_only = (request.args.get("rulev_only") == "1")
-
+    forty_man_count = None
+    
     q = "SELECT * FROM roster_players"
     clauses = []
     params: List[Any] = []
