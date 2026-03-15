@@ -217,6 +217,23 @@ def bootstrap_roster():
                     def as_bool(val):
                         return str(val).strip().lower() == "true"
 
+                    raw_contract_type = (r.get("contract_type") or "").strip().upper()
+                    raw_franchise = (r.get("franchise") or "").strip()
+                    raw_contract_expires = (r.get("contract_expires") or "").strip()
+
+                    # If contract expires in 2025, player is now a free agent, not on that team
+                    is_now_fa = raw_contract_expires.startswith("2025")
+
+                    stored_contract_type = "FA" if is_now_fa else raw_contract_type
+                    stored_franchise = "" if is_now_fa else raw_franchise
+
+                    raw_options_remaining = as_int(r.get("options_remaining"), 0) or 0
+                    optioned_this_season = as_bool(r.get("optioned_current_season"))
+
+                    stored_options_remaining = raw_options_remaining - (1 if optioned_this_season else 0)
+                    if stored_options_remaining < 0:
+                        stored_options_remaining = 0
+
                     cur.execute("""
                         INSERT INTO roster_players (
                             id, name, last_name, first_name, suffix, nickname,
@@ -239,7 +256,7 @@ def bootstrap_roster():
                         (r.get("bats") or "").strip(),
                         (r.get("throws") or "").strip(),
                         1 if as_bool(r.get("signed")) else 0,
-                        (r.get("contract_type") or "").strip(),
+                        stored_contract_type, 
                         as_float(r.get("salary"), 0.0),
                         as_int(r.get("contract_initial_season")),
                         as_int(r.get("contract_length")),
@@ -248,10 +265,10 @@ def bootstrap_roster():
                         as_float(r.get("service_time"), 0.0),
                         as_float(r.get("previous_service_time"), 0.0),
                         as_float(r.get("service_time_2025"), 0.0),
-                        (r.get("franchise") or "").strip(),
+                        stored_franchise,
                         (r.get("team") or "").strip(),
                         roster_status_from_csv(r.get("status")),
-                        as_int(r.get("options_remaining"), 0),
+                        stored_options_remaining,
                         (r.get("fangraphs_id") or "").strip(),
                         as_int(r.get("mlbam_id")),
                     ))
