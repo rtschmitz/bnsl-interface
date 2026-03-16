@@ -20,10 +20,10 @@ TEAM_EMAILS = {
     "TOR": "daniele.defeo@gmail.com",
     "NYY": "dmsund66@gmail.com",
     "BOS": "chris_lawrence@sbcglobal.net",
-    "TBR": "smith.mark.louis@gmail.com",
+    "TB": "smith.mark.louis@gmail.com",
     "BAL": "bsweis@ptd.net",
     "DET": "manconley@gmail.com",
-    "KCR": "jim@timhafer.com",
+    "KC": "jim@timhafer.com",
     "MIN": "jonathan.adelman@gmail.com",
     "CHW": "bglover6@gmail.com",
     "CLE": "bonfanti20@gmail.com",
@@ -45,8 +45,8 @@ TEAM_EMAILS = {
     "LAD": "jr92@comcast.net",
     "COL": "GypsySon@gmail.com",
     "ARI": "mhr4240@gmail.com",
-    "SFG": "jasonmallet@gmail.com",
-    "SDP": "mattaca77@gmail.com",
+    "SF": "jasonmallet@gmail.com",
+    "SD": "mattaca77@gmail.com",
 }
 
 TEAM_ABBRS = sorted(TEAM_EMAILS.keys())
@@ -219,13 +219,19 @@ def bootstrap_roster():
 
                     raw_contract_type = (r.get("contract_type") or "").strip().upper()
                     raw_franchise = (r.get("franchise") or "").strip()
+                    raw_affiliate_team = (r.get("team") or "").strip()
                     raw_contract_expires = (r.get("contract_expires") or "").strip()
+                    raw_signed = 1 if as_bool(r.get("signed")) else 0
+                    raw_contract_option = 1 if as_bool(r.get("contract_option")) else 0
 
-                    # If contract expires in 2025, player is now a free agent, not on that team
-                    is_now_fa = raw_contract_expires.startswith("2025")
+                    # Expired after 2025 season becomes FA only if there is NO team option
+                    is_2025_expiry = raw_contract_expires.startswith("2025")
+                    is_now_fa = is_2025_expiry and not raw_contract_option
 
                     stored_contract_type = "FA" if is_now_fa else raw_contract_type
                     stored_franchise = "" if is_now_fa else raw_franchise
+                    stored_affiliate_team = "" if is_now_fa else raw_affiliate_team
+                    stored_signed = 0 if is_now_fa else raw_signed
 
                     raw_options_remaining = as_int(r.get("options_remaining"), 0) or 0
                     optioned_this_season = as_bool(r.get("optioned_current_season"))
@@ -255,18 +261,18 @@ def bootstrap_roster():
                         (r.get("date_of_birth") or "").strip(),
                         (r.get("bats") or "").strip(),
                         (r.get("throws") or "").strip(),
-                        1 if as_bool(r.get("signed")) else 0,
-                        stored_contract_type, 
+                        stored_signed,
+                        stored_contract_type,
                         as_float(r.get("salary"), 0.0),
                         as_int(r.get("contract_initial_season")),
                         as_int(r.get("contract_length")),
-                        1 if as_bool(r.get("contract_option")) else 0,
-                        (r.get("contract_expires") or "").strip(),
+                        raw_contract_option,
+                        raw_contract_expires,
                         as_float(r.get("service_time"), 0.0),
                         as_float(r.get("previous_service_time"), 0.0),
                         as_float(r.get("service_time_2025"), 0.0),
                         stored_franchise,
-                        (r.get("team") or "").strip(),
+                        stored_affiliate_team,
                         roster_status_from_csv(r.get("status")),
                         stored_options_remaining,
                         (r.get("fangraphs_id") or "").strip(),
