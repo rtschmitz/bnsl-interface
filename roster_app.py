@@ -53,8 +53,141 @@ TEAM_ABBRS = sorted(TEAM_EMAILS.keys())
 
 POSITIONS = ["P","C","1B","2B","3B","SS","LF","CF","RF","DH","IF","OF"]
 CONTRACT_TYPES = ["R","A","X","FA"]
-STATUS_TYPES = ["40-man","Reserve"]
+STATUS_TYPES = ["Active","40-man","Reserve"]
 FA_CLASSES = ["2026","2027","2028","2029","2030"]
+CURRENT_SEASON = 2025
+CURRENT_FA_CLASS = str(CURRENT_SEASON + 1)
+
+
+def as_int(val, default=None):
+    """Convert CSV strings or SQLite numeric values to int safely."""
+    if val is None:
+        return default
+    if isinstance(val, str):
+        s = val.strip()
+        if s == "":
+            return default
+    else:
+        s = val
+    try:
+        return int(float(s))
+    except Exception:
+        return default
+
+
+def as_float(val, default=0.0):
+    """Convert CSV strings or SQLite numeric values to float safely."""
+    if val is None:
+        return default
+    if isinstance(val, str):
+        s = val.strip()
+        if s == "":
+            return default
+    else:
+        s = val
+    try:
+        return float(s)
+    except Exception:
+        return default
+
+
+def as_bool(val) -> bool:
+    return str(val).strip().lower() in ("true", "1", "yes", "y")
+
+
+def row_value(row: Any, key: str, default: Any = None) -> Any:
+    """Safely read either a sqlite Row or a dict-like CSV row."""
+    try:
+        if isinstance(row, sqlite3.Row):
+            return row[key] if key in row.keys() else default
+        return row.get(key, default)
+    except Exception:
+        return default
+
+
+def year_from_value(val: Any) -> int | None:
+    """Extract a leading year from values like 2025, "2025", or "2025-10-01"."""
+    s = str(val or "").strip()
+    if not s:
+        return None
+    try:
+        return int(s[:4])
+    except Exception:
+        return None
+
+
+def fa_class_from_contract_parts(
+    contract_type: str,
+    contract_expires: Any,
+    contract_initial_season: Any,
+    contract_length: Any,
+    contract_option: Any,
+    service_time: Any,
+    previous_service_time: Any = None,
+    service_time_2025: Any = None,
+) -> str:
+    """
+    Compute the FA class displayed in the roster tab.
+
+    Important OOTP/BNSL convention: for FA/X contracts, contract_expires is
+    the final contract season, including any option year if present. Therefore
+    every FA/X player reaches free agency in contract_expires + 1.
+    Example: contract_expires=2025 means FA class 2026, option flag or not.
+    """
+    ctype = (contract_type or "").strip().upper()
+    if ctype in ("R", "A", ""):
+        # service_time is the total after the imported season. Fall back to
+        # previous + current-season service if needed.
+        total_service = as_float(service_time, None)
+        if total_service is None:
+            total_service = as_float(previous_service_time, 0.0) + as_float(service_time_2025, 0.0)
+
+        # Arbitration players at 6.000+ years are current free agents.
+        if ctype == "A" and total_service >= 6.0:
+            return CURRENT_FA_CLASS
+
+        for year in range(CURRENT_SEASON + 1, CURRENT_SEASON + 11):
+            projected = total_service + (year - (CURRENT_SEASON + 1))
+            if projected > 6.0:
+                return str(year)
+        return ""
+
+    if ctype in ("X", "FA"):
+        # For FA/X contracts, contract_expires is the authoritative final
+        # contract season.  This includes option years once they are used.
+        # Therefore a 2025 expiry is always a 2026 FA class, regardless of
+        # contract_option or contract_initial_season/contract_length.
+        exp_year = year_from_value(contract_expires)
+        if exp_year is not None:
+            return str(exp_year + 1)
+
+        # Fallback only for rows missing contract_expires.  In the BNSL/OOTP
+        # export, contract_length should then indicate years after the initial
+        # season, so initial + length is the FA class.
+        initial = as_int(contract_initial_season)
+        length = as_int(contract_length)
+        if initial is not None and length is not None:
+            return str(initial + length)
+
+    return ""
+
+
+def csv_fa_class(r: Dict[str, Any]) -> str:
+    return fa_class_from_contract_parts(
+        r.get("contract_type"),
+        r.get("contract_expires"),
+        r.get("contract_initial_season"),
+        r.get("contract_length"),
+        r.get("contract_option"),
+        r.get("service_time"),
+        r.get("previous_service_time"),
+        r.get("service_time_2025"),
+    )
+
+
+def is_current_free_agent_csv(r: Dict[str, Any]) -> bool:
+    return csv_fa_class(r) == CURRENT_FA_CLASS
+
 
 
 def get_conn():
@@ -79,9 +212,27 @@ def emails_equal(a: str | None, b: str | None) -> bool:
     return a.strip().lower() == b.strip().lower()
 
 
-def roster_status_from_csv(status: str) -> str:
+def roster_status_from_csv(
+    status: str,
+    active_roster: Any = None,
+    expanded_roster: Any = None,
+) -> str:
+    """
+    Import the three editable roster buckets used by the roster tab.
+
+    Active = on the active roster and salary counts for every contract type.
+    40-man = on the 40-man/expanded roster but not active.
+    Reserve = owned by the franchise but not on the 40-man roster.
+    """
+    if as_bool(active_roster):
+        return "Active"
+    if as_bool(expanded_roster):
+        return "40-man"
+
     s = (status or "").strip().lower()
-    if s in ("active", "expanded"):
+    if s == "active":
+        return "Active"
+    if s == "expanded":
         return "40-man"
     return "Reserve"
 
@@ -110,34 +261,22 @@ def rulev_eligible(status: str, dob: str) -> bool:
 
 
 def compute_fa_class(row: sqlite3.Row) -> str:
-    contract_type = (row["contract_type"] or "").strip().upper()
-    service_2025 = float(row["service_time_2025"] or 0.0)
+    # Once a current FA has had its contract fields cleared, we still need to
+    # remember which FA class it belongs to for the roster tab filter/display.
+    stored_fa_class = row_value(row, "fa_class", "")
+    if stored_fa_class:
+        return str(stored_fa_class)
 
-    if contract_type in ("R", "A", ""):
-        for year in range(2026, 2036):
-            projected = service_2025 + (year - 2025)
-            if projected > 6.0:
-                return str(year)
-        return ""
-
-    if contract_type in ("X", "FA"):
-        expires = row["contract_expires"]
-        if expires:
-            try:
-                exp_year = int(str(expires)[:4])
-                return str(exp_year + 1)
-            except Exception:
-                pass
-
-        initial = row["contract_initial_season"]
-        length = row["contract_length"]
-        if initial and length:
-            try:
-                return str(int(initial) + int(length))
-            except Exception:
-                pass
-
-    return ""
+    return fa_class_from_contract_parts(
+        row_value(row, "contract_type"),
+        row_value(row, "contract_expires"),
+        row_value(row, "contract_initial_season"),
+        row_value(row, "contract_length"),
+        row_value(row, "contract_option"),
+        row_value(row, "service_time"),
+        row_value(row, "previous_service_time"),
+        row_value(row, "service_time_2025"),
+    )
 
 
 def bootstrap_roster():
@@ -169,11 +308,25 @@ def bootstrap_roster():
             franchise TEXT,
             affiliate_team TEXT,
             roster_status TEXT,
+            active_roster INTEGER DEFAULT 0,
             options_remaining INTEGER,
+            fa_class TEXT,
             fangraphs_id TEXT,
             mlbam_id INTEGER
         )
     """)
+
+    # Existing DBs created before this change need this column so that 2026 FAs
+    # still show as 2026 after their contract fields are cleared.
+    cur.execute("PRAGMA table_info(roster_players)")
+    existing_cols = {row[1] for row in cur.fetchall()}
+    added_active_roster_col = False
+    if "active_roster" not in existing_cols:
+        cur.execute("ALTER TABLE roster_players ADD COLUMN active_roster INTEGER DEFAULT 0")
+        added_active_roster_col = True
+
+    if "fa_class" not in existing_cols:
+        cur.execute("ALTER TABLE roster_players ADD COLUMN fa_class TEXT")
 
     cur.execute("SELECT COUNT(*) FROM roster_players")
     count = int(cur.fetchone()[0] or 0)
@@ -196,42 +349,31 @@ def bootstrap_roster():
                     except ValueError:
                         continue
 
-                    def as_int(val, default=None):
-                        s = (val or "").strip()
-                        if s == "":
-                            return default
-                        try:
-                            return int(float(s))
-                        except Exception:
-                            return default
-
-                    def as_float(val, default=0.0):
-                        s = (val or "").strip()
-                        if s == "":
-                            return default
-                        try:
-                            return float(s)
-                        except Exception:
-                            return default
-
-                    def as_bool(val):
-                        return str(val).strip().lower() == "true"
-
                     raw_contract_type = (r.get("contract_type") or "").strip().upper()
                     raw_franchise = (r.get("franchise") or "").strip()
-                    raw_affiliate_team = (r.get("team") or "").strip()
                     raw_contract_expires = (r.get("contract_expires") or "").strip()
-                    raw_signed = 1 if as_bool(r.get("signed")) else 0
-                    raw_contract_option = 1 if as_bool(r.get("contract_option")) else 0
+                    raw_contract_option = as_bool(r.get("contract_option"))
 
-                    # Expired after 2025 season becomes FA only if there is NO team option
-                    is_2025_expiry = raw_contract_expires.startswith("2025")
-                    is_now_fa = is_2025_expiry and not raw_contract_option
+                    raw_contract_initial_season = as_int(r.get("contract_initial_season"))
+                    raw_contract_length = as_int(r.get("contract_length"))
+                    raw_service_time_2025 = as_float(r.get("service_time_2025"), 0.0)
 
-                    stored_contract_type = "FA" if is_now_fa else raw_contract_type
-                    stored_franchise = "" if is_now_fa else raw_franchise
-                    stored_affiliate_team = "" if is_now_fa else raw_affiliate_team
-                    stored_signed = 0 if is_now_fa else raw_signed
+                    raw_fa_class = csv_fa_class(r)
+
+                    # Determine whether this player is effectively a current FA and therefore
+                    # should no longer be tied to a team or to old contract details in the live DB.
+                    is_2026_fa = raw_fa_class == CURRENT_FA_CLASS
+
+                    stored_contract_type = "FA" if is_2026_fa else raw_contract_type
+                    stored_franchise = "" if is_2026_fa else raw_franchise
+                    stored_affiliate_team = "" if is_2026_fa else (r.get("team") or "").strip()
+                    stored_roster_status = "" if is_2026_fa else roster_status_from_csv(r.get("status"), r.get("active_roster"), r.get("expanded_roster"))
+                    stored_contract_option = 0 if is_2026_fa else (1 if raw_contract_option else 0)
+                    stored_contract_initial_season = None if is_2026_fa else raw_contract_initial_season
+                    stored_contract_length = None if is_2026_fa else raw_contract_length
+                    stored_contract_expires = "" if is_2026_fa else raw_contract_expires
+                    stored_salary = 0.0 if is_2026_fa else as_float(r.get("salary"), 0.0)
+                    stored_fa_class = raw_fa_class
 
                     raw_options_remaining = as_int(r.get("options_remaining"), 0) or 0
                     optioned_this_season = as_bool(r.get("optioned_current_season"))
@@ -247,9 +389,9 @@ def bootstrap_roster():
                             contract_type, salary, contract_initial_season,
                             contract_length, contract_option, contract_expires,
                             service_time, previous_service_time, service_time_2025,
-                            franchise, affiliate_team, roster_status,
-                            options_remaining, fangraphs_id, mlbam_id
-                        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                            franchise, affiliate_team, roster_status, active_roster,
+                            options_remaining, fa_class, fangraphs_id, mlbam_id
+                        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                     """, (
                         player_id,
                         raw_name,
@@ -261,23 +403,103 @@ def bootstrap_roster():
                         (r.get("date_of_birth") or "").strip(),
                         (r.get("bats") or "").strip(),
                         (r.get("throws") or "").strip(),
-                        stored_signed,
+                        1 if as_bool(r.get("signed")) else 0,
                         stored_contract_type,
-                        as_float(r.get("salary"), 0.0),
-                        as_int(r.get("contract_initial_season")),
-                        as_int(r.get("contract_length")),
-                        raw_contract_option,
-                        raw_contract_expires,
+                        stored_salary,
+                        stored_contract_initial_season,
+                        stored_contract_length,
+                        stored_contract_option,
+                        stored_contract_expires,
                         as_float(r.get("service_time"), 0.0),
                         as_float(r.get("previous_service_time"), 0.0),
-                        as_float(r.get("service_time_2025"), 0.0),
+                        raw_service_time_2025,
                         stored_franchise,
                         stored_affiliate_team,
-                        roster_status_from_csv(r.get("status")),
+                        stored_roster_status,
+                        0 if is_2026_fa else (1 if as_bool(r.get("active_roster")) else 0),
                         stored_options_remaining,
+                        stored_fa_class,
                         (r.get("fangraphs_id") or "").strip(),
                         as_int(r.get("mlbam_id")),
                     ))
+
+
+    # If this DB existed before active_roster was tracked, backfill it once from
+    # the roster CSV. After that, financials read the live DB value so direct
+    # DB changes are reflected without another import layer.
+    if added_active_roster_col:
+        csv_path = Path(current_app.config["ROSTER_CSV_PATH"])
+        if csv_path.exists():
+            with csv_path.open(newline="", encoding="utf-8") as f:
+                reader = csv.DictReader(f)
+                for r in reader:
+                    raw_id = (r.get("id") or "").strip()
+                    if not raw_id:
+                        continue
+                    try:
+                        player_id = int(raw_id)
+                    except ValueError:
+                        continue
+                    cur.execute("""
+                        UPDATE roster_players
+                        SET active_roster=?
+                        WHERE id=?
+                    """, (0 if is_current_free_agent_csv(r) else (1 if as_bool(r.get("active_roster")) else 0), player_id))
+
+    # Normalize older two-bucket DBs into the new three-bucket model.
+    # Previous versions stored active players as roster_status='40-man' with
+    # active_roster=1.  The UI now treats roster_status as the source of truth.
+    cur.execute("""
+        UPDATE roster_players
+        SET roster_status='Active'
+        WHERE COALESCE(active_roster, 0) = 1
+          AND COALESCE(franchise, '') != ''
+          AND roster_status = '40-man'
+    """)
+    cur.execute("""
+        UPDATE roster_players
+        SET roster_status='40-man'
+        WHERE COALESCE(active_roster, 0) != 1
+          AND LOWER(COALESCE(roster_status, '')) IN ('active', 'expanded')
+          AND COALESCE(franchise, '') != ''
+    """)
+    cur.execute("""
+        UPDATE roster_players
+        SET active_roster = CASE WHEN roster_status='Active' THEN 1 ELSE 0 END
+    """)
+
+    # The initial import above only runs for an empty DB.  For an existing DB,
+    # still apply the 2026 FA release logic from the current CSV so option-year
+    # players do not remain attached to last year's club.
+    csv_path = Path(current_app.config["ROSTER_CSV_PATH"])
+    if csv_path.exists():
+        with csv_path.open(newline="", encoding="utf-8") as f:
+            reader = csv.DictReader(f)
+            for r in reader:
+                raw_id = (r.get("id") or "").strip()
+                if not raw_id or not is_current_free_agent_csv(r):
+                    continue
+                try:
+                    player_id = int(raw_id)
+                except ValueError:
+                    continue
+
+                cur.execute("""
+                    UPDATE roster_players
+                    SET signed=0,
+                        contract_type='FA',
+                        salary=0,
+                        contract_initial_season=NULL,
+                        contract_length=NULL,
+                        contract_option=0,
+                        contract_expires='',
+                        franchise='',
+                        affiliate_team='',
+                        roster_status='',
+                        active_roster=0,
+                        fa_class=?
+                    WHERE id=?
+                """, (CURRENT_FA_CLASS, player_id))
 
     conn.commit()
     conn.close()
@@ -297,6 +519,7 @@ def api_players():
     fa_class_filter = (request.args.get("fa_class") or "").strip()
     rulev_only = (request.args.get("rulev_only") == "1")
     forty_man_count = None
+    active_count = None
     
     q = "SELECT * FROM roster_players"
     clauses = []
@@ -334,6 +557,19 @@ def api_players():
 
     cur.execute(q, params)
     rows = cur.fetchall()
+
+    if team:
+        cur.execute("""
+            SELECT
+                COALESCE(SUM(CASE WHEN roster_status = 'Active' THEN 1 ELSE 0 END), 0) AS active_count,
+                COALESCE(SUM(CASE WHEN roster_status IN ('Active', '40-man') THEN 1 ELSE 0 END), 0) AS forty_man_count
+            FROM roster_players
+            WHERE franchise = ?
+        """, (team,))
+        count_row = cur.fetchone()
+        active_count = int(count_row["active_count"] or 0)
+        forty_man_count = int(count_row["forty_man_count"] or 0)
+
     conn.close()
 
     out = []
@@ -346,6 +582,8 @@ def api_players():
         if fa_class_filter and row_fa_class != fa_class_filter:
             continue
 
+        is_current_fa = row_fa_class == CURRENT_FA_CLASS and not (r["franchise"] or "")
+
         out.append({
             "id": r["id"],
             "name": r["name"],
@@ -353,11 +591,12 @@ def api_players():
             "team": r["franchise"] or "",
             "dob": r["date_of_birth"],
             "bt": bt_text(r["bats"], r["throws"]),
-            "roster_status": r["roster_status"],
-            "contract_type": r["contract_type"] or "",
+            "roster_status": r["roster_status"] or "",
+            "active_roster": (r["roster_status"] or "") == "Active",
+            "contract_type": "" if is_current_fa else (r["contract_type"] or ""),
             "service_time": round(float(r["service_time"] or 0), 2),
-            "salary_m": round(float(r["salary"] or 0) / 1_000_000.0, 2),
-            "team_opt": bool(int(r["contract_option"] or 0)),
+            "salary_m": None if is_current_fa else round(float(r["salary"] or 0) / 1_000_000.0, 2),
+            "team_opt": False if is_current_fa else bool(int(r["contract_option"] or 0)),
             "fa_class": row_fa_class,
             "options_remaining": int(r["options_remaining"] or 0),
             "rulev_eligible": row_rulev,
@@ -365,17 +604,6 @@ def api_players():
               session.get("roster_authed_team", "") != "" and
               (r["franchise"] or "") == session.get("roster_authed_team", "")),
         })
-        forty_man_count = None
-        if team:
-            conn2 = get_conn()
-            cur2 = conn2.cursor()
-            cur2.execute("""
-                SELECT COUNT(*)
-                FROM roster_players
-                WHERE franchise = ? AND roster_status = '40-man'
-            """, (team,))
-            forty_man_count = int(cur2.fetchone()[0] or 0)
-            conn2.close()
 
     return jsonify({
         "players": out,
@@ -385,6 +613,7 @@ def api_players():
         "status_types": STATUS_TYPES,
         "fa_classes": FA_CLASSES,
         "forty_man_count": forty_man_count,
+        "active_count": active_count,
 
     })
 
@@ -431,7 +660,7 @@ def api_update_player():
     if player_id <= 0:
         return ("Missing player id", 400)
 
-    if new_status not in ("40-man", "Reserve"):
+    if new_status not in ("Active", "40-man", "Reserve"):
         return ("Invalid roster status", 400)
 
     conn = get_conn()
@@ -454,12 +683,15 @@ def api_update_player():
 
     old_status = row["roster_status"] or ""
 
-    # only block promotions to 40-man
-    if old_status != "40-man" and new_status == "40-man":
+    old_on_40 = old_status in ("Active", "40-man")
+    new_on_40 = new_status in ("Active", "40-man")
+
+    # Moving a reserve player onto either Active or 40-man consumes a 40-man slot.
+    if not old_on_40 and new_on_40:
         cur.execute("""
             SELECT COUNT(*)
             FROM roster_players
-            WHERE franchise = ? AND roster_status = '40-man'
+            WHERE franchise = ? AND roster_status IN ('Active', '40-man')
         """, (team,))
         forty_count = int(cur.fetchone()[0] or 0)
 
@@ -469,9 +701,9 @@ def api_update_player():
 
     cur.execute("""
         UPDATE roster_players
-        SET roster_status=?
+        SET roster_status=?, active_roster=?
         WHERE id=?
-    """, (new_status, player_id))
+    """, (new_status, 1 if new_status == "Active" else 0, player_id))
 
     conn.commit()
     conn.close()
@@ -603,7 +835,10 @@ async function fetchPlayers() {{
   faClassFilter.value = state.faClass;
 
 if (state.team && data.forty_man_count !== null && data.forty_man_count !== undefined) {{
-  fortyManCount.textContent = `${{data.forty_man_count}}/40 on 40-man`;
+  const activeText = data.active_count !== null && data.active_count !== undefined
+    ? `${{data.active_count}} active • `
+    : "";
+  fortyManCount.textContent = `${{activeText}}${{data.forty_man_count}}/40 on 40-man`;
   fortyManCount.style.display = "inline";
 }} else {{
   fortyManCount.textContent = "";
@@ -617,10 +852,12 @@ if (state.team && data.forty_man_count !== null && data.forty_man_count !== unde
 
     let statusHtml = (p.roster_status || "");
     if (p.can_edit_status) {{
+      const selActive = p.roster_status === "Active" ? "selected" : "";
       const sel40 = p.roster_status === "40-man" ? "selected" : "";
       const selRes = p.roster_status === "Reserve" ? "selected" : "";
       statusHtml =
         '<select class="status-edit" data-player-id="' + p.id + '">' +
+          '<option value="Active" ' + selActive + '>Active</option>' +
           '<option value="40-man" ' + sel40 + '>40-man</option>' +
           '<option value="Reserve" ' + selRes + '>Reserve</option>' +
         '</select>';
@@ -635,7 +872,7 @@ if (state.team && data.forty_man_count !== null && data.forty_man_count !== unde
       <td>${{statusHtml}}</td>
       <td>${{p.contract_type || ""}}</td>
       <td>${{Number(p.service_time).toFixed(2)}}</td>
-      <td>${{moneyM(p.salary_m)}}</td>
+      <td>${{p.salary_m === null || p.salary_m === undefined ? "" : moneyM(p.salary_m)}}</td>
       <td>${{p.team_opt ? "✓" : ""}}</td>
       <td>${{p.fa_class || ""}}</td>
       <td>${{p.options_remaining}}</td>

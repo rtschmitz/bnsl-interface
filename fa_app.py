@@ -88,6 +88,19 @@ def get_db_path() -> Path:
 FREE_AGENTS_CSV = APP_DIR / "free_agents.csv"
 PLAYER_REGISTRY_CSV = APP_DIR / "player_registry.csv"  # your new registry file
 
+# Roster CSV is now the source of truth for the FA tab.
+# Override with:
+#   export BNSL_ROSTER_CSV=/path/to/rostered_2025service_BNSL_arb_updated.csv
+ROSTER_CSV = Path(os.environ.get("BNSL_ROSTER_CSV", str(APP_DIR / "rostered_2025service_BNSL_arb_updated.csv")))
+
+# To avoid reparsing a large roster on every request, sync if the file mtime changed
+# or after this TTL. Set to 0 if you want every request to check the roster file.
+ROSTER_SYNC_TTL_SECONDS = int(os.environ.get("BNSL_ROSTER_SYNC_TTL_SECONDS", "15"))
+
+# Status values that still count as rostered even if active/expanded flags are false.
+ROSTERED_STATUSES = {"ACTIVE", "RESERVE"}
+
+
 HEADSHOT_DIR = APP_DIR / "static" / "player_images"
 HEADSHOT_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -102,6 +115,22 @@ ABBR_TO_TEAM = {
     "SEA":"Seattle Mariners","STL":"St. Louis Cardinals","TBR":"Tampa Bay Rays","TEX":"Texas Rangers",
     "TOR":"Toronto Blue Jays","WSN":"Washington Nationals",
 }
+
+# Common roster/export aliases that differ from the display-team dictionary above.
+ABBR_TO_TEAM.update({
+    "KC": "Kansas City Royals",
+    "KCR": "Kansas City Royals",
+    "SD": "San Diego Padres",
+    "SDP": "San Diego Padres",
+    "SF": "San Francisco Giants",
+    "SFG": "San Francisco Giants",
+    "TB": "Tampa Bay Rays",
+    "TBR": "Tampa Bay Rays",
+    "WAS": "Washington Nationals",
+    "WSH": "Washington Nationals",
+    "WSN": "Washington Nationals",
+})
+
 
 # ---------- Blueprint ----------
 fa_bp = Blueprint("fa", __name__)
@@ -307,6 +336,13 @@ def init_db():
     ensure_column(conn, "free_agents", "fg_url", "fg_url TEXT")
     ensure_column(conn, "free_agents", "franchise_abbr", "franchise_abbr TEXT")
     ensure_column(conn, "free_agents", "htd", "htd INTEGER")  # mirror of HTD (0/1/2)
+
+    # --- roster-sync columns: free_agents is now populated from the roster tab/CSV ---
+    ensure_column(conn, "free_agents", "roster_player_id", "roster_player_id INTEGER")
+    ensure_column(conn, "free_agents", "roster_source", "roster_source TEXT")
+    ensure_column(conn, "free_agents", "is_roster_unrostered", "is_roster_unrostered INTEGER NOT NULL DEFAULT 0")
+    ensure_column(conn, "free_agents", "last_seen_roster_sync", "last_seen_roster_sync TEXT")
+    ensure_column(conn, "free_agents", "removed_from_roster_sync", "removed_from_roster_sync TEXT")
     cur.execute("""
         CREATE TABLE IF NOT EXISTS player_meta (
             mlbam_id INTEGER PRIMARY KEY,
@@ -321,6 +357,16 @@ def init_db():
         )
     """)
     cur.execute("CREATE INDEX IF NOT EXISTS free_agents_mlbam_idx ON free_agents(mlbam_id)")
+
+    cur.execute("""
+        CREATE UNIQUE INDEX IF NOT EXISTS free_agents_roster_player_id_uq
+        ON free_agents(roster_player_id)
+        WHERE roster_player_id IS NOT NULL
+    """)
+    cur.execute("""
+        CREATE INDEX IF NOT EXISTS free_agents_roster_unrostered_idx
+        ON free_agents(is_roster_unrostered)
+    """)
 
 
     cur.execute("""
@@ -563,6 +609,249 @@ def import_free_agents_csv(path: Path):
     conn.commit()
     conn.close()
 
+
+# ---------- Roster-source sync for Free Agency tab ----------
+_last_roster_sync_mtime: float | None = None
+_last_roster_sync_checked_at: float = 0.0
+
+
+def _row_get_ci(row: Dict[str, str], *names: str) -> str:
+    """Case-insensitive CSV row getter."""
+    if not row:
+        return ""
+    lower_map = {str(k).strip().lower(): v for k, v in row.items()}
+    for name in names:
+        v = lower_map.get(str(name).strip().lower())
+        if v is not None:
+            return str(v).strip()
+    return ""
+
+
+def _parse_positive_int(value: Any) -> int | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    try:
+        val = int(float(text))
+        return val if val > 0 else None
+    except Exception:
+        return None
+
+
+def _truthy_text(value: Any) -> bool:
+    return str(value or "").strip().upper() in {"TRUE", "T", "YES", "Y", "1"}
+
+
+def roster_code_to_team(value: Any) -> str:
+    code = str(value or "").strip().upper()
+    if not code:
+        return ""
+
+    # Accept "Arizona Diamondbacks (ARI)" too.
+    m = re.search(r"\(([A-Z]{2,3})\)", code)
+    if m:
+        code = m.group(1)
+
+    code = re.sub(r"[^A-Z0-9]", "", code)
+    return ABBR_TO_TEAM.get(code, code)
+
+
+def is_unrostered_roster_row(row: Dict[str, str]) -> bool:
+    """
+    Source-of-truth FA eligibility from the roster tab/export.
+
+    A player is considered unrostered if they are not active, not expanded,
+    and their status is not a configured rostered status such as Active/Reserve.
+    This intentionally does not look at salary or contract type: released/unrostered
+    players should appear in the FA tab.
+    """
+    active = _truthy_text(_row_get_ci(row, "active_roster"))
+    expanded = _truthy_text(_row_get_ci(row, "expanded_roster"))
+    status = _row_get_ci(row, "status").strip().upper()
+    return (not active) and (not expanded) and (status not in ROSTERED_STATUSES)
+
+
+def _find_existing_free_agent_id(cur: sqlite3.Cursor, roster_id: int | None, mlbam_id: int | None, fg_id: int | None, name: str) -> int | None:
+    if roster_id is not None:
+        cur.execute("SELECT id FROM free_agents WHERE roster_player_id=?", (roster_id,))
+        r = cur.fetchone()
+        if r:
+            return int(r["id"])
+
+    if mlbam_id is not None:
+        cur.execute("SELECT id FROM free_agents WHERE mlbam_id=?", (mlbam_id,))
+        r = cur.fetchone()
+        if r:
+            return int(r["id"])
+
+    if fg_id is not None:
+        cur.execute("SELECT id FROM free_agents WHERE fangraphs_id=?", (fg_id,))
+        r = cur.fetchone()
+        if r:
+            return int(r["id"])
+
+    # Last fallback: exact unaccented name match. This is intentionally last because
+    # duplicate names are possible, but it helps preserve old seeded DB rows.
+    if name:
+        cur.execute("SELECT id FROM free_agents WHERE LOWER(unaccent(name)) = LOWER(unaccent(?)) LIMIT 1", (name,))
+        r = cur.fetchone()
+        if r:
+            return int(r["id"])
+
+    return None
+
+
+def sync_free_agents_from_roster_csv(path: Path = ROSTER_CSV) -> tuple[int, int]:
+    """
+    Sync free_agents from the roster CSV.
+
+    Returns:
+        (unrostered_count, upserted_count)
+
+    The sync does NOT delete free_agents rows, bids, or watchlist rows.
+    It marks roster-sourced players as currently unrostered or not, and the
+    FA tab filters on is_roster_unrostered=1.
+    """
+    path = Path(path)
+    if not path.exists():
+        logging.warning("Roster sync skipped: roster CSV does not exist: %s", path)
+        return (0, 0)
+
+    now_text = iso(utcnow())
+    rows: list[Dict[str, str]] = []
+    with path.open(newline="", encoding="utf-8-sig") as f:
+        reader = csv.DictReader(f)
+        if not reader.fieldnames:
+            logging.warning("Roster sync skipped: roster CSV has no header: %s", path)
+            return (0, 0)
+        for row in reader:
+            rows.append(dict(row))
+
+    conn = get_conn()
+    cur = conn.cursor()
+
+    # Mark previously roster-synced players stale. Current unrostered rows below
+    # will be marked back to 1.
+    cur.execute("""
+        UPDATE free_agents
+        SET is_roster_unrostered=0,
+            removed_from_roster_sync=?
+        WHERE roster_source='roster_csv'
+    """, (now_text,))
+
+    unrostered_count = 0
+    upserted_count = 0
+
+    for row in rows:
+        if not is_unrostered_roster_row(row):
+            continue
+
+        unrostered_count += 1
+
+        roster_id = _parse_positive_int(_row_get_ci(row, "id", "player_id", "roster_player_id"))
+        mlbam_id = _parse_positive_int(_row_get_ci(row, "mlbam_id", "MLBAMID"))
+        fg_id = _parse_positive_int(_row_get_ci(row, "fangraphs_id", "PlayerId", "fangraphs_player_id"))
+
+        name = _row_get_ci(row, "name", "player", "Name")
+        if not name:
+            first = _row_get_ci(row, "first_name")
+            last = _row_get_ci(row, "last_name")
+            name = f"{first} {last}".strip()
+        if not name:
+            continue
+
+        pos = _row_get_ci(row, "position")
+        last_team = roster_code_to_team(_row_get_ci(row, "franchise", "team", "last_team"))
+
+        existing_id = _find_existing_free_agent_id(cur, roster_id, mlbam_id, fg_id, name)
+
+        if existing_id is None:
+            cur.execute("""
+                INSERT INTO free_agents(
+                    name, position, last_team,
+                    hometown_team, hometown_seasons, seed_qo,
+                    mlbam_id, fangraphs_id,
+                    roster_player_id, roster_source, is_roster_unrostered,
+                    last_seen_roster_sync, removed_from_roster_sync
+                )
+                VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)
+            """, (
+                name,
+                pos,
+                last_team,
+                "",       # hometown_team can still come from player_registry later
+                0,
+                0,
+                mlbam_id,
+                fg_id,
+                roster_id,
+                "roster_csv",
+                1,
+                now_text,
+                None,
+            ))
+            upserted_count += 1
+        else:
+            # Preserve bid/signing state and hometown data. Update roster-derived identity.
+            cur.execute("""
+                UPDATE free_agents
+                SET name=?,
+                    position=COALESCE(NULLIF(?, ''), position),
+                    last_team=COALESCE(NULLIF(?, ''), last_team),
+                    mlbam_id=COALESCE(?, mlbam_id),
+                    fangraphs_id=COALESCE(?, fangraphs_id),
+                    roster_player_id=COALESCE(?, roster_player_id),
+                    roster_source='roster_csv',
+                    is_roster_unrostered=1,
+                    last_seen_roster_sync=?,
+                    removed_from_roster_sync=NULL
+                WHERE id=?
+            """, (
+                name,
+                pos,
+                last_team,
+                mlbam_id,
+                fg_id,
+                roster_id,
+                now_text,
+                existing_id,
+            ))
+            upserted_count += 1
+
+    conn.commit()
+    conn.close()
+
+    logging.info("Roster FA sync complete: %s unrostered, %s upserted from %s", unrostered_count, upserted_count, path)
+    return (unrostered_count, upserted_count)
+
+
+def sync_free_agents_from_roster_if_needed(force: bool = False) -> None:
+    """
+    Sync if the roster CSV is present and changed, or after the TTL expires.
+    This lets the FA tab reflect future releases from the roster tab/export
+    without doing a destructive one-time seed.
+    """
+    global _last_roster_sync_mtime, _last_roster_sync_checked_at
+
+    path = Path(ROSTER_CSV)
+    if not path.exists():
+        return
+
+    now = time.time()
+    try:
+        mtime = path.stat().st_mtime
+    except OSError:
+        return
+
+    ttl_expired = (ROSTER_SYNC_TTL_SECONDS <= 0) or ((now - _last_roster_sync_checked_at) >= ROSTER_SYNC_TTL_SECONDS)
+    changed = (_last_roster_sync_mtime is None) or (mtime != _last_roster_sync_mtime)
+
+    if force or changed or ttl_expired:
+        sync_free_agents_from_roster_csv(path)
+        _last_roster_sync_mtime = mtime
+        _last_roster_sync_checked_at = now
+
+
 def seed_qualifying_offers(qo_aav_m: float = 21.2):
     """
     Seed players with seed_qo=1 with an opening QO bid:
@@ -688,11 +977,15 @@ def player_snapshot_row(p: sqlite3.Row) -> Dict[str, Any]:
 
 def fetch_free_agents(search: str = "", hide_signed: bool = False) -> List[Dict[str, Any]]:
     enforce_expirations()
+    sync_free_agents_from_roster_if_needed()
     conn = get_conn()
     cur = conn.cursor()
 
     clauses = []
     params: List[Any] = []
+
+    if Path(ROSTER_CSV).exists():
+        clauses.append("COALESCE(is_roster_unrostered,0)=1")
 
     if search.strip():
         s = search.strip().lower()
@@ -715,6 +1008,7 @@ def fetch_free_agents(search: str = "", hide_signed: bool = False) -> List[Dict[
 
 def fetch_watchlist(team: str) -> List[Dict[str, Any]]:
     enforce_expirations()
+    sync_free_agents_from_roster_if_needed()
     conn = get_conn()
     cur = conn.cursor()
     cur.execute("""
@@ -722,6 +1016,7 @@ def fetch_watchlist(team: str) -> List[Dict[str, Any]]:
         FROM watchlist w
         JOIN free_agents p ON p.id=w.player_id
         WHERE w.team=?
+          AND COALESCE(p.is_roster_unrostered,0)=1
         ORDER BY datetime(w.created_at) DESC
     """, (team,))
     rows = cur.fetchall()
@@ -873,6 +1168,8 @@ def bootstrap_fa():
         generate_sample_free_agents_csv(FREE_AGENTS_CSV)
         if db_is_empty():
             import_free_agents_csv(FREE_AGENTS_CSV)
+
+    sync_free_agents_from_roster_if_needed(force=True)
 
     seed_qualifying_offers(qo_aav_m=21.2)
 
@@ -2327,12 +2624,22 @@ def healthz():
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()
     ap.add_argument("--sync-registry", action="store_true", help="Import/refresh players from player_registry.csv into DB")
+    ap.add_argument("--sync-roster", action="store_true", help="Import/refresh free agents from the roster CSV")
     ap.add_argument("--prefetch-headshots", action="store_true", help="Download headshots for all players with mlbam_id")
     args = ap.parse_args()
 
+    if args.sync_roster:
+        init_db()
+        sync_free_agents_from_roster_if_needed(force=True)
+        print("✅ Roster free agents synced.")
+        raise SystemExit(0)
+
     if args.sync_registry:
+        init_db()
         import_player_registry_csv(PLAYER_REGISTRY_CSV)
+        sync_free_agents_from_roster_if_needed(force=True)
         print("✅ Registry synced.")
+        print("✅ Roster free agents synced.")
         if args.prefetch_headshots:
             conn = get_conn()
             cur = conn.cursor()

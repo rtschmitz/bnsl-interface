@@ -9,9 +9,11 @@ import roster_app
 from fa_app import fa_bp
 from draft_app import draft_bp
 from roster_app import roster_bp
+from financials_app import financials_bp
 from draft_order_page import order_bp
 from rulev_app import rulev_bp
 from rulev_order_page import rulev_order_bp
+
 
 def create_app():
     app = Flask(__name__)
@@ -28,6 +30,7 @@ def create_app():
     app.register_blueprint(draft_bp,  url_prefix="/draft")
     app.register_blueprint(fa_bp,     url_prefix="/fa")
     app.register_blueprint(roster_bp, url_prefix="/roster")
+    app.register_blueprint(financials_bp, url_prefix="/financials")
     app.register_blueprint(order_bp,  url_prefix="/draft")
     app.register_blueprint(rulev_bp,  url_prefix="/rulev")
     app.register_blueprint(rulev_order_bp, url_prefix="/rulev")
@@ -41,6 +44,7 @@ def create_app():
         return render_template("home.html")
 
     return app
+
 
 if __name__ == "__main__":
     create_app().run(host="0.0.0.0", port=5000, debug=True)
