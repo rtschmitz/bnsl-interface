@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import os
+import logging
+import re
 import sqlite3
 from pathlib import Path
 from datetime import datetime
@@ -30,6 +32,15 @@ def get_conn() -> sqlite3.Connection:
     return conn
 
 
+def ensure_column(conn: sqlite3.Connection, table: str, col: str, coldef: str) -> None:
+    cur = conn.cursor()
+    cur.execute(f"PRAGMA table_info({table})")
+    cols = {r[1] for r in cur.fetchall()}
+    if col not in cols:
+        cur.execute(f"ALTER TABLE {table} ADD COLUMN {coldef}")
+        conn.commit()
+
+
 def init_db():
     conn = get_conn()
     cur = conn.cursor()
@@ -43,6 +54,28 @@ def init_db():
         drafted_by TEXT,
         drafted_at TEXT
       )
+    """)
+
+    # Roster-sync columns.  rulev_players.id remains the Rule V draft's local
+    # player id because rulev_order.player_id already points at it.  The roster
+    # player id is stored separately and kept unique.
+    ensure_column(conn, "rulev_players", "roster_player_id", "roster_player_id INTEGER")
+    ensure_column(conn, "rulev_players", "dob", "dob TEXT")
+    ensure_column(conn, "rulev_players", "contract_type", "contract_type TEXT")
+    ensure_column(conn, "rulev_players", "roster_status", "roster_status TEXT")
+    ensure_column(conn, "rulev_players", "roster_source", "roster_source TEXT")
+    ensure_column(conn, "rulev_players", "rulev_eligible", "rulev_eligible INTEGER NOT NULL DEFAULT 1")
+    ensure_column(conn, "rulev_players", "last_seen_roster_sync", "last_seen_roster_sync TEXT")
+    ensure_column(conn, "rulev_players", "removed_from_roster_sync", "removed_from_roster_sync TEXT")
+
+    cur.execute("""
+      CREATE UNIQUE INDEX IF NOT EXISTS rulev_players_roster_player_id_uq
+      ON rulev_players(roster_player_id)
+      WHERE roster_player_id IS NOT NULL
+    """)
+    cur.execute("""
+      CREATE INDEX IF NOT EXISTS rulev_players_eligible_idx
+      ON rulev_players(rulev_eligible, drafted_by)
     """)
 
     cur.execute("""
@@ -60,79 +93,217 @@ def init_db():
     conn.commit()
     conn.close()
 
-
-def db_empty() -> bool:
-    conn = get_conn()
-    cur = conn.cursor()
-    cur.execute("SELECT COUNT(*) FROM rulev_players")
-    n = int(cur.fetchone()[0] or 0)
-    conn.close()
-    return n == 0
+def get_roster_db_path() -> Path:
+    cfg = current_app.config.get("ROSTER_DB_PATH")
+    return Path(cfg) if cfg else (APP_DIR / "roster.db")
 
 
-def seed_demo_data():
+def _infer_two_digit_birth_year(yy: int) -> int:
+    # Baseball DOBs with 00-26 are 2000-2026; everything else is 1900s.
+    return 2000 + yy if yy <= 26 else 1900 + yy
+
+
+def _parse_roster_dob_parts(dob: Any) -> tuple[int, int | None, int | None] | None:
+    """Parse YYYY-MM-DD, DD-MM-YY, or DD-MM-YYYY roster DOBs."""
+    text = str(dob or "").strip()
+    if not text:
+        return None
+
+    parts = [p for p in re.split(r"\D+", text) if p]
+    if len(parts) >= 3:
+        # YYYY-MM-DD / YYYY/MM/DD
+        if len(parts[0]) == 4:
+            return int(parts[0]), int(parts[1]), int(parts[2])
+
+        # DD-MM-YYYY
+        if len(parts[2]) == 4:
+            return int(parts[2]), int(parts[1]), int(parts[0])
+
+        # DD-MM-YY
+        if len(parts[2]) == 2:
+            return _infer_two_digit_birth_year(int(parts[2])), int(parts[1]), int(parts[0])
+
+    # Last fallback: any explicit 19xx/20xx year embedded in the string.
+    m = re.search(r"(19\d{2}|20\d{2})", text)
+    if m:
+        return int(m.group(1)), None, None
+
+    return None
+
+
+def _safe_birth_year(dob: Any) -> int | None:
+    parsed = _parse_roster_dob_parts(dob)
+    return parsed[0] if parsed else None
+
+
+def _normalize_roster_dob(dob: Any) -> str:
+    parsed = _parse_roster_dob_parts(dob)
+    if not parsed:
+        return str(dob or "").strip()
+    year, month, day = parsed
+    if month is None or day is None:
+        return f"{year:04d}"
+    if not (1 <= month <= 12 and 1 <= day <= 31):
+        return str(dob or "").strip()
+    return f"{year:04d}-{month:02d}-{day:02d}"
+
+
+def _is_rulev_eligible_roster_row(row: sqlite3.Row) -> bool:
     """
-    3 rounds, arbitrary order and arbitrary player pool
+    Rule V eligibility source of truth:
+      - rostered to an organization, represented by a non-empty franchise
+      - not protected on the 40-man roster, which is roster_status='Reserve'
+      - born in or before 2001
+
+    Do not use roster_players.signed here.  In the roster import, signed can be
+    blank/0 for players who are still rostered to an org, so franchise/status
+    are the authoritative rostered-state fields for Rule V.
+    """
+    franchise = str(row["franchise"] or "").strip()
+    roster_status = str(row["roster_status"] or "").strip()
+    birth_year = _safe_birth_year(row["date_of_birth"] if "date_of_birth" in row.keys() else "")
+
+    return (
+        franchise != ""
+        and roster_status == "Reserve"
+        and birth_year is not None
+        and birth_year <= 2001
+    )
+
+
+def seed_default_order_if_empty() -> None:
+    """
+    Keep the existing demo/default Rule V order behavior, but do not seed demo
+    players.  The player pool now comes from roster.db.
     """
     init_db()
-    if not db_empty():
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("SELECT COUNT(*) FROM rulev_order")
+    n_order = int(cur.fetchone()[0] or 0)
+    if n_order > 0:
+        conn.close()
         return
 
-    # Arbitrary 10-team order (use any subset you like)
     teams = [
         "Oakland Athletics", "Kansas City Royals", "Colorado Rockies", "Washington Nationals", "Miami Marlins",
         "Pittsburgh Pirates", "Detroit Tigers", "Chicago White Sox", "Arizona Diamondbacks", "Los Angeles Angels",
     ]
-
-    # 3 rounds, straight order, no comp picks
-    conn = get_conn()
-    cur = conn.cursor()
-
-    # seed players
-    demo_players = [
-        ("Luis Araujo", "SS", "NYY"),
-        ("Marco Diaz", "OF", "LAD"),
-        ("Ethan Park", "SP", "BOS"),
-        ("Javier Santos", "C", "TBR"),
-        ("Noah Kim", "2B", "SEA"),
-        ("Diego Alvarez", "3B", "ATL"),
-        ("Ryan Chen", "RP", "HOU"),
-        ("Mateo Rivera", "OF", "MIL"),
-        ("Caleb Johnson", "SP", "CLE"),
-        ("Isaac Patel", "SS", "TOR"),
-        ("Ben Thompson", "OF", "STL"),
-        ("Adrian Flores", "SP", "CHC"),
-        ("Tyler Nguyen", "C", "SDP"),
-        ("Samir Hassan", "2B", "SFG"),
-        ("Owen Brooks", "RP", "MIN"),
-        ("Jordan Price", "3B", "NYM"),
-        ("Leo Simmons", "OF", "PHI"),
-        ("Carter Bell", "SP", "TEX"),
-        ("Julian Ortiz", "SS", "BAL"),
-        ("Elias Gomez", "RP", "LAA"),
-        ("Grayson Lee", "SP", "DET"),
-        ("Hudson Clark", "SP", "COL"),
-        ("Dominic Ward", "OF", "PIT"),
-        ("Anthony Ross", "OF", "WSN"),
-        ("Nolan Baker", "C", "MIA"),
-        ("Asher Perry", "RP", "OAK"),
-        ("Ezra Watson", "2B", "KCR"),
-        ("Aaron Foster", "3B", "CHW"),
-        ("Lucas Patel", "SP", "ARI"),
-        ("Michael Hughes", "OF", "SEA"),
-    ]
-    cur.executemany("INSERT INTO rulev_players(name, position, org) VALUES(?,?,?)", demo_players)
-
-    # seed order
     rows = []
-    for r in range(1, 4):  # 3 rounds
+    for r in range(1, 4):
         for p, team in enumerate(teams, start=1):
             rows.append((r, p, team))
     cur.executemany("INSERT OR IGNORE INTO rulev_order(round, pick, team) VALUES(?,?,?)", rows)
-
     conn.commit()
     conn.close()
 
+
+def sync_rulev_from_roster_db() -> tuple[int, int, int]:
+    """
+    Rebuild the Rule V eligible pool from live roster.db.
+
+    This is intended to run at startup and after roster transactions, not on
+    every Rule V search.  Existing drafted players are preserved so completed
+    pick history/order rows do not break.
+
+    Returns: (eligible_roster_rows, upserted_rows, hidden_stale_rows)
+    """
+    init_db()
+    roster_path = get_roster_db_path()
+    if not roster_path.exists():
+        logging.warning("Rule V roster sync skipped: roster.db does not exist: %s", roster_path)
+        return (0, 0, 0)
+
+    rconn = sqlite3.connect(str(roster_path))
+    rconn.row_factory = sqlite3.Row
+    rcur = rconn.cursor()
+    rcur.execute("SELECT * FROM roster_players")
+    eligible_rows = [r for r in rcur.fetchall() if _is_rulev_eligible_roster_row(r)]
+    rconn.close()
+
+    now = datetime.utcnow().isoformat(timespec="seconds")
+    conn = get_conn()
+    cur = conn.cursor()
+
+    # Hide all currently undrafted rows until proven eligible.  This removes
+    # old demo rows from the visible list without deleting data or breaking
+    # already-made picks.
+    cur.execute("""
+        UPDATE rulev_players
+        SET rulev_eligible=0,
+            removed_from_roster_sync=?
+        WHERE drafted_by IS NULL OR drafted_by=''
+    """, (now,))
+    hidden = cur.rowcount if cur.rowcount is not None and cur.rowcount >= 0 else 0
+
+    upserted = 0
+    for r in eligible_rows:
+        roster_player_id = int(r["id"])
+        name = str(r["name"] or "").strip()
+        if not name:
+            continue
+        position = str(r["position"] or "").strip()
+        org = str(r["franchise"] or "").strip()
+        dob = _normalize_roster_dob(r["date_of_birth"] if "date_of_birth" in r.keys() else "")
+        contract_type = str(r["contract_type"] or "").strip().upper()
+        roster_status = str(r["roster_status"] or "").strip()
+
+        cur.execute("SELECT id FROM rulev_players WHERE roster_player_id=?", (roster_player_id,))
+        existing = cur.fetchone()
+        if existing:
+            cur.execute("""
+                UPDATE rulev_players
+                SET name=?,
+                    position=?,
+                    org=?,
+                    dob=?,
+                    contract_type=?,
+                    roster_status=?,
+                    roster_source='roster_db',
+                    rulev_eligible=1,
+                    last_seen_roster_sync=?,
+                    removed_from_roster_sync=NULL
+                WHERE id=?
+            """, (
+                name, position, org, dob, contract_type, roster_status,
+                now, int(existing["id"]),
+            ))
+        else:
+            cur.execute("""
+                INSERT INTO rulev_players(
+                    name, position, org,
+                    drafted_by, drafted_at,
+                    roster_player_id, dob, contract_type, roster_status,
+                    roster_source, rulev_eligible,
+                    last_seen_roster_sync, removed_from_roster_sync
+                ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)
+            """, (
+                name, position, org,
+                None, None,
+                roster_player_id, dob, contract_type, roster_status,
+                "roster_db", 1,
+                now, None,
+            ))
+        upserted += 1
+
+    conn.commit()
+    conn.close()
+    logging.info(
+        "Rule V roster sync complete: %s eligible roster rows, %s upserted, %s hidden/stale rows marked",
+        len(eligible_rows), upserted, hidden,
+    )
+    return (len(eligible_rows), upserted, hidden)
+
+
+def bootstrap_rulev(sync_roster: bool = True) -> None:
+    """
+    Call from app.py after bootstrap_roster().  This initializes schema, keeps
+    the order table available, and refreshes the eligible player pool once.
+    """
+    init_db()
+    seed_default_order_if_empty()
+    if sync_roster:
+        sync_rulev_from_roster_db()
 
 def current_pick() -> Dict[str, Any] | None:
     conn = get_conn()
@@ -384,11 +555,17 @@ INDEX_HTML = INDEX_HTML.replace("__BNSL_GAME_CSS__", BNSL_GAME_CSS)
 
 
 
+_schema_bootstrapped = False
+
 @rulev_bp.before_app_request
-def _bootstrap_once():
-    # cheap, safe: ensure db exists/seeded before first request
-    # (idempotent; only seeds if empty)
-    seed_demo_data()
+def _ensure_schema_once():
+    # Safety net for direct imports/tests.  The expensive roster sync is done
+    # only in bootstrap_rulev() or explicit roster transactions.
+    global _schema_bootstrapped
+    if not _schema_bootstrapped:
+        init_db()
+        seed_default_order_if_empty()
+        _schema_bootstrapped = True
 
 
 @rulev_bp.get("/")
@@ -466,14 +643,15 @@ def api_players():
 
     conn = get_conn()
     cur = conn.cursor()
+
+    clauses = ["(COALESCE(rulev_eligible, 1)=1 OR COALESCE(drafted_by, '') != '')"]
+    params: List[Any] = []
     if q:
-        cur.execute("""
-          SELECT * FROM rulev_players
-          WHERE LOWER(name) LIKE ?
-          ORDER BY name COLLATE NOCASE ASC
-        """, (f"%{q}%",))
-    else:
-        cur.execute("SELECT * FROM rulev_players ORDER BY name COLLATE NOCASE ASC")
+        clauses.append("LOWER(name) LIKE ?")
+        params.append(f"%{q}%")
+
+    sql = "SELECT * FROM rulev_players WHERE " + " AND ".join(clauses) + " ORDER BY name COLLATE NOCASE ASC"
+    cur.execute(sql, params)
     rows = cur.fetchall()
     conn.close()
 
@@ -484,6 +662,9 @@ def api_players():
             "name": r["name"],
             "position": r["position"],
             "org": r["org"],
+            "dob": r["dob"] if "dob" in r.keys() else "",
+            "roster_player_id": int(r["roster_player_id"] or 0) if "roster_player_id" in r.keys() else None,
+            "rulev_eligible": bool(int(r["rulev_eligible"] or 0)) if "rulev_eligible" in r.keys() else True,
             "drafted_by": r["drafted_by"],
             "drafted_at": r["drafted_at"],
         })
@@ -530,3 +711,25 @@ def api_pick():
     conn.close()
 
     return ("", 204)
+
+
+if __name__ == "__main__":
+    import argparse
+    from flask import Flask
+
+    parser = argparse.ArgumentParser(description="Rule V roster-sync utilities")
+    parser.add_argument("--rulev-db", default=str(DEFAULT_DB), help="Path to rulev.db")
+    parser.add_argument("--roster-db", default=str(APP_DIR / "roster.db"), help="Path to roster.db")
+    parser.add_argument("--sync-roster", action="store_true", help="Refresh Rule V eligible pool from roster.db")
+    args = parser.parse_args()
+
+    app = Flask(__name__)
+    app.config["RULEV_DB_PATH"] = args.rulev_db
+    app.config["ROSTER_DB_PATH"] = args.roster_db
+    with app.app_context():
+        init_db()
+        seed_default_order_if_empty()
+        if args.sync_roster:
+            print(sync_rulev_from_roster_db())
+        else:
+            print("Initialized rulev.db. Use --sync-roster to refresh eligibles from roster.db.")

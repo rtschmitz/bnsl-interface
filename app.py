@@ -5,6 +5,7 @@ from flask import Flask, render_template
 import fa_app
 import draft_app
 import roster_app
+import rulev_app
 
 from fa_app import fa_bp
 from draft_app import draft_bp
@@ -26,6 +27,8 @@ def create_app():
     app.config["RULEV_DB_PATH"]  = str(APP_DIR / "rulev.db")
     app.config["ROSTER_DB_PATH"] = str(APP_DIR / "roster.db")
     app.config["ROSTER_CSV_PATH"] = str(APP_DIR / "rostered_2025service.csv")
+    app.config["OOTP_FA_ROSTER_PATH"] = str(APP_DIR / "bnsl_ootp27_fixed_rosters_oldids_optionsupdated.txt")
+    app.config["HOMETOWN_DISCOUNTS_DB_PATH"] = str(APP_DIR / "hometown_discounts.db")
 
     app.register_blueprint(draft_bp,  url_prefix="/draft")
     app.register_blueprint(fa_bp,     url_prefix="/fa")
@@ -36,8 +39,10 @@ def create_app():
     app.register_blueprint(rulev_order_bp, url_prefix="/rulev")
 
     with app.app_context():
-        fa_app.bootstrap_fa()
+        # roster.db must exist before FA/Rule V syncs use it as the source of truth.
         roster_app.bootstrap_roster()
+        rulev_app.bootstrap_rulev()
+        fa_app.bootstrap_fa()
 
     @app.get("/")
     def home():

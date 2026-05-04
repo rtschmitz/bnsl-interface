@@ -12,14 +12,14 @@ def main():
     args = parser.parse_args()
 
     # Build argv exactly like the old CLI
-    argv = ["free_agency.py"]
+    argv = ["fa_app.py"]
     if args.sync_registry:
         argv.append("--sync-registry")
     if args.prefetch_headshots:
         argv.append("--prefetch-headshots")
 
     # Run free_agency.py as if it were executed directly
-    script_path = Path(__file__).resolve().with_name("free_agency.py")
+    script_path = Path(__file__).resolve().with_name("fa_app.py")
     if not script_path.exists():
         raise FileNotFoundError(f"Couldn't find {script_path}")
 

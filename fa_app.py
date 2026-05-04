@@ -93,6 +93,20 @@ PLAYER_REGISTRY_CSV = APP_DIR / "player_registry.csv"  # your new registry file
 #   export BNSL_ROSTER_CSV=/path/to/rostered_2025service_BNSL_arb_updated.csv
 ROSTER_CSV = Path(os.environ.get("BNSL_ROSTER_CSV", str(APP_DIR / "rostered_2025service_BNSL_arb_updated.csv")))
 
+# Live roster DB is the source of truth for free agency eligibility.
+# The OOTP export is only used to backfill missing unsigned players into roster.db.
+OOTP_FA_ROSTER = Path(os.environ.get(
+    "BNSL_OOTP_FA_ROSTER",
+    str(APP_DIR / "bnsl_ootp27_fixed_rosters_oldids_optionsupdated.txt"),
+))
+HOMETOWN_DISCOUNTS_DB = Path(os.environ.get(
+    "BNSL_HOMETOWN_DISCOUNTS_DB",
+    str(APP_DIR / "hometown_discounts.db"),
+))
+ROSTER_DB_SYNC_TTL_SECONDS = int(os.environ.get("BNSL_ROSTER_DB_SYNC_TTL_SECONDS", "15"))
+CURRENT_SEASON = 2025
+CURRENT_FA_CLASS = str(CURRENT_SEASON + 1)
+
 # To avoid reparsing a large roster on every request, sync if the file mtime changed
 # or after this TTL. Set to 0 if you want every request to check the roster file.
 ROSTER_SYNC_TTL_SECONDS = int(os.environ.get("BNSL_ROSTER_SYNC_TTL_SECONDS", "15"))
@@ -130,6 +144,24 @@ ABBR_TO_TEAM.update({
     "WSH": "Washington Nationals",
     "WSN": "Washington Nationals",
 })
+
+# Roster tab stores franchise as abbreviations, while FA tab uses full team names.
+TEAM_TO_ABBR = {full: abbr for abbr, full in ABBR_TO_TEAM.items() if len(abbr) <= 3}
+TEAM_TO_ABBR.update({
+    "Kansas City Royals": "KC",
+    "San Diego Padres": "SD",
+    "San Francisco Giants": "SF",
+    "Tampa Bay Rays": "TB",
+    "Washington Nationals": "WSH",
+    "Oakland Athletics": "OAK",
+    "Athletics": "OAK",
+})
+
+OOTP_POSITION_MAP = {
+    1: "P", 2: "C", 3: "1B", 4: "2B", 5: "3B", 6: "SS",
+    7: "LF", 8: "CF", 9: "RF", 10: "DH", 11: "P", 12: "P", 13: "P",
+}
+OOTP_BT_MAP = {1: "R", 2: "L", 3: "S"}
 
 
 # ---------- Blueprint ----------
@@ -611,8 +643,55 @@ def import_free_agents_csv(path: Path):
 
 
 # ---------- Roster-source sync for Free Agency tab ----------
-_last_roster_sync_mtime: float | None = None
+_last_roster_sync_signature: tuple[float | None, float | None] | None = None
 _last_roster_sync_checked_at: float = 0.0
+
+
+def get_roster_db_path() -> Path:
+    if has_app_context():
+        cfg = current_app.config.get("ROSTER_DB_PATH")
+        if cfg:
+            return Path(cfg)
+    return APP_DIR / "roster.db"
+
+
+def get_ootp_fa_roster_path() -> Path:
+    if has_app_context():
+        cfg = current_app.config.get("OOTP_FA_ROSTER_PATH")
+        if cfg:
+            return Path(cfg)
+    return OOTP_FA_ROSTER
+
+
+def get_hometown_discounts_db_path() -> Path:
+    if has_app_context():
+        cfg = current_app.config.get("HOMETOWN_DISCOUNTS_DB_PATH")
+        if cfg:
+            return Path(cfg)
+    return HOMETOWN_DISCOUNTS_DB
+
+
+def get_roster_conn() -> sqlite3.Connection:
+    conn = sqlite3.connect(str(get_roster_db_path()))
+    conn.row_factory = sqlite3.Row
+    return conn
+
+
+def ensure_roster_column(conn: sqlite3.Connection, col: str, coldef: str) -> None:
+    cur = conn.cursor()
+    cur.execute("PRAGMA table_info(roster_players)")
+    cols = {r[1] for r in cur.fetchall()}
+    if col not in cols:
+        cur.execute(f"ALTER TABLE roster_players ADD COLUMN {coldef}")
+        conn.commit()
+
+
+def ensure_roster_fa_import_columns(conn: sqlite3.Connection) -> None:
+    ensure_roster_column(conn, "bbref_id", "bbref_id TEXT")
+    ensure_roster_column(conn, "bbrefminors_id", "bbrefminors_id TEXT")
+    ensure_roster_column(conn, "ootp_id", "ootp_id INTEGER")
+    ensure_roster_column(conn, "ootp_fa_imported_at", "ootp_fa_imported_at TEXT")
+    ensure_roster_column(conn, "ootp_fa_last_seen", "ootp_fa_last_seen TEXT")
 
 
 def _row_get_ci(row: Dict[str, str], *names: str) -> str:
@@ -638,6 +717,20 @@ def _parse_positive_int(value: Any) -> int | None:
         return None
 
 
+def _safe_int(value: Any, default: int = 0) -> int:
+    try:
+        return int(float(str(value or "").strip()))
+    except Exception:
+        return default
+
+
+def _safe_float(value: Any, default: float = 0.0) -> float:
+    try:
+        return float(str(value or "").strip())
+    except Exception:
+        return default
+
+
 def _truthy_text(value: Any) -> bool:
     return str(value or "").strip().upper() in {"TRUE", "T", "YES", "Y", "1"}
 
@@ -656,19 +749,458 @@ def roster_code_to_team(value: Any) -> str:
     return ABBR_TO_TEAM.get(code, code)
 
 
-def is_unrostered_roster_row(row: Dict[str, str]) -> bool:
-    """
-    Source-of-truth FA eligibility from the roster tab/export.
+def _norm_token(value: Any) -> str:
+    text = "".join(
+        ch for ch in unicodedata.normalize("NFKD", str(value or ""))
+        if not unicodedata.combining(ch)
+    ).lower()
+    return re.sub(r"[^a-z0-9]", "", text)
 
-    A player is considered unrostered if they are not active, not expanded,
-    and their status is not a configured rostered status such as Active/Reserve.
-    This intentionally does not look at salary or contract type: released/unrostered
-    players should appear in the FA tab.
+
+def _split_name(name: str) -> tuple[str, str]:
+    bits = [b for b in re.split(r"\s+", (name or "").strip()) if b]
+    if not bits:
+        return "", ""
+    if len(bits) == 1:
+        return "", bits[0]
+    return bits[0], bits[-1]
+
+
+def _dob_from_ootp(day: Any, month: Any, year: Any) -> str:
+    y = _safe_int(year, 0)
+    m = _safe_int(month, 0)
+    d = _safe_int(day, 0)
+    if y <= 0 or not (1 <= m <= 12) or not (1 <= d <= 31):
+        return ""
+    return f"{y:04d}-{m:02d}-{d:02d}"
+
+
+def _service_years_from_ootp(value: Any) -> float:
+    # OOTP exports ML service as days. 172 days is the usual MLB service-year divisor.
+    days = _safe_float(value, 0.0)
+    return round(days / 172.0, 3) if days > 0 else 0.0
+
+
+def _player_match_keys(
+    first_name: Any,
+    last_name: Any,
+    dob: Any,
+    team: Any,
+    bbref_id: Any,
+    bbrefminors_id: Any,
+    ootp_id: Any,
+) -> list[str]:
     """
-    active = _truthy_text(_row_get_ci(row, "active_roster"))
-    expanded = _truthy_text(_row_get_ci(row, "expanded_roster"))
-    status = _row_get_ci(row, "status").strip().upper()
-    return (not active) and (not expanded) and (status not in ROSTERED_STATUSES)
+    Ordered exactly like the requested cross-file identity fallback:
+      1. bbrefidLASTNAME
+      2. bbrefminorsidLASTNAME
+      3. ootpidLASTNAME
+      4. firstnameLASTNAMEteam
+      5. firstnameLASTNAMEDOB
+      6. LASTNAMEDOB
+      7. firstnameLASTNAME
+    """
+    first = _norm_token(first_name)
+    last = _norm_token(last_name)
+    birth = _norm_token(dob)
+    tm = _norm_token(team)
+    bbref = _norm_token(bbref_id)
+    bbrefm = _norm_token(bbrefminors_id)
+    oid = _norm_token(ootp_id)
+
+    if not last:
+        return []
+
+    keys: list[str] = []
+    if bbref:
+        keys.append(f"bbref:{bbref}:{last}")
+    if bbrefm:
+        keys.append(f"bbrefminors:{bbrefm}:{last}")
+    if oid:
+        keys.append(f"ootp:{oid}:{last}")
+    if first and tm:
+        keys.append(f"first_last_team:{first}:{last}:{tm}")
+    if first and birth:
+        keys.append(f"first_last_dob:{first}:{last}:{birth}")
+    if birth:
+        keys.append(f"last_dob:{last}:{birth}")
+    if first:
+        keys.append(f"first_last:{first}:{last}")
+    return keys
+
+
+def _roster_row_match_keys(row: sqlite3.Row) -> list[str]:
+    first = row["first_name"] if "first_name" in row.keys() else ""
+    last = row["last_name"] if "last_name" in row.keys() else ""
+    if not first or not last:
+        f2, l2 = _split_name(row["name"] if "name" in row.keys() else "")
+        first = first or f2
+        last = last or l2
+    bbref = row["bbref_id"] if "bbref_id" in row.keys() else ""
+    bbrefm = row["bbrefminors_id"] if "bbrefminors_id" in row.keys() else ""
+    ootp_id = row["ootp_id"] if "ootp_id" in row.keys() else (row["id"] if "id" in row.keys() else "")
+    return _player_match_keys(
+        first,
+        last,
+        row["date_of_birth"] if "date_of_birth" in row.keys() else "",
+        row["franchise"] if "franchise" in row.keys() else "",
+        bbref,
+        bbrefm,
+        ootp_id,
+    )
+
+
+def _htd_row_value(row: sqlite3.Row | None, key: str, default: Any = "") -> Any:
+    if row is None:
+        return default
+    return row[key] if key in row.keys() else default
+
+
+def _htd_candidate_keys(fa_row: sqlite3.Row, roster_row: sqlite3.Row | None) -> list[str]:
+    """Build match keys for a free_agents row against hometown_discounts.db."""
+    name = str(_htd_row_value(roster_row, "name") or fa_row["name"] or "").strip()
+    first = str(_htd_row_value(roster_row, "first_name") or "").strip()
+    last = str(_htd_row_value(roster_row, "last_name") or "").strip()
+    if not first or not last:
+        f2, l2 = _split_name(name)
+        first = first or f2
+        last = last or l2
+
+    first_n = _norm_token(first)
+    last_n = _norm_token(last)
+    if not last_n:
+        return []
+
+    keys: list[str] = []
+
+    def add(key: str) -> None:
+        if key and key not in keys:
+            keys.append(key)
+
+    # Exact/cross aliases for bbref-ish IDs.  The BNSL/OOTP files sometimes put
+    # the same string under bbref_id, bbrefminors_id, or OOTP pID labels.
+    for raw in (
+        _htd_row_value(roster_row, "bbref_id"),
+        _htd_row_value(roster_row, "bbrefminors_id"),
+    ):
+        val = _norm_token(raw)
+        if val:
+            add(f"bbref:{val}:{last_n}")
+            add(f"bbrefminors:{val}:{last_n}")
+
+    for raw in (
+        _htd_row_value(roster_row, "ootp_id"),
+        _htd_row_value(roster_row, "bbrefminors_id"),
+    ):
+        val = _norm_token(raw)
+        if val:
+            add(f"ootp:{val}:{last_n}")
+
+    # Team-based key is a fallback.  It helps if the row still has last_team or
+    # franchise populated, but current FAs may have those cleared by roster import.
+    team_candidates = []
+    if "last_team" in fa_row.keys():
+        team_candidates.append(fa_row["last_team"])
+    team_candidates.append(_htd_row_value(roster_row, "franchise"))
+    for team_value in team_candidates:
+        team_text = roster_code_to_team(team_value)
+        team_norm = _norm_token(team_text)
+        raw_norm = _norm_token(team_value)
+        if first_n and team_norm:
+            add(f"first_last_team:{first_n}:{last_n}:{team_norm}")
+        if first_n and raw_norm:
+            add(f"first_last_team:{first_n}:{last_n}:{raw_norm}")
+
+    if first_n:
+        add(f"first_last:{first_n}:{last_n}")
+
+    return keys
+
+
+def _load_hometown_discount_key_map(path: Path) -> dict[str, dict[str, Any]]:
+    if not path.exists():
+        return {}
+    conn = sqlite3.connect(str(path))
+    conn.row_factory = sqlite3.Row
+    cur = conn.cursor()
+    cur.execute("""
+        SELECT k.key, k.rank, k.method,
+               d.id AS discount_id, d.full_name, d.team_abbr, d.team_name,
+               d.hometown_seasons, d.multiplier, d.stats_player_id
+        FROM hometown_discount_keys k
+        JOIN hometown_discounts d ON d.id = k.discount_id
+    """)
+    rows = {str(r["key"]): dict(r) for r in cur.fetchall()}
+    conn.close()
+    return rows
+
+
+def apply_hometown_discounts_to_free_agents(clear_missing: bool = True) -> tuple[int, int, int]:
+    """
+    Apply precomputed HTD claims from hometown_discounts.db to fa.db/free_agents.
+
+    This is deliberately cheap: it reads the compressed key table, not the large
+    batting/pitching logs.  The bid code already uses hometown_team and
+    hometown_seasons to apply the 1.05x/1.10x value multiplier.
+
+    Returns: (checked_unsigned_fas, matched, cleared)
+    """
+    htd_path = get_hometown_discounts_db_path()
+    key_map = _load_hometown_discount_key_map(htd_path)
+    if not key_map:
+        return (0, 0, 0)
+
+    conn = get_conn()
+    cur = conn.cursor()
+    ensure_column(conn, "free_agents", "franchise_abbr", "franchise_abbr TEXT")
+    ensure_column(conn, "free_agents", "htd", "htd INTEGER")
+
+    cur.execute("""
+        SELECT *
+        FROM free_agents
+        WHERE COALESCE(is_roster_unrostered, 1)=1
+          AND (signed_team IS NULL OR signed_team='')
+    """)
+    fa_rows = cur.fetchall()
+
+    roster_rows: dict[int, sqlite3.Row | None] = {}
+    roster_conn = None
+    roster_path = get_roster_db_path()
+    if roster_path.exists():
+        roster_conn = get_roster_conn()
+
+    checked = len(fa_rows)
+    matched = 0
+    cleared = 0
+
+    for fa_row in fa_rows:
+        roster_row = None
+        roster_id = _safe_int(fa_row["roster_player_id"] if "roster_player_id" in fa_row.keys() else 0, 0)
+        if roster_id and roster_conn is not None:
+            if roster_id not in roster_rows:
+                roster_rows[roster_id] = roster_conn.execute(
+                    "SELECT * FROM roster_players WHERE id=?",
+                    (roster_id,),
+                ).fetchone()
+            roster_row = roster_rows[roster_id]
+
+        match = None
+        for key in _htd_candidate_keys(fa_row, roster_row):
+            if key in key_map:
+                match = key_map[key]
+                break
+
+        if match:
+            matched += 1
+            cur.execute("""
+                UPDATE free_agents
+                SET hometown_team=?, hometown_seasons=?, franchise_abbr=?, htd=?
+                WHERE id=?
+            """, (
+                match["team_name"],
+                int(match["hometown_seasons"] or 0),
+                match["team_abbr"],
+                int(match["hometown_seasons"] or 0),
+                int(fa_row["id"]),
+            ))
+        elif clear_missing:
+            cleared += 1
+            cur.execute("""
+                UPDATE free_agents
+                SET hometown_team='', hometown_seasons=0, franchise_abbr=NULL, htd=0
+                WHERE id=?
+            """, (int(fa_row["id"]),))
+
+    if roster_conn is not None:
+        roster_conn.close()
+    conn.commit()
+    conn.close()
+
+    logging.info(
+        "HTD sync complete from %s: %s checked, %s matched, %s cleared",
+        htd_path, checked, matched, cleared,
+    )
+    return (checked, matched, cleared)
+
+
+def _ootp_get(headers: list[str], values: list[str], name: str) -> str:
+    target = name.strip().lower()
+    for i, h in enumerate(headers):
+        if h.strip().lower() == target and i < len(values):
+            return str(values[i]).strip()
+    return ""
+
+
+def _iter_ootp_export_rows(path: Path):
+    """Yield (headers, values) rows from the OOTP text export."""
+    headers: list[str] = []
+    with Path(path).open(newline="", encoding="utf-8-sig") as f:
+        for raw in f:
+            line = raw.strip()
+            if not line:
+                continue
+            if line.startswith("//"):
+                comment = line[2:].strip()
+                if comment.lower().startswith("id,") and "lastname" in comment.lower():
+                    headers = [h.strip() for h in next(csv.reader([comment], skipinitialspace=True))]
+                continue
+            if not headers:
+                continue
+            values = [v.strip() for v in next(csv.reader([line], skipinitialspace=True))]
+            yield headers, values
+
+
+def _is_ootp_unsigned_free_agent(headers: list[str], values: list[str]) -> bool:
+    if _safe_int(_ootp_get(headers, values, "del"), 0) != 0:
+        return False
+    team_id = _safe_int(_ootp_get(headers, values, "team_id"), 0)
+    team_name = _ootp_get(headers, values, "Team Name").strip()
+    return team_id == 0 and team_name in {"", "-"}
+
+
+def import_ootp_free_agents_into_roster_db(path: Path | None = None) -> tuple[int, int]:
+    """
+    Backfill unsigned OOTP27 free agents into roster.db.
+
+    Existing roster_players are matched before inserting, using the requested
+    lastname-guarded ID order. Existing rostered players are never released here;
+    this only inserts missing unsigned players as unrostered 2026 free agents.
+    """
+    path = Path(path or get_ootp_fa_roster_path())
+    if not path.exists():
+        logging.warning("OOTP FA import skipped: export does not exist: %s", path)
+        return (0, 0)
+
+    now_text = iso(utcnow())
+    conn = get_roster_conn()
+    cur = conn.cursor()
+    ensure_roster_fa_import_columns(conn)
+
+    cur.execute("SELECT * FROM roster_players")
+    roster_rows = cur.fetchall()
+
+    key_to_id: dict[str, int] = {}
+    duplicate_keys: set[str] = set()
+    for r in roster_rows:
+        rid = int(r["id"])
+        for key in _roster_row_match_keys(r):
+            if key in key_to_id and key_to_id[key] != rid:
+                duplicate_keys.add(key)
+            else:
+                key_to_id[key] = rid
+
+    cur.execute("SELECT COALESCE(MAX(id), 0) FROM roster_players")
+    next_id = int(cur.fetchone()[0] or 0) + 1
+
+    seen = 0
+    inserted = 0
+
+    for headers, values in _iter_ootp_export_rows(path):
+        if not _is_ootp_unsigned_free_agent(headers, values):
+            continue
+        seen += 1
+
+        ootp_id = _safe_int(_ootp_get(headers, values, "id"), 0)
+        first = _ootp_get(headers, values, "FirstName")
+        last = _ootp_get(headers, values, "LastName")
+        if not last:
+            continue
+        name = f"{first} {last}".strip()
+        dob = _dob_from_ootp(
+            _ootp_get(headers, values, "DayOB"),
+            _ootp_get(headers, values, "MonthOB"),
+            _ootp_get(headers, values, "YearOB"),
+        )
+        bbref = _ootp_get(headers, values, "bbref_id")
+        bbrefm = _ootp_get(headers, values, "bbrefminors_id")
+        team_name = _ootp_get(headers, values, "Team Name")
+
+        match_id = None
+        for key in _player_match_keys(first, last, dob, team_name, bbref, bbrefm, ootp_id):
+            if key in duplicate_keys:
+                continue
+            found = key_to_id.get(key)
+            if found is not None:
+                match_id = found
+                break
+
+        if match_id is not None:
+            cur.execute("""
+                UPDATE roster_players
+                SET bbref_id=COALESCE(NULLIF(bbref_id, ''), ?),
+                    bbrefminors_id=COALESCE(NULLIF(bbrefminors_id, ''), ?),
+                    ootp_id=COALESCE(ootp_id, ?),
+                    ootp_fa_last_seen=?
+                WHERE id=?
+            """, (bbref or None, bbrefm or None, ootp_id or None, now_text, match_id))
+            continue
+
+        insert_id = ootp_id if ootp_id > 0 else next_id
+        cur.execute("SELECT 1 FROM roster_players WHERE id=?", (insert_id,))
+        if cur.fetchone():
+            insert_id = next_id
+        next_id = max(next_id, insert_id + 1)
+
+        position = OOTP_POSITION_MAP.get(_safe_int(_ootp_get(headers, values, "Position"), 0), "")
+        bats = OOTP_BT_MAP.get(_safe_int(_ootp_get(headers, values, "Bats"), 0), "")
+        throws = OOTP_BT_MAP.get(_safe_int(_ootp_get(headers, values, "Throws"), 0), "")
+        service_time = _service_years_from_ootp(_ootp_get(headers, values, "ML Service"))
+        options_remaining = max(0, 3 - _safe_int(_ootp_get(headers, values, "options used"), 0))
+
+        cur.execute("""
+            INSERT INTO roster_players (
+                id, name, last_name, first_name, suffix, nickname,
+                position, date_of_birth, bats, throws, signed,
+                contract_type, salary, contract_initial_season,
+                contract_length, contract_option, contract_expires,
+                service_time, previous_service_time, service_time_2025,
+                franchise, affiliate_team, roster_status, active_roster,
+                options_remaining, fa_class, fangraphs_id, mlbam_id,
+                bbref_id, bbrefminors_id, ootp_id,
+                ootp_fa_imported_at, ootp_fa_last_seen
+            ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+        """, (
+            insert_id, name, last, first, "", _ootp_get(headers, values, "NickName"),
+            position, dob, bats, throws, 0,
+            "FA", 0.0, None,
+            None, 0, "",
+            service_time, service_time, 0.0,
+            "", "", "", 0,
+            options_remaining, CURRENT_FA_CLASS, "", None,
+            bbref or "", bbrefm or "", ootp_id or None,
+            now_text, now_text,
+        ))
+        inserted += 1
+
+        # Make the newly inserted player visible to later rows in the same import.
+        fake = {
+            "id": insert_id,
+            "name": name,
+            "first_name": first,
+            "last_name": last,
+            "date_of_birth": dob,
+            "franchise": "",
+            "bbref_id": bbref,
+            "bbrefminors_id": bbrefm,
+            "ootp_id": ootp_id,
+        }
+        for key in _player_match_keys(first, last, dob, "", bbref, bbrefm, ootp_id):
+            if key in key_to_id and key_to_id[key] != insert_id:
+                duplicate_keys.add(key)
+            else:
+                key_to_id[key] = insert_id
+
+    conn.commit()
+    conn.close()
+    logging.info("OOTP FA import complete: %s unsigned rows seen, %s inserted into roster.db", seen, inserted)
+    return (seen, inserted)
+
+
+def _roster_db_row_is_unrostered(row: sqlite3.Row) -> bool:
+    franchise = str(row["franchise"] or "").strip()
+    roster_status = str(row["roster_status"] or "").strip()
+    signed = _safe_int(row["signed"] if "signed" in row.keys() else 0, 0)
+    return (franchise == "") or (signed == 0) or (roster_status == "")
 
 
 def _find_existing_free_agent_id(cur: sqlite3.Cursor, roster_id: int | None, mlbam_id: int | None, fg_id: int | None, name: str) -> int | None:
@@ -701,67 +1233,46 @@ def _find_existing_free_agent_id(cur: sqlite3.Cursor, roster_id: int | None, mlb
     return None
 
 
-def sync_free_agents_from_roster_csv(path: Path = ROSTER_CSV) -> tuple[int, int]:
+def sync_free_agents_from_roster_db() -> tuple[int, int]:
     """
-    Sync free_agents from the roster CSV.
+    Mirror currently unrostered roster.db players into fa.db/free_agents.
 
-    Returns:
-        (unrostered_count, upserted_count)
-
-    The sync does NOT delete free_agents rows, bids, or watchlist rows.
-    It marks roster-sourced players as currently unrostered or not, and the
-    FA tab filters on is_roster_unrostered=1.
+    roster.db remains the eligibility source of truth. fa.db only stores bidding,
+    watchlist, and signed-state metadata keyed back to roster_players.id.
     """
-    path = Path(path)
-    if not path.exists():
-        logging.warning("Roster sync skipped: roster CSV does not exist: %s", path)
+    roster_path = get_roster_db_path()
+    if not roster_path.exists():
+        logging.warning("Roster DB sync skipped: roster.db does not exist: %s", roster_path)
         return (0, 0)
 
     now_text = iso(utcnow())
-    rows: list[Dict[str, str]] = []
-    with path.open(newline="", encoding="utf-8-sig") as f:
-        reader = csv.DictReader(f)
-        if not reader.fieldnames:
-            logging.warning("Roster sync skipped: roster CSV has no header: %s", path)
-            return (0, 0)
-        for row in reader:
-            rows.append(dict(row))
+    rconn = get_roster_conn()
+    rcur = rconn.cursor()
+    ensure_roster_fa_import_columns(rconn)
+    rcur.execute("SELECT * FROM roster_players")
+    roster_rows = [r for r in rcur.fetchall() if _roster_db_row_is_unrostered(r)]
+    rconn.close()
 
     conn = get_conn()
     cur = conn.cursor()
 
-    # Mark previously roster-synced players stale. Current unrostered rows below
-    # will be marked back to 1.
     cur.execute("""
         UPDATE free_agents
         SET is_roster_unrostered=0,
             removed_from_roster_sync=?
-        WHERE roster_source='roster_csv'
+        WHERE roster_source IN ('roster_db', 'roster_csv', 'ootp27')
     """, (now_text,))
 
-    unrostered_count = 0
-    upserted_count = 0
-
-    for row in rows:
-        if not is_unrostered_roster_row(row):
-            continue
-
-        unrostered_count += 1
-
-        roster_id = _parse_positive_int(_row_get_ci(row, "id", "player_id", "roster_player_id"))
-        mlbam_id = _parse_positive_int(_row_get_ci(row, "mlbam_id", "MLBAMID"))
-        fg_id = _parse_positive_int(_row_get_ci(row, "fangraphs_id", "PlayerId", "fangraphs_player_id"))
-
-        name = _row_get_ci(row, "name", "player", "Name")
-        if not name:
-            first = _row_get_ci(row, "first_name")
-            last = _row_get_ci(row, "last_name")
-            name = f"{first} {last}".strip()
+    upserted = 0
+    for r in roster_rows:
+        roster_id = int(r["id"])
+        mlbam_id = _parse_positive_int(r["mlbam_id"] if "mlbam_id" in r.keys() else None)
+        fg_id = _parse_positive_int(r["fangraphs_id"] if "fangraphs_id" in r.keys() else None)
+        name = str(r["name"] or "").strip()
         if not name:
             continue
-
-        pos = _row_get_ci(row, "position")
-        last_team = roster_code_to_team(_row_get_ci(row, "franchise", "team", "last_team"))
+        pos = str(r["position"] or "").strip()
+        last_team = roster_code_to_team(r["franchise"] if "franchise" in r.keys() else "")
 
         existing_id = _find_existing_free_agent_id(cur, roster_id, mlbam_id, fg_id, name)
 
@@ -776,23 +1287,13 @@ def sync_free_agents_from_roster_csv(path: Path = ROSTER_CSV) -> tuple[int, int]
                 )
                 VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)
             """, (
-                name,
-                pos,
-                last_team,
-                "",       # hometown_team can still come from player_registry later
-                0,
-                0,
-                mlbam_id,
-                fg_id,
-                roster_id,
-                "roster_csv",
-                1,
-                now_text,
-                None,
+                name, pos, last_team,
+                "", 0, 0,
+                mlbam_id, fg_id,
+                roster_id, "roster_db", 1,
+                now_text, None,
             ))
-            upserted_count += 1
         else:
-            # Preserve bid/signing state and hometown data. Update roster-derived identity.
             cur.execute("""
                 UPDATE free_agents
                 SET name=?,
@@ -800,57 +1301,111 @@ def sync_free_agents_from_roster_csv(path: Path = ROSTER_CSV) -> tuple[int, int]
                     last_team=COALESCE(NULLIF(?, ''), last_team),
                     mlbam_id=COALESCE(?, mlbam_id),
                     fangraphs_id=COALESCE(?, fangraphs_id),
-                    roster_player_id=COALESCE(?, roster_player_id),
-                    roster_source='roster_csv',
+                    roster_player_id=?,
+                    roster_source='roster_db',
                     is_roster_unrostered=1,
                     last_seen_roster_sync=?,
                     removed_from_roster_sync=NULL
                 WHERE id=?
             """, (
-                name,
-                pos,
-                last_team,
-                mlbam_id,
-                fg_id,
-                roster_id,
-                now_text,
-                existing_id,
+                name, pos, last_team, mlbam_id, fg_id,
+                roster_id, now_text, existing_id,
             ))
-            upserted_count += 1
+        upserted += 1
 
     conn.commit()
     conn.close()
+    logging.info("Roster DB FA sync complete: %s unrostered, %s upserted", len(roster_rows), upserted)
+    return (len(roster_rows), upserted)
 
-    logging.info("Roster FA sync complete: %s unrostered, %s upserted from %s", unrostered_count, upserted_count, path)
-    return (unrostered_count, upserted_count)
+
+def update_roster_db_for_fa_signing(roster_player_id: int | None, team: str, years: int, has_option: bool, aav_m: float) -> None:
+    if not roster_player_id:
+        return
+
+    team_abbr = TEAM_TO_ABBR.get(team, team)
+    start_year = int(CURRENT_FA_CLASS)
+    total_years = max(1, int(years)) + (1 if has_option else 0)
+    contract_expires = start_year + total_years - 1
+    new_fa_class = str(contract_expires + 1)
+
+    conn = get_roster_conn()
+    cur = conn.cursor()
+    ensure_roster_fa_import_columns(conn)
+    cur.execute("""
+        UPDATE roster_players
+        SET signed=1,
+            contract_type='FA',
+            salary=?,
+            contract_initial_season=?,
+            contract_length=?,
+            contract_option=?,
+            contract_expires=?,
+            franchise=?,
+            affiliate_team='',
+            roster_status='Reserve',
+            active_roster=0,
+            fa_class=?
+        WHERE id=?
+    """, (
+        float(aav_m) * 1_000_000.0,
+        start_year,
+        total_years,
+        1 if has_option else 0,
+        str(contract_expires),
+        team_abbr,
+        new_fa_class,
+        int(roster_player_id),
+    ))
+    conn.commit()
+    conn.close()
 
 
 def sync_free_agents_from_roster_if_needed(force: bool = False) -> None:
     """
-    Sync if the roster CSV is present and changed, or after the TTL expires.
-    This lets the FA tab reflect future releases from the roster tab/export
-    without doing a destructive one-time seed.
-    """
-    global _last_roster_sync_mtime, _last_roster_sync_checked_at
+    Explicit maintenance sync:
+      1) import missing unsigned OOTP export players into roster.db,
+      2) mirror live unrostered roster.db players into fa.db.
 
-    path = Path(ROSTER_CSV)
-    if not path.exists():
+    Do not call this from normal FA page/API reads. It scans thousands of
+    players and may update roster.db metadata, so it belongs at startup, in a
+    CLI maintenance command, or in a future roster release/do-not-renew action.
+    """
+    global _last_roster_sync_signature, _last_roster_sync_checked_at
+
+    roster_path = get_roster_db_path()
+    if not roster_path.exists():
         return
 
+    ootp_path = get_ootp_fa_roster_path()
     now = time.time()
+
     try:
-        mtime = path.stat().st_mtime
+        roster_mtime = roster_path.stat().st_mtime
     except OSError:
         return
+    try:
+        ootp_mtime = ootp_path.stat().st_mtime if ootp_path.exists() else None
+    except OSError:
+        ootp_mtime = None
 
-    ttl_expired = (ROSTER_SYNC_TTL_SECONDS <= 0) or ((now - _last_roster_sync_checked_at) >= ROSTER_SYNC_TTL_SECONDS)
-    changed = (_last_roster_sync_mtime is None) or (mtime != _last_roster_sync_mtime)
+    signature = (roster_mtime, ootp_mtime)
+    ttl_expired = (ROSTER_DB_SYNC_TTL_SECONDS <= 0) or ((now - _last_roster_sync_checked_at) >= ROSTER_DB_SYNC_TTL_SECONDS)
+    changed = (_last_roster_sync_signature is None) or (signature != _last_roster_sync_signature)
 
     if force or changed or ttl_expired:
-        sync_free_agents_from_roster_csv(path)
-        _last_roster_sync_mtime = mtime
+        if ootp_path.exists():
+            import_ootp_free_agents_into_roster_db(ootp_path)
+        sync_free_agents_from_roster_db()
+        # Do not apply hometown discounts here. HTD assignment is an explicit
+        # maintenance action only; normal FA searches/previews/bids should only
+        # read already-stored hometown_team/hometown_seasons values.
+        try:
+            roster_mtime = roster_path.stat().st_mtime
+        except OSError:
+            pass
+        _last_roster_sync_signature = (roster_mtime, ootp_mtime)
         _last_roster_sync_checked_at = now
-
 
 def seed_qualifying_offers(qo_aav_m: float = 21.2):
     """
@@ -914,7 +1469,10 @@ def enforce_expirations():
     cur = conn.cursor()
 
     cur.execute("""
-        SELECT b.id AS bid_id, b.player_id, b.team, b.expires_at
+        SELECT
+          b.id AS bid_id, b.player_id, b.team, b.expires_at,
+          b.years, b.has_option, b.aav_m,
+          p.roster_player_id
         FROM bids b
         JOIN free_agents p ON p.id=b.player_id
         WHERE b.status='ACTIVE'
@@ -927,13 +1485,31 @@ def enforce_expirations():
     for r in rows:
         exp = parse_iso(r["expires_at"])
         if now >= exp:
-            to_sign.append((int(r["bid_id"]), int(r["player_id"]), r["team"]))
+            to_sign.append({
+                "bid_id": int(r["bid_id"]),
+                "player_id": int(r["player_id"]),
+                "team": r["team"],
+                "years": int(r["years"] or 1),
+                "has_option": bool(int(r["has_option"] or 0)),
+                "aav_m": float(r["aav_m"] or 0.0),
+                "roster_player_id": int(r["roster_player_id"] or 0) if r["roster_player_id"] else None,
+            })
 
-    for bid_id, pid, team in to_sign:
+    for item in to_sign:
+        bid_id = item["bid_id"]
+        pid = item["player_id"]
+        team = item["team"]
         cur.execute("UPDATE free_agents SET signed_team=?, signed_at=? WHERE id=?", (team, iso(now), pid))
         cur.execute("UPDATE bids SET status='SIGNED' WHERE id=?", (bid_id,))
         # clear any other actives (should be none)
         cur.execute("UPDATE bids SET status='OUTBID', expires_at=NULL WHERE player_id=? AND status='ACTIVE' AND id<>?", (pid, bid_id))
+        update_roster_db_for_fa_signing(
+            item["roster_player_id"],
+            team,
+            item["years"],
+            item["has_option"],
+            item["aav_m"],
+        )
 
     conn.commit()
     conn.close()
@@ -977,15 +1553,14 @@ def player_snapshot_row(p: sqlite3.Row) -> Dict[str, Any]:
 
 def fetch_free_agents(search: str = "", hide_signed: bool = False) -> List[Dict[str, Any]]:
     enforce_expirations()
-    sync_free_agents_from_roster_if_needed()
     conn = get_conn()
     cur = conn.cursor()
 
     clauses = []
     params: List[Any] = []
 
-    if Path(ROSTER_CSV).exists():
-        clauses.append("COALESCE(is_roster_unrostered,0)=1")
+    # Always show only players currently unrostered in live roster.db.
+    clauses.append("COALESCE(is_roster_unrostered,0)=1")
 
     if search.strip():
         s = search.strip().lower()
@@ -1008,7 +1583,6 @@ def fetch_free_agents(search: str = "", hide_signed: bool = False) -> List[Dict[
 
 def fetch_watchlist(team: str) -> List[Dict[str, Any]]:
     enforce_expirations()
-    sync_free_agents_from_roster_if_needed()
     conn = get_conn()
     cur = conn.cursor()
     cur.execute("""
@@ -1041,6 +1615,8 @@ def compute_preview(team: str, pid: int, years: int, has_option: bool, aav_m: fl
     conn.close()
     if not p:
         raise ValueError("player not found")
+    if int(p["is_roster_unrostered"] or 0) != 1:
+        raise ValueError("player is no longer an eligible free agent")
 
     signed = bool((p["signed_team"] or "").strip())
     leader = get_current_leader(pid)
@@ -1110,6 +1686,9 @@ def place_bid(team: str, pid: int, years: int, has_option: bool, aav_m: float) -
     if not p:
         conn.close()
         return (False, "Player not found.")
+    if int(p["is_roster_unrostered"] or 0) != 1:
+        conn.close()
+        return (False, "Player is no longer an eligible free agent.")
     if (p["signed_team"] or "").strip():
         conn.close()
         return (False, "Player already signed.")
@@ -2624,7 +3203,8 @@ def healthz():
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()
     ap.add_argument("--sync-registry", action="store_true", help="Import/refresh players from player_registry.csv into DB")
-    ap.add_argument("--sync-roster", action="store_true", help="Import/refresh free agents from the roster CSV")
+    ap.add_argument("--sync-roster", action="store_true", help="Import/refresh free agents from live roster.db and OOTP FA export")
+    ap.add_argument("--apply-htd", action="store_true", help="Apply hometown discounts from hometown_discounts.db to current free_agents rows")
     ap.add_argument("--prefetch-headshots", action="store_true", help="Download headshots for all players with mlbam_id")
     args = ap.parse_args()
 
@@ -2632,14 +3212,27 @@ if __name__ == "__main__":
         init_db()
         sync_free_agents_from_roster_if_needed(force=True)
         print("✅ Roster free agents synced.")
+        if args.apply_htd:
+            checked, matched, cleared = apply_hometown_discounts_to_free_agents(clear_missing=True)
+            print(f"✅ Hometown discounts applied: {checked} checked, {matched} matched, {cleared} cleared.")
+        raise SystemExit(0)
+
+    if args.apply_htd:
+        init_db()
+        checked, matched, cleared = apply_hometown_discounts_to_free_agents(clear_missing=True)
+        print(f"✅ Hometown discounts applied: {checked} checked, {matched} matched, {cleared} cleared.")
         raise SystemExit(0)
 
     if args.sync_registry:
         init_db()
         import_player_registry_csv(PLAYER_REGISTRY_CSV)
-        sync_free_agents_from_roster_if_needed(force=True)
         print("✅ Registry synced.")
-        print("✅ Roster free agents synced.")
+        if args.sync_roster:
+            sync_free_agents_from_roster_if_needed(force=True)
+            print("✅ Roster free agents synced.")
+        if args.apply_htd:
+            checked, matched, cleared = apply_hometown_discounts_to_free_agents(clear_missing=True)
+            print(f"✅ Hometown discounts applied: {checked} checked, {matched} matched, {cleared} cleared.")
         if args.prefetch_headshots:
             conn = get_conn()
             cur = conn.cursor()

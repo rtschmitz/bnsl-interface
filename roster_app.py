@@ -4,8 +4,10 @@ from datetime import datetime
 from typing import Any, Dict, List
 import csv
 import os
+import logging
 import sqlite3
 import unicodedata
+import re
 
 from flask import (
     Blueprint, current_app, jsonify, render_template_string,
@@ -250,14 +252,97 @@ def service_to_display(x: Any) -> float:
         return 0.0
 
 
-def rulev_eligible(status: str, dob: str) -> bool:
-    if status != "Reserve":
+def infer_two_digit_birth_year(yy: int) -> int:
+    # Baseball DOBs with 00-26 are 2000-2026; everything else is 1900s.
+    return 2000 + yy if yy <= 26 else 1900 + yy
+
+
+def parse_roster_dob_parts(dob: Any) -> tuple[int, int | None, int | None] | None:
+    """Parse YYYY-MM-DD, DD-MM-YY, or DD-MM-YYYY roster DOBs."""
+    text = str(dob or "").strip()
+    if not text:
+        return None
+
+    parts = [p for p in re.split(r"\D+", text) if p]
+    if len(parts) >= 3:
+        # YYYY-MM-DD / YYYY/MM/DD
+        if len(parts[0]) == 4:
+            return int(parts[0]), int(parts[1]), int(parts[2])
+
+        # DD-MM-YYYY
+        if len(parts[2]) == 4:
+            return int(parts[2]), int(parts[1]), int(parts[0])
+
+        # DD-MM-YY
+        if len(parts[2]) == 2:
+            return infer_two_digit_birth_year(int(parts[2])), int(parts[1]), int(parts[0])
+
+    # Last fallback: any explicit 19xx/20xx year embedded in the string.
+    m = re.search(r"(19\d{2}|20\d{2})", text)
+    if m:
+        return int(m.group(1)), None, None
+
+    return None
+
+
+def birth_year_from_roster_dob(dob: Any) -> int | None:
+    parsed = parse_roster_dob_parts(dob)
+    return parsed[0] if parsed else None
+
+
+def normalize_roster_dob(dob: Any) -> str:
+    parsed = parse_roster_dob_parts(dob)
+    if not parsed:
+        return str(dob or "").strip()
+    year, month, day = parsed
+    if month is None or day is None:
+        return f"{year:04d}"
+    if not (1 <= month <= 12 and 1 <= day <= 31):
+        return str(dob or "").strip()
+    return f"{year:04d}-{month:02d}-{day:02d}"
+
+
+def normalize_roster_birthdates(conn: sqlite3.Connection) -> None:
+    cur = conn.cursor()
+    cur.execute("""
+        SELECT id, date_of_birth
+        FROM roster_players
+        WHERE COALESCE(date_of_birth, '') != ''
+    """)
+    for row in cur.fetchall():
+        old_dob = str(row["date_of_birth"] or "").strip()
+        new_dob = normalize_roster_dob(old_dob)
+        if new_dob and new_dob != old_dob:
+            cur.execute(
+                "UPDATE roster_players SET date_of_birth=? WHERE id=?",
+                (new_dob, int(row["id"])),
+            )
+
+
+def rulev_eligible(
+    status: str,
+    dob: str,
+    contract_type: str | None = None,
+    franchise: str | None = None,
+    signed: Any = None,
+) -> bool:
+    """
+    Rule V eligibility used by the roster tab.
+
+    Eligible players are rostered to an org, are not protected on the 40-man
+    roster, and were born in or before 2001.  In the roster tab's three-bucket
+    model, Reserve means not on the 40-man.
+
+    Contract type and signed are intentionally ignored here.  Franchise/status
+    are the authoritative rostered-state fields for Rule V.
+    """
+    if (status or "").strip() != "Reserve":
         return False
-    try:
-        year = int((dob or "")[:4])
-        return year <= 2001
-    except Exception:
+    if not (franchise or "").strip():
         return False
+
+    year = birth_year_from_roster_dob(dob)
+    return year is not None and year <= 2001
 
 
 def compute_fa_class(row: sqlite3.Row) -> str:
@@ -501,6 +586,10 @@ def bootstrap_roster():
                     WHERE id=?
                 """, (CURRENT_FA_CLASS, player_id))
 
+    # Keep DOBs in one canonical format for display and eligibility checks.
+    # This also converts older DD-MM-YY roster imports to YYYY-MM-DD.
+    normalize_roster_birthdates(conn)
+
     conn.commit()
     conn.close()
 
@@ -575,7 +664,7 @@ def api_players():
     out = []
     for r in rows:
         row_fa_class = compute_fa_class(r)
-        row_rulev = rulev_eligible(r["roster_status"], r["date_of_birth"])
+        row_rulev = rulev_eligible(r["roster_status"], r["date_of_birth"], r["contract_type"], r["franchise"], r["signed"])
 
         if rulev_only and not row_rulev:
             continue
@@ -589,7 +678,7 @@ def api_players():
             "name": r["name"],
             "position": r["position"],
             "team": r["franchise"] or "",
-            "dob": r["date_of_birth"],
+            "dob": normalize_roster_dob(r["date_of_birth"]),
             "bt": bt_text(r["bats"], r["throws"]),
             "roster_status": r["roster_status"] or "",
             "active_roster": (r["roster_status"] or "") == "Active",
@@ -707,6 +796,16 @@ def api_update_player():
 
     conn.commit()
     conn.close()
+
+    # A roster-status transaction can add/remove a player from Rule V
+    # eligibility.  Refresh the small Rule V pool now; normal Rule V searches
+    # do not rescan roster.db.
+    try:
+        from rulev_app import sync_rulev_from_roster_db
+        sync_rulev_from_roster_db()
+    except Exception:
+        current_app.logger.exception("Rule V sync failed after roster update")
+
     return ("", 204)
 
 ROSTER_HTML = f"""
