@@ -971,6 +971,75 @@ def _validate_pick_limits(conn: sqlite3.Connection, pick_transfers: list[dict[st
     return errors
 
 
+def _accepted_proposal_trade_rows(conn: sqlite3.Connection, q: str = "", limit: int = 200) -> list[dict[str, Any]]:
+    """Return accepted trade proposals in the same row shape as parsed trades.txt rows."""
+    init_proposal_schema(conn)
+    cur = conn.cursor()
+    cur.execute(
+        """
+        SELECT *
+        FROM trade_proposals
+        WHERE status='accepted'
+        ORDER BY COALESCE(accepted_at, updated_at, created_at) DESC, id DESC
+        LIMIT ?
+        """,
+        (limit,),
+    )
+    proposals = [dict(r) for r in cur.fetchall()]
+
+    rows: list[dict[str, Any]] = []
+    needle = q.lower().strip()
+    for p in proposals:
+        cur.execute(
+            """
+            SELECT side_team_abbr, receiving_team_abbr, display_text
+            FROM trade_proposal_items
+            WHERE proposal_id=?
+            ORDER BY side_team_abbr ASC, id ASC
+            """,
+            (p["id"],),
+        )
+        item_rows = [dict(r) for r in cur.fetchall()]
+
+        grouped: dict[tuple[str, str], list[str]] = {}
+        for item in item_rows:
+            key = (item["side_team_abbr"], item["receiving_team_abbr"])
+            grouped.setdefault(key, []).append(item["display_text"] or "")
+
+        legs = [
+            {
+                "from_team_abbr": from_team,
+                "to_team_abbr": to_team,
+                "asset_text": ", ".join(x for x in texts if x),
+            }
+            for (from_team, to_team), texts in grouped.items()
+        ]
+
+        title = f"Accepted Trade Proposal #{p['id']}"
+        if p.get("notes"):
+            title += f" — {p['notes']}"
+        raw_text = "\n".join(
+            [f"{p['trade_date']}: {title}"]
+            + [f"From {leg['from_team_abbr']} to {leg['to_team_abbr']}: {leg['asset_text']}" for leg in legs]
+        )
+
+        haystack = " ".join([title, raw_text, p.get("proposer_team_abbr") or "", p.get("target_team_abbr") or ""]).lower()
+        if needle and needle not in haystack:
+            continue
+
+        rows.append({
+            "id": -int(p["id"]),
+            "log_index": -int(p["id"]),
+            "trade_date": p["trade_date"],
+            "title": title,
+            "raw_text": raw_text,
+            "source": "proposal",
+            "accepted_at": p.get("accepted_at") or p.get("updated_at") or p.get("created_at") or "",
+            "legs": legs,
+        })
+    return rows
+
+
 def _query_trade_rows(conn: sqlite3.Connection, q: str = "", limit: int = 400) -> list[dict[str, Any]]:
     cur = conn.cursor()
     params: list[Any] = []
@@ -999,8 +1068,13 @@ def _query_trade_rows(conn: sqlite3.Connection, q: str = "", limit: int = 400) -
             """,
             (row["id"],),
         )
+        row["source"] = "log"
         row["legs"] = [dict(r) for r in cur.fetchall()]
-    return rows
+
+    # Show app-accepted proposals above the historical text log so completed
+    # in-site trades appear immediately without rewriting trades.txt.
+    accepted_rows = _accepted_proposal_trade_rows(conn, q=q, limit=limit)
+    return (accepted_rows + rows)[:limit]
 
 
 def _query_stock_rows(conn: sqlite3.Connection, year: str = "", owner: str = "", limit: int = 5000) -> list[sqlite3.Row]:
@@ -1296,7 +1370,7 @@ TRADES_HTML = r"""
         <div class="section-title">
           <div>
             <h2 style="margin:0;">Trade Log</h2>
-            <div class="muted tiny">Newest first, matching trades.txt.</div>
+            <div class="muted tiny">Accepted proposals first, then historical trades from trades.txt.</div>
           </div>
           <form class="controls" method="get" action="/trades/">
             <input name="q" value="{{ q }}" placeholder="Search title/assets…" />
