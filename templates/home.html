@@ -231,7 +231,6 @@
       min-height: 420px;
     }
 
-    /* “Game monitor” frame */
     .frame-shell{
       flex:1;
       background: rgba(0,0,0,.22);
@@ -280,7 +279,7 @@
     <div class="brand">
       <div>
         <h1>BNSL INTERFACE</h1>
-        <div class="sub">Draft • Rule V • Free Agency • Rosters • Financials</div>
+        <div class="sub">Draft • Rule V • Free Agency • Rosters • Financials • Trades</div>
       </div>
       <div class="right">
         <span class="badge gold" id="active-badge">FREE AGENCY</span>
@@ -293,10 +292,10 @@
           <button class="tab" id="tab-draft"><span class="dot"></span> Draft</button>
           <button class="tab" id="tab-rulev"><span class="dot"></span> Rule V Draft</button>
           <button class="tab" id="tab-fa"><span class="dot"></span> Free Agency</button>
-	  <button class="tab" id="tab-roster"><span class="dot"></span> Roster</button>
+          <button class="tab" id="tab-roster"><span class="dot"></span> Roster</button>
           <button class="tab" id="tab-financials"><span class="dot"></span> Financials</button>
-	</div>
-
+          <button class="tab" id="tab-trades"><span class="dot"></span> Trades</button>
+        </div>
       </div>
     </div>
 
@@ -307,6 +306,7 @@
         <iframe id="frame-fa" src="/fa/" class="hidden"></iframe>
         <iframe id="frame-roster" src="/roster/" class="hidden"></iframe>
         <iframe id="frame-financials" src="/financials/" class="hidden"></iframe>
+        <iframe id="frame-trades" src="/trades/" class="hidden"></iframe>
       </div>
     </div>
   </div>
@@ -317,12 +317,14 @@
     const tFa = document.getElementById("tab-fa");
     const tRoster = document.getElementById("tab-roster");
     const tFinancials = document.getElementById("tab-financials");
+    const tTrades = document.getElementById("tab-trades");
 
     const fDraft = document.getElementById("frame-draft");
     const fRulev = document.getElementById("frame-rulev");
     const fFa = document.getElementById("frame-fa");
     const fRoster = document.getElementById("frame-roster");
     const fFinancials = document.getElementById("frame-financials");
+    const fTrades = document.getElementById("frame-trades");
 
     const activeBadge = document.getElementById("active-badge");
 
@@ -332,6 +334,7 @@
       fa: { button: tFa, frame: fFa, label: "FREE AGENCY" },
       roster: { button: tRoster, frame: fRoster, label: "ROSTER" },
       financials: { button: tFinancials, frame: fFinancials, label: "FINANCIALS" },
+      trades: { button: tTrades, frame: fTrades, label: "TRADES" },
     };
 
     function show(which){
@@ -353,6 +356,7 @@
     tFa.onclick = () => show("fa");
     tRoster.onclick = () => show("roster");
     tFinancials.onclick = () => show("financials");
+    tTrades.onclick = () => show("trades");
 
     (function boot(){
       let which = "fa";

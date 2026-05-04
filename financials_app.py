@@ -1,9 +1,10 @@
 from __future__ import annotations
 
+from pathlib import Path
 import sqlite3
 from typing import Any, Dict, List
 
-from flask import Blueprint, current_app, jsonify, render_template_string
+from flask import Blueprint, current_app, jsonify, render_template_string, request
 
 from ui_skin import BNSL_GAME_CSS
 
@@ -49,6 +50,42 @@ def get_conn() -> sqlite3.Connection:
     return conn
 
 
+def get_payments_db_path() -> Path:
+    configured = current_app.config.get("DRAFT_STOCK_DB_PATH")
+    if configured:
+        return Path(configured)
+    return Path(__file__).resolve().parent / "draft_stock.db"
+
+
+def get_payments_conn() -> sqlite3.Connection:
+    path = get_payments_db_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(path)
+    conn.row_factory = sqlite3.Row
+    init_payments_schema(conn)
+    return conn
+
+
+def init_payments_schema(conn: sqlite3.Connection) -> None:
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS finance_payments (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            source_type TEXT NOT NULL,
+            source_id INTEGER,
+            created_at TEXT NOT NULL,
+            effective_date TEXT NOT NULL,
+            payer_team_abbr TEXT NOT NULL,
+            receiver_team_abbr TEXT NOT NULL,
+            amount REAL NOT NULL,
+            description TEXT,
+            status TEXT NOT NULL DEFAULT 'posted',
+            UNIQUE(source_type, source_id, payer_team_abbr, receiver_team_abbr, amount, description) ON CONFLICT IGNORE
+        )
+    """)
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_finance_payments_teams ON finance_payments(payer_team_abbr, receiver_team_abbr, status)")
+    conn.commit()
+
+
 def _has_column(conn: sqlite3.Connection, table: str, column: str) -> bool:
     cur = conn.cursor()
     cur.execute(f"PRAGMA table_info({table})")
@@ -62,6 +99,67 @@ def money(value: Any) -> str:
         return "$0"
 
 
+def signed_money(value: Any) -> str:
+    try:
+        v = float(value)
+        prefix = "+" if v > 0 else ""
+        return f"{prefix}${v:,.0f}" if v >= 0 else f"-${abs(v):,.0f}"
+    except Exception:
+        return "$0"
+
+
+def payment_sums_by_team() -> dict[str, float]:
+    """Positive values mean money received; negative values mean money paid."""
+    try:
+        conn = get_payments_conn()
+    except Exception:
+        return {}
+    cur = conn.cursor()
+    sums = {code: 0.0 for code in TEAM_FINANCIALS}
+    cur.execute("""
+        SELECT payer_team_abbr, receiver_team_abbr, COALESCE(SUM(amount), 0) AS amount
+        FROM finance_payments
+        WHERE status='posted'
+        GROUP BY payer_team_abbr, receiver_team_abbr
+    """)
+    for r in cur.fetchall():
+        amount = float(r["amount"] or 0.0)
+        payer = r["payer_team_abbr"]
+        receiver = r["receiver_team_abbr"]
+        if payer in sums:
+            sums[payer] -= amount
+        if receiver in sums:
+            sums[receiver] += amount
+    conn.close()
+    return sums
+
+
+def list_payments(team: str | None = None) -> list[dict[str, Any]]:
+    try:
+        conn = get_payments_conn()
+    except Exception:
+        return []
+    params: list[Any] = []
+    where = "WHERE status='posted'"
+    if team:
+        where += " AND (payer_team_abbr=? OR receiver_team_abbr=?)"
+        params.extend([team.upper(), team.upper()])
+    cur = conn.cursor()
+    cur.execute(
+        f"""
+        SELECT *
+        FROM finance_payments
+        {where}
+        ORDER BY effective_date DESC, created_at DESC, id DESC
+        LIMIT 500
+        """,
+        params,
+    )
+    rows = [dict(r) for r in cur.fetchall()]
+    conn.close()
+    return rows
+
+
 def compute_financial_rows(team: str | None = None) -> List[Dict[str, Any]]:
     """
     Compute live financials from roster.db.
@@ -70,12 +168,12 @@ def compute_financial_rows(team: str | None = None) -> List[Dict[str, Any]]:
       salaries for every player with roster_status='Active'
       + salaries for A/X/FA players with roster_status in ('40-man', 'Reserve')
 
-    R-contract players therefore only count against expenses while Active.
-    This helper is intentionally importable so the FA tab can reuse cap_space
-    later without duplicating the financial calculation.
+    Payments are posted finance_payment rows. A received payment is positive;
+    a payment made is negative. Payments are added to surplus and cap space.
     """
     conn = get_conn()
     cur = conn.cursor()
+    payments_by_team = payment_sums_by_team()
 
     rows: List[Dict[str, Any]] = []
     codes = [team.upper()] if team else sorted(TEAM_FINANCIALS.keys())
@@ -109,8 +207,9 @@ def compute_financial_rows(team: str | None = None) -> List[Dict[str, Any]]:
         revenue = float(meta["revenue"])
         hard_cap = float(meta["hard_cap"])
         expenses = float(r["expenses"] or 0.0)
-        surplus = revenue - expenses
-        cap_space = hard_cap - expenses
+        payments = float(payments_by_team.get(code, 0.0))
+        surplus = revenue - expenses + payments
+        cap_space = hard_cap - expenses + payments
 
         rows.append({
             "team_name": meta["team_name"],
@@ -120,6 +219,7 @@ def compute_financial_rows(team: str | None = None) -> List[Dict[str, Any]]:
             "total": int(r["total_count"] or 0),
             "revenue": revenue,
             "expenses": expenses,
+            "payments": payments,
             "surplus": surplus,
             "hard_cap": hard_cap,
             "cap_space": cap_space,
@@ -130,7 +230,6 @@ def compute_financial_rows(team: str | None = None) -> List[Dict[str, Any]]:
 
 
 def get_cap_space_by_team(team: str) -> float | None:
-    """Small helper for future FA-tab checks."""
     rows = compute_financial_rows(team)
     if not rows:
         return None
@@ -142,6 +241,12 @@ def api_financial_summary():
     return jsonify({"teams": compute_financial_rows()})
 
 
+@financials_bp.get("/api/payments")
+def api_payments():
+    team = (request.args.get("team") or "").strip().upper() or None
+    return jsonify({"payments": list_payments(team)})
+
+
 @financials_bp.get("/api/cap_space/<team>")
 def api_cap_space(team: str):
     rows = compute_financial_rows(team)
@@ -151,6 +256,7 @@ def api_cap_space(team: str):
     return jsonify({
         "team": row["abbr"],
         "expenses": row["expenses"],
+        "payments": row["payments"],
         "hard_cap": row["hard_cap"],
         "cap_space": row["cap_space"],
     })
@@ -172,45 +278,87 @@ FINANCIALS_HTML = f"""
     th {{ text-align: left; position: sticky; top: 0; }}
     td.num, th.num {{ text-align: right; white-space: nowrap; }}
     .muted {{ opacity: .75; margin: 4px 0 14px; }}
+    .tabbar {{ display:flex; gap:10px; flex-wrap:wrap; margin: 12px 0 16px; }}
+    .subtab {{ border-radius: 999px; padding: 9px 12px; border: 1px solid rgba(140,170,255,.22); background: rgba(255,255,255,.06); color: inherit; text-decoration:none; }}
+    .subtab.active {{ border-color: rgba(46,242,255,.55); box-shadow: 0 0 0 3px rgba(46,242,255,.10); }}
+    .positive {{ color: var(--good); }}
+    .negative {{ color: var(--warn); }}
   </style>
 </head>
 <body>
   <div class="wrap">
     <h1>Financials</h1>
-    <p class="muted">Expenses = Active salaries + A/X/FA salaries on 40-man or Reserve. R-contract players only count while Active.</p>
+    <p class="muted">Expenses = Active salaries + A/X/FA salaries on 40-man or Reserve. R-contract players only count while Active. Payments are added to surplus and cap space.</p>
 
-    <table>
-      <thead>
-        <tr>
-          <th>Team Name</th>
-          <th>Abbr</th>
-          <th class="num">Active</th>
-          <th class="num">40</th>
-          <th class="num">Total</th>
-          <th class="num">Revenue</th>
-          <th class="num">Expenses</th>
-          <th class="num">Surplus</th>
-          <th class="num">Hard Cap</th>
-          <th class="num">Cap Space</th>
-        </tr>
-      </thead>
-      <tbody>
-        {{% for row in rows %}}
-        <tr>
-          <td>{{{{ row.team_name }}}}</td>
-          <td>{{{{ row.abbr }}}}</td>
-          <td class="num">{{{{ row.active }}}}</td>
-          <td class="num">{{{{ row.forty }}}}</td>
-          <td class="num">{{{{ row.total }}}}</td>
-          <td class="num">{{{{ money(row.revenue) }}}}</td>
-          <td class="num">{{{{ money(row.expenses) }}}}</td>
-          <td class="num">{{{{ money(row.surplus) }}}}</td>
-          <td class="num">{{{{ money(row.hard_cap) }}}}</td>
-          <td class="num">{{{{ money(row.cap_space) }}}}</td>
-        </tr>
-        {{% endfor %}}
-      </tbody>
-    </table>
+    <div class="tabbar">
+      <a class="subtab {{% if view == 'summary' %}}active{{% endif %}}" href="/financials/">Summary</a>
+      <a class="subtab {{% if view == 'payments' %}}active{{% endif %}}" href="/financials/?view=payments">Payments</a>
+    </div>
+
+    {{% if view == 'payments' %}}
+      <table>
+        <thead>
+          <tr>
+            <th>Date</th>
+            <th>Payer</th>
+            <th>Receiver</th>
+            <th class="num">Amount</th>
+            <th>Description</th>
+            <th>Source</th>
+          </tr>
+        </thead>
+        <tbody>
+          {{% for p in payments %}}
+          <tr>
+            <td>{{{{ p.effective_date }}}}</td>
+            <td>{{{{ p.payer_team_abbr }}}}</td>
+            <td>{{{{ p.receiver_team_abbr }}}}</td>
+            <td class="num">{{{{ money(p.amount) }}}}</td>
+            <td>{{{{ p.description or '' }}}}</td>
+            <td>{{{{ p.source_type }}}} #{{{{ p.source_id or '' }}}}</td>
+          </tr>
+          {{% endfor %}}
+          {{% if not payments %}}
+          <tr><td colspan="6" class="muted">No posted payments yet.</td></tr>
+          {{% endif %}}
+        </tbody>
+      </table>
+    {{% else %}}
+      <table>
+        <thead>
+          <tr>
+            <th>Team Name</th>
+            <th>Abbr</th>
+            <th class="num">Active</th>
+            <th class="num">40</th>
+            <th class="num">Total</th>
+            <th class="num">Revenue</th>
+            <th class="num">Expenses</th>
+            <th class="num">Payments</th>
+            <th class="num">Surplus</th>
+            <th class="num">Hard Cap</th>
+            <th class="num">Cap Space</th>
+          </tr>
+        </thead>
+        <tbody>
+          {{% for row in rows %}}
+          <tr>
+            <td>{{{{ row.team_name }}}}</td>
+            <td>{{{{ row.abbr }}}}</td>
+            <td class="num">{{{{ row.active }}}}</td>
+            <td class="num">{{{{ row.forty }}}}</td>
+            <td class="num">{{{{ row.total }}}}</td>
+            <td class="num">{{{{ money(row.revenue) }}}}</td>
+            <td class="num">{{{{ money(row.expenses) }}}}</td>
+            <td class="num {{% if row.payments > 0 %}}positive{{% elif row.payments < 0 %}}negative{{% endif %}}">{{{{ signed_money(row.payments) }}}}</td>
+            <td class="num">{{{{ money(row.surplus) }}}}</td>
+            <td class="num">{{{{ money(row.hard_cap) }}}}</td>
+            <td class="num">{{{{ money(row.cap_space) }}}}</td>
+          </tr>
+          {{% endfor %}}
+        </tbody>
+      </table>
+    {{% endif %}}
   </div>
 </body>
 </html>
@@ -219,8 +367,14 @@ FINANCIALS_HTML = f"""
 
 @financials_bp.get("/")
 def financials_index():
+    view = (request.args.get("view") or "summary").strip().lower()
+    if view not in {"summary", "payments"}:
+        view = "summary"
     return render_template_string(
         FINANCIALS_HTML,
+        view=view,
         rows=compute_financial_rows(),
+        payments=list_payments(),
         money=money,
+        signed_money=signed_money,
     )

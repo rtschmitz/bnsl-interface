@@ -21,6 +21,43 @@ APP_DIR = Path(__file__).resolve().parent
 DEFAULT_DB = APP_DIR / "rulev.db"
 
 
+# 2026 Rule V draft order: reverse of supplied 2025 standings finish
+# after applying tiebreaks.  This uses the full team names used by rulev_order
+# and draft_app.TEAM_EMAILS.
+RULEV_DRAFT_ORDER_2026 = [
+    "St. Louis Cardinals",
+    "Tampa Bay Rays",
+    "Milwaukee Brewers",
+    "Texas Rangers",
+    "Seattle Mariners",
+    "Pittsburgh Pirates",
+    "Kansas City Royals",
+    "Toronto Blue Jays",
+    "Atlanta Braves",
+    "Washington Nationals",
+    "Baltimore Orioles",
+    "Cincinnati Reds",
+    "Los Angeles Angels",
+    "Los Angeles Dodgers",
+    "Boston Red Sox",
+    "New York Yankees",
+    "Houston Astros",
+    "Cleveland Guardians",
+    "Chicago White Sox",
+    "Oakland Athletics",
+    "Minnesota Twins",
+    "San Francisco Giants",
+    "San Diego Padres",
+    "Arizona Diamondbacks",
+    "New York Mets",
+    "Colorado Rockies",
+    "Chicago Cubs",
+    "Philadelphia Phillies",
+    "Detroit Tigers",
+    "Miami Marlins",
+]
+
+
 def get_db_path() -> Path:
     cfg = current_app.config.get("RULEV_DB_PATH")
     return Path(cfg) if cfg else DEFAULT_DB
@@ -185,13 +222,9 @@ def seed_default_order_if_empty() -> None:
         conn.close()
         return
 
-    teams = [
-        "Oakland Athletics", "Kansas City Royals", "Colorado Rockies", "Washington Nationals", "Miami Marlins",
-        "Pittsburgh Pirates", "Detroit Tigers", "Chicago White Sox", "Arizona Diamondbacks", "Los Angeles Angels",
-    ]
     rows = []
     for r in range(1, 4):
-        for p, team in enumerate(teams, start=1):
+        for p, team in enumerate(RULEV_DRAFT_ORDER_2026, start=1):
             rows.append((r, p, team))
     cur.executemany("INSERT OR IGNORE INTO rulev_order(round, pick, team) VALUES(?,?,?)", rows)
     conn.commit()

@@ -684,7 +684,7 @@ def api_players():
             "active_roster": (r["roster_status"] or "") == "Active",
             "contract_type": "" if is_current_fa else (r["contract_type"] or ""),
             "service_time": round(float(r["service_time"] or 0), 2),
-            "salary_m": None if is_current_fa else round(float(r["salary"] or 0) / 1_000_000.0, 2),
+            "salary_m": None if is_current_fa else round(float(r["salary"] or 0) / 1_000_000.0, 3),
             "team_opt": False if is_current_fa else bool(int(r["contract_option"] or 0)),
             "fa_class": row_fa_class,
             "options_remaining": int(r["options_remaining"] or 0),
@@ -890,7 +890,7 @@ let state = {{
 }};
 
 function moneyM(x) {{
-  return `$${{Number(x).toFixed(2)}}M`;
+  return `$${{Number(x).toFixed(3)}}M`;
 }}
 
 function makeOptions(el, values, label) {{

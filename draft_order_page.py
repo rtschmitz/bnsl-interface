@@ -47,6 +47,7 @@ __BNSL_GAME_CSS__
       </div>
       <div class="right">
         <a class="btn" href="/draft/">← Back</a>
+        <a class="btn" href="/draft/pick-stock">Future Picks</a>
         <span class="badge">SCHEDULE</span>
       </div>
     </div>
@@ -599,3 +600,204 @@ def api_order():
         "teams": get_all_teams(),
     })
 
+
+
+# --------- Future draft-pick stock routes ----------
+# This is intentionally separate from the live 2025 draft_order table.  The
+# draft_pick_stock table is rebuilt from trades.txt by trades_app and only tracks
+# future picks (2026+) so completed drafts are not mutated.
+
+PICK_STOCK_HTML = r"""
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Future Draft Pick Stock</title>
+  __BNSL_GAME_CSS__
+  <style>
+    .controls { display:flex; gap:12px; align-items:center; flex-wrap:wrap; margin: 12px 0; }
+    .pill.small { font-size:12px; padding:7px 10px; }
+  </style>
+</head>
+<body>
+  <div class="page">
+    <div class="brand">
+      <div>
+        <h1>FUTURE DRAFT PICKS</h1>
+        <div class="sub">Current 2026+ 12-round draft-pick stock reconstructed from the trade log.</div>
+      </div>
+      <div class="right">
+        <a class="btn" href="/draft/order">← Back to 2025 Order</a>
+        <a class="btn" href="/trades/">Trades</a>
+        <span class="badge">PICK STOCK</span>
+      </div>
+    </div>
+
+    <div class="panel pad">
+      <form class="controls" method="get" action="/draft/pick-stock">
+        <label class="pill" style="background: rgba(0,0,0,.16);">
+          <span style="margin-right:8px;">Year:</span>
+          <select name="year" onchange="this.form.submit()">
+            <option value="">All years</option>
+            {% for y in years %}
+              <option value="{{ y }}" {% if selected_year == y|string %}selected{% endif %}>{{ y }}</option>
+            {% endfor %}
+          </select>
+        </label>
+
+        <label class="pill" style="background: rgba(0,0,0,.16);">
+          <span style="margin-right:8px;">Current Owner:</span>
+          <select name="owner" onchange="this.form.submit()">
+            <option value="">All Teams</option>
+            {% for t in teams %}
+              <option value="{{ t }}" {% if selected_owner == t %}selected{% endif %}>{{ team_label(t) }}</option>
+            {% endfor %}
+          </select>
+        </label>
+      </form>
+
+      <hr class="sep"/>
+
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th style="width:10%;">Year</th>
+              <th style="width:10%;">Round</th>
+              <th style="width:24%;">Original Pick</th>
+              <th style="width:24%;">Current Owner</th>
+              <th>Last Movement</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for row in rows %}
+            <tr class="row-hover">
+              <td><b>{{ row.pick_year }}</b></td>
+              <td>{{ row.pick_round }}</td>
+              <td><b>{{ row.original_team_abbr }}</b> <span class="muted">{{ display_team(row.original_team_abbr) }}</span></td>
+              <td><b>{{ row.current_owner_abbr }}</b> <span class="muted">{{ display_team(row.current_owner_abbr) }}</span></td>
+              <td class="muted">
+                {% if row.last_trade_date %}
+                  {{ row.last_trade_date }} — {{ row.last_trade_title }}
+                {% else %}
+                  Original owner
+                {% endif %}
+              </td>
+            </tr>
+            {% endfor %}
+            {% if not rows %}
+              <tr><td colspan="5" class="muted">No future draft-stock rows are available yet. Open the Trades tab to rebuild from trades.txt, or check TRADES_LOG_PATH / DRAFT_STOCK_DB_PATH.</td></tr>
+            {% endif %}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+</body>
+</html>
+""".replace("__BNSL_GAME_CSS__", BNSL_GAME_CSS)
+
+
+def _pick_stock_db_path():
+    from pathlib import Path
+    configured = current_app.config.get("DRAFT_STOCK_DB_PATH")
+    if configured:
+        return Path(configured)
+    return Path(current_app.config["DRAFT_DB_PATH"]).with_name("draft_stock.db")
+
+
+def _pick_stock_conn() -> sqlite3.Connection:
+    conn = sqlite3.connect(_pick_stock_db_path())
+    conn.row_factory = sqlite3.Row
+    return conn
+
+
+def _query_pick_stock(year: str = "", owner: str = "", limit: int = 5000):
+    db_path = _pick_stock_db_path()
+    if not db_path.exists():
+        return []
+    conn = _pick_stock_conn()
+    params = []
+    clauses = []
+    if year:
+        clauses.append("pick_year=?")
+        params.append(int(year))
+    if owner:
+        clauses.append("current_owner_abbr=?")
+        params.append(owner)
+    where = "WHERE " + " AND ".join(clauses) if clauses else ""
+    cur = conn.cursor()
+    cur.execute(
+        f"""
+        SELECT *
+        FROM draft_pick_stock
+        {where}
+        ORDER BY pick_year ASC, pick_round ASC, current_owner_abbr ASC, original_team_abbr ASC
+        LIMIT ?
+        """,
+        (*params, limit),
+    )
+    rows = cur.fetchall()
+    conn.close()
+    return rows
+
+
+def _pick_stock_years():
+    db_path = _pick_stock_db_path()
+    if not db_path.exists():
+        return []
+    conn = _pick_stock_conn()
+    cur = conn.cursor()
+    cur.execute("SELECT DISTINCT pick_year FROM draft_pick_stock ORDER BY pick_year ASC")
+    years = [int(r[0]) for r in cur.fetchall()]
+    conn.close()
+    return years
+
+
+@order_bp.get("/pick-stock")
+def future_pick_stock_page():
+    try:
+        from trades_app import ABBR_TO_FULL, TEAM_ORDER, display_team, team_label, refresh_from_log
+        refresh_from_log()
+    except Exception as _e:
+        try:
+            current_app.logger.exception("[pick-stock] failed to refresh from trades log: %s", _e)
+        except Exception:
+            pass
+        ABBR_TO_FULL = {}
+        TEAM_ORDER = []
+        display_team = lambda x: x or ""
+        team_label = lambda x: x or ""
+
+    selected_year = (request.args.get("year") or "").strip()
+    selected_owner = (request.args.get("owner") or "").strip().upper()
+    rows = _query_pick_stock(year=selected_year, owner=selected_owner)
+    years = _pick_stock_years()
+
+    return render_template_string(
+        PICK_STOCK_HTML,
+        rows=rows,
+        years=years,
+        teams=TEAM_ORDER,
+        selected_year=selected_year,
+        selected_owner=selected_owner,
+        display_team=display_team,
+        team_label=team_label,
+    )
+
+
+@order_bp.get("/api/pick-stock")
+def api_future_pick_stock():
+    try:
+        from trades_app import refresh_from_log
+        refresh_from_log()
+    except Exception as _e:
+        try:
+            current_app.logger.exception("[api/pick-stock] failed to refresh from trades log: %s", _e)
+        except Exception:
+            pass
+    selected_year = (request.args.get("year") or "").strip()
+    selected_owner = (request.args.get("owner") or "").strip().upper()
+    rows = [dict(r) for r in _query_pick_stock(year=selected_year, owner=selected_owner)]
+    return jsonify({"rows": rows, "years": _pick_stock_years()})
