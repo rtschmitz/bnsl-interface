@@ -1446,7 +1446,7 @@ TRADES_HTML = r"""
           <div class="preview">
             <h3 style="margin-top:0;">Proposal Preview</h3>
             <div id="preview-body" class="muted">Select assets to preview salary payments and pick-count checks.</div>
-            <label>Notes<br><textarea id="proposal-notes" placeholder="Optional note for the other manager…"></textarea></label>
+            <label>Notes -- If you are proposing multi-year salary retaining, indicate that below<br><textarea id="proposal-notes" placeholder="Optional note for the other manager…"></textarea></label>
             <div class="controls"><button id="submit-proposal" class="btn primary" type="button">Submit Proposal</button><span id="submit-status" class="muted"></span></div>
           </div>
         </div>
