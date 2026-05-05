@@ -11,6 +11,12 @@ from ui_skin import BNSL_GAME_CSS
 
 financials_bp = Blueprint("financials", __name__)
 
+
+def canonical_team_abbr(team: str | None) -> str:
+    """Use WAS as the single app-facing code for Washington."""
+    code = (team or "").strip().upper()
+    return "WAS" if code == "WSH" else code
+
 TEAM_FINANCIALS: Dict[str, Dict[str, Any]] = {
     "ARI": {"team_name": "Arizona Diamondbacks", "revenue": 154_009_000, "hard_cap": 177_053_000},
     "ATL": {"team_name": "Atlanta Braves", "revenue": 150_246_000, "hard_cap": 172_694_000},
@@ -41,7 +47,7 @@ TEAM_FINANCIALS: Dict[str, Dict[str, Any]] = {
     "TB": {"team_name": "Tampa Bay Rays", "revenue": 138_430_000, "hard_cap": 159_805_000},
     "TEX": {"team_name": "Texas Rangers", "revenue": 127_445_000, "hard_cap": 148_725_000},
     "TOR": {"team_name": "Toronto Blue Jays", "revenue": 147_043_000, "hard_cap": 169_541_000},
-    "WSH": {"team_name": "Washington Nationals", "revenue": 147_924_000, "hard_cap": 169_704_000},
+    "WAS": {"team_name": "Washington Nationals", "revenue": 147_924_000, "hard_cap": 169_704_000},
 }
 
 
@@ -110,8 +116,8 @@ def record_finance_payment(
         source_id,
         now,
         effective,
-        (payer_team_abbr or "").upper(),
-        (receiver_team_abbr or "").upper(),
+        canonical_team_abbr(payer_team_abbr),
+        canonical_team_abbr(receiver_team_abbr),
         float(amount or 0.0),
         description,
     ))
@@ -157,8 +163,8 @@ def payment_sums_by_team() -> dict[str, float]:
     """)
     for r in cur.fetchall():
         amount = float(r["amount"] or 0.0)
-        payer = r["payer_team_abbr"]
-        receiver = r["receiver_team_abbr"]
+        payer = canonical_team_abbr(r["payer_team_abbr"])
+        receiver = canonical_team_abbr(r["receiver_team_abbr"])
         if payer in sums:
             sums[payer] -= amount
         if receiver in sums:
@@ -175,8 +181,13 @@ def list_payments(team: str | None = None) -> list[dict[str, Any]]:
     params: list[Any] = []
     where = "WHERE status='posted'"
     if team:
-        where += " AND (payer_team_abbr=? OR receiver_team_abbr=?)"
-        params.extend([team.upper(), team.upper()])
+        team_code = canonical_team_abbr(team)
+        aliases = [team_code]
+        if team_code == "WAS":
+            aliases.append("WSH")
+        placeholders = ",".join("?" for _ in aliases)
+        where += f" AND (payer_team_abbr IN ({placeholders}) OR receiver_team_abbr IN ({placeholders}))"
+        params.extend(aliases + aliases)
     cur = conn.cursor()
     cur.execute(
         f"""
@@ -209,7 +220,7 @@ def compute_financial_rows(team: str | None = None) -> List[Dict[str, Any]]:
     payments_by_team = payment_sums_by_team()
 
     rows: List[Dict[str, Any]] = []
-    codes = [team.upper()] if team else sorted(TEAM_FINANCIALS.keys())
+    codes = [canonical_team_abbr(team)] if team else sorted(TEAM_FINANCIALS.keys())
 
     for code in codes:
         meta = TEAM_FINANCIALS.get(code)
@@ -276,7 +287,7 @@ def api_financial_summary():
 
 @financials_bp.get("/api/payments")
 def api_payments():
-    team = (request.args.get("team") or "").strip().upper() or None
+    team = canonical_team_abbr(request.args.get("team")) or None
     return jsonify({"payments": list_payments(team)})
 
 

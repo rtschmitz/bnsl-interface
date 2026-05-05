@@ -152,7 +152,7 @@ TEAM_TO_ABBR.update({
     "San Diego Padres": "SD",
     "San Francisco Giants": "SF",
     "Tampa Bay Rays": "TB",
-    "Washington Nationals": "WSH",
+    "Washington Nationals": "WAS",
     "Oakland Athletics": "OAK",
     "Athletics": "OAK",
 })

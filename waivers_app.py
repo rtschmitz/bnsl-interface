@@ -31,7 +31,7 @@ TEAM_EMAILS = {
     "OAK": "bspropp@hotmail.com",
     "HOU": "golk624@protonmail.com",
     "TEX": "Brianorr@live.com",
-    "WSH": "smsetnor@gmail.com",
+    "WAS": "smsetnor@gmail.com",
     "NYM": "kerkhoffc@gmail.com",
     "PHI": "jdcarney26@gmail.com",
     "ATL": "stevegaston@yahoo.com",
@@ -54,9 +54,15 @@ TEAM_ABBRS = sorted(TEAM_EMAILS.keys())
 FINISHING_ORDER = [
     "MIA", "DET", "PHI", "CHC", "COL", "NYM", "ARI", "SD", "SF", "MIN",
     "OAK", "CHW", "CLE", "HOU", "NYY", "BOS", "LAD", "LAA", "CIN", "BAL",
-    "WSH", "ATL", "TOR", "KC", "PIT", "SEA", "TEX", "MIL", "TB", "STL",
+    "WAS", "ATL", "TOR", "KC", "PIT", "SEA", "TEX", "MIL", "TB", "STL",
 ]
 DEFAULT_WAIVER_PRIORITY = list(reversed(FINISHING_ORDER))
+
+
+def canonical_team_abbr(team: str | None) -> str:
+    """Use WAS as the single app-facing code for Washington."""
+    code = (team or "").strip().upper()
+    return "WAS" if code == "WSH" else code
 
 
 def utcnow() -> datetime:
@@ -196,6 +202,11 @@ def ensure_waiver_schema(conn: sqlite3.Connection) -> None:
     """)
     ensure_table_column(conn, "waiver_claims", "claim_priority", "claim_priority INTEGER")
 
+    # Keep legacy Washington codes consistent with roster/financials data.
+    conn.execute("UPDATE waiver_entries SET waived_from_team='WAS' WHERE waived_from_team='WSH'")
+    conn.execute("UPDATE waiver_entries SET claimed_by_team='WAS' WHERE claimed_by_team='WSH'")
+    conn.execute("UPDATE waiver_claims SET team_abbr='WAS' WHERE team_abbr='WSH'")
+
     # Backfill priorities for claims created before claim-ordering existed.
     cur = conn.cursor()
     cur.execute("""
@@ -274,7 +285,7 @@ def create_waiver_from_roster_row(
         _row_value(player_row, "fa_class", ""),
         _row_value(player_row, "fangraphs_id", ""),
         _row_value(player_row, "mlbam_id", None),
-        waived_from_team,
+        canonical_team_abbr(waived_from_team),
         pre_waiver_status,
         desired_status,
         waiver_reason,
@@ -285,7 +296,7 @@ def create_waiver_from_roster_row(
 
 
 def _priority_index(team: str, priority: list[str]) -> int:
-    team = (team or "").upper()
+    team = canonical_team_abbr(team)
     try:
         return priority.index(team)
     except ValueError:
@@ -293,6 +304,7 @@ def _priority_index(team: str, priority: list[str]) -> int:
 
 
 def _restore_claimed_player(cur: sqlite3.Cursor, waiver: sqlite3.Row, claiming_team: str) -> None:
+    claiming_team = canonical_team_abbr(claiming_team)
     restore_status = waiver["pre_waiver_status"] or "Reserve"
     cur.execute("""
         UPDATE roster_players
@@ -485,9 +497,10 @@ def bootstrap_waivers() -> None:
 
 
 def require_team() -> str:
-    team = session.get("waivers_authed_team") or session.get("roster_authed_team")
+    team = canonical_team_abbr(session.get("waivers_authed_team") or session.get("roster_authed_team"))
     if not team:
         abort(401, "Not logged in")
+    session["waivers_authed_team"] = team
     return team
 
 
@@ -498,7 +511,7 @@ def waiver_to_dict(row: sqlite3.Row, authed_team: str = "", claims_by_waiver: di
         "player_id": int(row["player_id"]),
         "name": row["player_name"],
         "position": row["position"] or "",
-        "team": row["waived_from_team"] or "",
+        "team": canonical_team_abbr(row["waived_from_team"]),
         "salary": float(row["salary"] or 0.0),
         "salary_m": round(float(row["salary"] or 0.0) / 1_000_000.0, 3),
         "contract_type": row["contract_type"] or "",
@@ -512,12 +525,12 @@ def waiver_to_dict(row: sqlite3.Row, authed_team: str = "", claims_by_waiver: di
         "waived_at_et": format_et(row["waived_at"]),
         "run_at": row["run_at"],
         "run_at_et": format_et(row["run_at"]),
-        "claimed_by_team": row["claimed_by_team"] or "",
+        "claimed_by_team": canonical_team_abbr(row["claimed_by_team"]),
         "processed_at_et": format_et(row["processed_at"]),
         "claims": claims,
         "claim_count": len(claims),
-        "my_claim": bool(authed_team and authed_team in claims),
-        "can_claim": bool(authed_team and row["status"] == "active" and authed_team != (row["waived_from_team"] or "")),
+        "my_claim": bool(canonical_team_abbr(authed_team) and canonical_team_abbr(authed_team) in [canonical_team_abbr(c) for c in claims]),
+        "can_claim": bool(canonical_team_abbr(authed_team) and row["status"] == "active" and canonical_team_abbr(authed_team) != canonical_team_abbr(row["waived_from_team"] or "")),
     }
 
 
@@ -525,7 +538,7 @@ def waiver_to_dict(row: sqlite3.Row, authed_team: str = "", claims_by_waiver: di
 def api_status():
     process_due_waivers()
     return jsonify({
-        "authed_team": session.get("waivers_authed_team") or session.get("roster_authed_team", ""),
+        "authed_team": canonical_team_abbr(session.get("waivers_authed_team") or session.get("roster_authed_team", "")),
         "authed_email": session.get("waivers_authed_email") or session.get("roster_authed_email", ""),
         "teams": TEAM_ABBRS,
         "priority": DEFAULT_WAIVER_PRIORITY,
@@ -537,7 +550,7 @@ def api_status():
 @waivers_bp.post("/api/login_team")
 def api_login_team():
     data = request.get_json(force=True, silent=True) or {}
-    team = (data.get("team") or "").strip().upper()
+    team = canonical_team_abbr(data.get("team"))
     email = (data.get("email") or "").strip()
     expected = TEAM_EMAILS.get(team)
     if not expected:
@@ -553,7 +566,7 @@ def api_login_team():
 def api_waivers():
     process_due_waivers()
     show_all = request.args.get("show_all") == "1"
-    authed_team = session.get("waivers_authed_team") or session.get("roster_authed_team", "")
+    authed_team = canonical_team_abbr(session.get("waivers_authed_team") or session.get("roster_authed_team", ""))
     conn = get_roster_conn()
     ensure_waiver_schema(conn)
     cur = conn.cursor()
@@ -584,7 +597,7 @@ def api_waivers():
             ORDER BY COALESCE(claim_priority, 1000000) ASC, datetime(claimed_at) ASC, id ASC
         """, ids)
         for c in cur.fetchall():
-            claims_by_waiver.setdefault(int(c["waiver_id"]), []).append(c["team_abbr"])
+            claims_by_waiver.setdefault(int(c["waiver_id"]), []).append(canonical_team_abbr(c["team_abbr"]))
     conn.close()
     return jsonify({"waivers": [waiver_to_dict(r, authed_team, claims_by_waiver) for r in rows]})
 
@@ -609,7 +622,7 @@ def api_claim():
     if waiver["status"] != "active":
         conn.close()
         return ("This waiver has already been processed", 409)
-    if team == (waiver["waived_from_team"] or ""):
+    if team == canonical_team_abbr(waiver["waived_from_team"] or ""):
         conn.close()
         return ("You cannot claim your own waived player", 409)
     if utcnow() >= parse_iso(waiver["run_at"]):
@@ -670,7 +683,7 @@ def api_my_claims():
             "player_id": int(row["player_id"]),
             "name": row["player_name"],
             "position": row["position"] or "",
-            "waived_from_team": row["waived_from_team"] or "",
+            "waived_from_team": canonical_team_abbr(row["waived_from_team"]),
             "salary_m": round(float(row["salary"] or 0.0) / 1_000_000.0, 3),
             "restore_status": row["pre_waiver_status"] or "",
             "run_at_et": format_et(row["run_at"]),

@@ -34,7 +34,7 @@ TEAM_EMAILS = {
     "OAK": "bspropp@hotmail.com",
     "HOU": "golk624@protonmail.com",
     "TEX": "Brianorr@live.com",
-    "WSH": "smsetnor@gmail.com",
+    "WAS": "smsetnor@gmail.com",
     "NYM": "kerkhoffc@gmail.com",
     "PHI": "jdcarney26@gmail.com",
     "ATL": "stevegaston@yahoo.com",
@@ -52,6 +52,12 @@ TEAM_EMAILS = {
 }
 
 TEAM_ABBRS = sorted(TEAM_EMAILS.keys())
+
+
+def canonical_team_abbr(team: str | None) -> str:
+    """Use WAS as the single app-facing code for Washington."""
+    code = (team or "").strip().upper()
+    return "WAS" if code == "WSH" else code
 
 POSITIONS = ["P","C","1B","2B","3B","SS","LF","CF","RF","DH","IF","OF"]
 CONTRACT_TYPES = ["R","A","X","FA"]
@@ -392,6 +398,7 @@ def row_service_time(row: sqlite3.Row) -> float:
 
 def normalize_roster_contract_types(conn: sqlite3.Connection) -> None:
     """Promote pre-arb R contracts to arbitration A contracts at 3.000+ service."""
+    conn.execute("UPDATE roster_players SET franchise='WAS' WHERE franchise='WSH'")
     conn.execute("""
         UPDATE roster_players
         SET contract_type='A'
@@ -557,7 +564,7 @@ def bootstrap_roster():
                         continue
 
                     raw_contract_type = (r.get("contract_type") or "").strip().upper()
-                    raw_franchise = (r.get("franchise") or "").strip()
+                    raw_franchise = canonical_team_abbr(r.get("franchise"))
                     raw_contract_expires = (r.get("contract_expires") or "").strip()
                     raw_contract_option = as_bool(r.get("contract_option"))
 
@@ -729,7 +736,7 @@ def api_players():
     cur = conn.cursor()
 
     search = (request.args.get("search") or "").strip().lower()
-    team = (request.args.get("team") or "").strip().upper()
+    team = canonical_team_abbr(request.args.get("team"))
     contract_type = (request.args.get("contract_type") or "").strip().upper()
     position = (request.args.get("position") or "").strip().upper()
     roster_status = (request.args.get("roster_status") or "").strip()
@@ -807,8 +814,8 @@ def api_players():
 
         is_current_fa = row_fa_class == CURRENT_FA_CLASS and not (r["franchise"] or "")
         can_edit = (
-            session.get("roster_authed_team", "") != "" and
-            (r["franchise"] or "") == session.get("roster_authed_team", "")
+            canonical_team_abbr(session.get("roster_authed_team", "")) != "" and
+            canonical_team_abbr(r["franchise"] or "") == canonical_team_abbr(session.get("roster_authed_team", ""))
         )
 
         out.append({
@@ -855,7 +862,7 @@ def api_players():
 @roster_bp.post("/api/login_team")
 def api_login_team():
     data = request.get_json(force=True, silent=True) or {}
-    team = (data.get("team") or "").strip().upper()
+    team = canonical_team_abbr(data.get("team"))
     email = (data.get("email") or "").strip()
 
     expected = TEAM_EMAILS.get(team)
@@ -872,16 +879,17 @@ def api_login_team():
 @roster_bp.get("/api/status")
 def api_status():
     return jsonify({
-        "authed_team": session.get("roster_authed_team", ""),
+        "authed_team": canonical_team_abbr(session.get("roster_authed_team", "")),
         "authed_email": session.get("roster_authed_email", ""),
         "teams": TEAM_ABBRS,
     })
 
 
 def require_roster_team() -> str:
-    team = session.get("roster_authed_team")
+    team = canonical_team_abbr(session.get("roster_authed_team"))
     if not team:
         abort(401, "Not logged in")
+    session["roster_authed_team"] = team
     return team
 
 @roster_bp.post("/api/update_player")
