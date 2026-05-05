@@ -9,281 +9,55 @@
     @import url('https://fonts.googleapis.com/css2?family=Rajdhani:wght@500;600;700&family=Inter:wght@400;500;600&display=swap');
 
     :root{
-      --bg0:#070A12;
-      --bg1:#0A1020;
-      --panel: rgba(18, 26, 48, .62);
-      --panel2: rgba(12, 18, 34, .72);
-      --stroke: rgba(140, 170, 255, .18);
-      --stroke2: rgba(255,255,255,.08);
-
-      --text:#EAF0FF;
-      --muted: rgba(234,240,255,.68);
-
-      --accent:#7C5CFF;
-      --accent2:#2EF2FF;
-      --good:#36F9A2;
-      --warn:#FF4D6D;
-      --gold:#FFD166;
-
-      --shadow: 0 18px 60px rgba(0,0,0,.55);
-      --shadow2: 0 10px 30px rgba(0,0,0,.45);
-
-      --r16: 16px;
-      --r20: 20px;
+      --bg0:#070A12; --bg1:#0A1020;
+      --panel: rgba(18, 26, 48, .62); --stroke: rgba(140, 170, 255, .18); --stroke2: rgba(255,255,255,.08);
+      --text:#EAF0FF; --muted: rgba(234,240,255,.68);
+      --accent:#7C5CFF; --accent2:#2EF2FF; --warn:#FF4D6D; --gold:#FFD166;
+      --shadow: 0 18px 60px rgba(0,0,0,.55); --shadow2: 0 10px 30px rgba(0,0,0,.45); --r20: 20px;
     }
-
     *{ box-sizing:border-box; }
     html, body{ height:100%; }
     body{
-      margin:0;
-      color: var(--text);
+      margin:0; color: var(--text);
       background:
         radial-gradient(1100px 680px at 70% -10%, rgba(124,92,255,.25), transparent 55%),
         radial-gradient(900px 620px at 20% 0%, rgba(46,242,255,.16), transparent 52%),
-        radial-gradient(900px 700px at 70% 80%, rgba(255,209,102,.08), transparent 55%),
         linear-gradient(180deg, var(--bg0), var(--bg1));
       font-family: Inter, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif;
       overflow:hidden;
     }
-
-    body::before{
-      content:"";
-      position:fixed; inset:-40vmax;
-      background:
-        conic-gradient(from 210deg,
-          rgba(124,92,255,.10),
-          rgba(46,242,255,.10),
-          rgba(255,77,109,.08),
-          rgba(124,92,255,.10)
-        );
-      filter: blur(60px);
-      opacity:.65;
-      animation: drift 14s ease-in-out infinite alternate;
-      pointer-events:none;
-      z-index:-3;
-    }
-    @keyframes drift{
-      from{ transform: translate3d(-3%, -2%, 0) rotate(-4deg); }
-      to{   transform: translate3d( 3%,  2%, 0) rotate( 6deg); }
-    }
-
-    body::after{
-      content:"";
-      position:fixed; inset:0;
-      background:
-        linear-gradient(to bottom, rgba(255,255,255,.05), rgba(255,255,255,0) 2px) 0 0/100% 6px,
-        linear-gradient(to right, rgba(124,92,255,.10), rgba(0,0,0,0) 20%) 0 0/260px 260px,
-        radial-gradient(circle at 50% 50%, rgba(46,242,255,.10), transparent 55%);
-      mix-blend-mode: overlay;
-      opacity:.25;
-      pointer-events:none;
-      z-index:-2;
-    }
-
-    .page{
-      height: 100%;
-      max-width: 1400px;
-      margin: 0 auto;
-      padding: 18px 18px 22px;
-      display:flex;
-      flex-direction:column;
-      gap: 14px;
-    }
-
-    .brand{
-      display:flex;
-      align-items:flex-end;
-      justify-content:space-between;
-      gap: 16px;
-    }
-    .brand h1{
-      margin:0;
-      font-family: Rajdhani, Inter, system-ui;
-      font-weight: 700;
-      letter-spacing: .8px;
-      font-size: 34px;
-      line-height: 1;
-    }
-    .brand .sub{
-      margin-top: 6px;
-      color: var(--muted);
-      font-size: 13px;
-    }
-    .brand .right{
-      display:flex;
-      gap: 10px;
-      align-items:center;
-      flex-wrap:wrap;
-      justify-content:flex-end;
-    }
-
-    .badge{
-      font-size: 12px;
-      padding: 6px 10px;
-      border-radius: 999px;
-      background: rgba(124,92,255,.14);
-      border: 1px solid rgba(124,92,255,.28);
-      color: rgba(234,240,255,.92);
-      letter-spacing:.2px;
-      white-space:nowrap;
-    }
-    .badge.gold{
-      background: rgba(255,209,102,.12);
-      border-color: rgba(255,209,102,.28);
-    }
-
-    .panel{
-      background: var(--panel);
-      border: 1px solid var(--stroke);
-      border-radius: var(--r20);
-      box-shadow: var(--shadow);
-      backdrop-filter: blur(10px);
-      -webkit-backdrop-filter: blur(10px);
-      overflow:hidden;
-    }
-    .panel.pad{ padding: 12px; }
-
-    .tabs{
-      display:flex;
-      gap: 10px;
-      flex-wrap:wrap;
-      align-items:center;
-      justify-content:space-between;
-    }
-
-    .tabrow{
-      display:flex;
-      gap: 10px;
-      flex-wrap:wrap;
-      align-items:center;
-    }
-
-    .tab{
-      position:relative;
-      padding: 10px 14px;
-      border-radius: 14px;
-      border: 1px solid rgba(140,170,255,.22);
-      background: linear-gradient(180deg, rgba(255,255,255,.08), rgba(255,255,255,.02));
-      color: var(--text);
-      cursor:pointer;
-      transition: transform .12s ease, box-shadow .18s ease, border-color .18s ease, filter .18s ease;
-      box-shadow: 0 10px 26px rgba(0,0,0,.25);
-      user-select:none;
-      font-weight: 600;
-      letter-spacing:.2px;
-      display:inline-flex;
-      align-items:center;
-      gap: 10px;
-    }
-    .tab:hover{
-      transform: translateY(-1px);
-      border-color: rgba(46,242,255,.45);
-      box-shadow: 0 14px 36px rgba(0,0,0,.35);
-    }
-    .tab:active{ transform: translateY(0px) scale(.99); }
-    .tab.active{
-      border-color: rgba(46,242,255,.55);
-      box-shadow: 0 0 0 3px rgba(46,242,255,.12), 0 18px 60px rgba(0,0,0,.45);
-      background:
-        radial-gradient(900px 140px at 30% 50%, rgba(46,242,255,.14), transparent 60%),
-        linear-gradient(180deg, rgba(124,92,255,.18), rgba(255,255,255,.02));
-    }
-
-    .dot{
-      width: 8px; height: 8px;
-      border-radius: 999px;
-      background: rgba(234,240,255,.25);
-      border: 1px solid rgba(255,255,255,.14);
-      box-shadow: 0 0 0 3px rgba(255,255,255,.06);
-    }
-    .tab.active .dot{
-      background: rgba(46,242,255,.85);
-      border-color: rgba(46,242,255,.55);
-      box-shadow: 0 0 0 4px rgba(46,242,255,.12);
-    }
-
-    .righttools{
-      display:flex;
-      gap: 10px;
-      align-items:center;
-      flex-wrap:wrap;
-      justify-content:flex-end;
-    }
-
-    .pill{
-      display:inline-flex;
-      gap:10px;
-      align-items:center;
-      padding: 10px 12px;
-      border-radius: 999px;
-      background: rgba(10, 16, 32, .55);
-      border: 1px solid var(--stroke2);
-      box-shadow: 0 6px 20px rgba(0,0,0,.25);
-      color: var(--text);
-      font-size: 13px;
-      white-space:nowrap;
-    }
-    .muted{ color: var(--muted); }
-
-    .viewport{
-      flex: 1;
-      display:flex;
-      min-height: 420px;
-    }
-
-    .frame-shell{
-      flex:1;
-      background: rgba(0,0,0,.22);
-      border: 1px solid rgba(140,170,255,.18);
-      border-radius: var(--r20);
-      padding: 10px;
-      box-shadow: var(--shadow2);
-      position:relative;
-      overflow:hidden;
-    }
-    .frame-shell::before{
-      content:"";
-      position:absolute; inset:0;
-      background:
-        radial-gradient(800px 140px at 20% 0%, rgba(46,242,255,.10), transparent 60%),
-        radial-gradient(900px 180px at 80% 0%, rgba(124,92,255,.14), transparent 65%);
-      pointer-events:none;
-      opacity:.9;
-    }
-    iframe{
-      position:relative;
-      width: 100%;
-      height: 100%;
-      min-height: 420px;
-      border: none;
-      border-radius: calc(var(--r20) - 8px);
-      background: rgba(0,0,0,.15);
-    }
-
+    body::before{ content:""; position:fixed; inset:-40vmax; background: conic-gradient(from 210deg, rgba(124,92,255,.10), rgba(46,242,255,.10), rgba(255,77,109,.08), rgba(124,92,255,.10)); filter: blur(60px); opacity:.65; animation: drift 14s ease-in-out infinite alternate; pointer-events:none; z-index:-3; }
+    @keyframes drift{ from{ transform: translate3d(-3%, -2%, 0) rotate(-4deg); } to{ transform: translate3d( 3%,  2%, 0) rotate( 6deg); } }
+    .page{ height:100%; max-width:1400px; margin:0 auto; padding:18px 18px 22px; display:flex; flex-direction:column; gap:14px; }
+    .brand{ display:flex; align-items:flex-end; justify-content:space-between; gap:16px; }
+    .brand h1{ margin:0; font-family: Rajdhani, Inter, system-ui; font-weight:700; letter-spacing:.8px; font-size:34px; line-height:1; }
+    .brand .sub{ margin-top:6px; color:var(--muted); font-size:13px; }
+    .badge{ font-size:12px; padding:6px 10px; border-radius:999px; background:rgba(255,209,102,.12); border:1px solid rgba(255,209,102,.28); color:rgba(234,240,255,.92); letter-spacing:.2px; white-space:nowrap; }
+    .panel{ background:var(--panel); border:1px solid var(--stroke); border-radius:var(--r20); box-shadow:var(--shadow); backdrop-filter:blur(10px); -webkit-backdrop-filter:blur(10px); overflow:hidden; }
+    .panel.pad{ padding:12px; }
+    .tabs{ display:flex; gap:10px; flex-wrap:wrap; align-items:center; justify-content:space-between; }
+    .tabrow{ display:flex; gap:10px; flex-wrap:wrap; align-items:center; }
+    .tab{ position:relative; padding:10px 14px; border-radius:14px; border:1px solid rgba(140,170,255,.22); background:linear-gradient(180deg, rgba(255,255,255,.08), rgba(255,255,255,.02)); color:var(--text); cursor:pointer; transition: transform .12s ease, box-shadow .18s ease, border-color .18s ease; box-shadow:0 10px 26px rgba(0,0,0,.25); user-select:none; font-weight:600; letter-spacing:.2px; display:inline-flex; align-items:center; gap:10px; }
+    .tab:hover{ transform:translateY(-1px); border-color:rgba(46,242,255,.45); box-shadow:0 14px 36px rgba(0,0,0,.35); }
+    .tab.active{ border-color:rgba(46,242,255,.55); box-shadow:0 0 0 3px rgba(46,242,255,.12), 0 18px 60px rgba(0,0,0,.45); background:radial-gradient(900px 140px at 30% 50%, rgba(46,242,255,.14), transparent 60%), linear-gradient(180deg, rgba(124,92,255,.18), rgba(255,255,255,.02)); }
+    .dot{ width:8px; height:8px; border-radius:999px; background:rgba(234,240,255,.25); border:1px solid rgba(255,255,255,.14); box-shadow:0 0 0 3px rgba(255,255,255,.06); }
+    .tab.active .dot{ background:rgba(46,242,255,.85); border-color:rgba(46,242,255,.55); box-shadow:0 0 0 4px rgba(46,242,255,.12); }
+    .viewport{ flex:1; display:flex; min-height:420px; }
+    .frame-shell{ flex:1; background:rgba(0,0,0,.22); border:1px solid rgba(140,170,255,.18); border-radius:var(--r20); padding:10px; box-shadow:var(--shadow2); position:relative; overflow:hidden; }
+    iframe{ position:relative; width:100%; height:100%; min-height:420px; border:none; border-radius:calc(var(--r20) - 8px); background:rgba(0,0,0,.15); }
     .hidden{ display:none; }
-
-    @media (max-width: 900px){
-      .brand{ align-items:flex-start; flex-direction:column; }
-      .tabs{ align-items:flex-start; gap: 12px; }
-    }
-
-    @media (prefers-reduced-motion: reduce){
-      body::before{ animation:none; }
-      .tab{ transition:none; }
-    }
+    @media (max-width:900px){ .brand{ align-items:flex-start; flex-direction:column; } .tabs{ align-items:flex-start; gap:12px; } }
+    @media (prefers-reduced-motion:reduce){ body::before{ animation:none; } .tab{ transition:none; } }
   </style>
 </head>
-
 <body>
   <div class="page">
     <div class="brand">
       <div>
         <h1>BNSL INTERFACE</h1>
-        <div class="sub">Draft • Rule V • Free Agency • Rosters • Financials • Trades</div>
+        <div class="sub">Draft • Rule V • Free Agency • Rosters • Waivers • Financials • Trades</div>
       </div>
-      <div class="right">
-        <span class="badge gold" id="active-badge">FREE AGENCY</span>
-      </div>
+      <span class="badge" id="active-badge">FREE AGENCY</span>
     </div>
 
     <div class="panel pad">
@@ -293,6 +67,7 @@
           <button class="tab" id="tab-rulev"><span class="dot"></span> Rule V Draft</button>
           <button class="tab" id="tab-fa"><span class="dot"></span> Free Agency</button>
           <button class="tab" id="tab-roster"><span class="dot"></span> Roster</button>
+          <button class="tab" id="tab-waivers"><span class="dot"></span> Waivers</button>
           <button class="tab" id="tab-financials"><span class="dot"></span> Financials</button>
           <button class="tab" id="tab-trades"><span class="dot"></span> Trades</button>
         </div>
@@ -305,6 +80,7 @@
         <iframe id="frame-rulev" src="/rulev/" class="hidden"></iframe>
         <iframe id="frame-fa" src="/fa/" class="hidden"></iframe>
         <iframe id="frame-roster" src="/roster/" class="hidden"></iframe>
+        <iframe id="frame-waivers" src="/waivers/" class="hidden"></iframe>
         <iframe id="frame-financials" src="/financials/" class="hidden"></iframe>
         <iframe id="frame-trades" src="/trades/" class="hidden"></iframe>
       </div>
@@ -312,59 +88,28 @@
   </div>
 
   <script>
-    const tDraft = document.getElementById("tab-draft");
-    const tRulev = document.getElementById("tab-rulev");
-    const tFa = document.getElementById("tab-fa");
-    const tRoster = document.getElementById("tab-roster");
-    const tFinancials = document.getElementById("tab-financials");
-    const tTrades = document.getElementById("tab-trades");
-
-    const fDraft = document.getElementById("frame-draft");
-    const fRulev = document.getElementById("frame-rulev");
-    const fFa = document.getElementById("frame-fa");
-    const fRoster = document.getElementById("frame-roster");
-    const fFinancials = document.getElementById("frame-financials");
-    const fTrades = document.getElementById("frame-trades");
-
-    const activeBadge = document.getElementById("active-badge");
-
     const tabs = {
-      draft: { button: tDraft, frame: fDraft, label: "DRAFT" },
-      rulev: { button: tRulev, frame: fRulev, label: "RULE V" },
-      fa: { button: tFa, frame: fFa, label: "FREE AGENCY" },
-      roster: { button: tRoster, frame: fRoster, label: "ROSTER" },
-      financials: { button: tFinancials, frame: fFinancials, label: "FINANCIALS" },
-      trades: { button: tTrades, frame: fTrades, label: "TRADES" },
+      draft: { button: document.getElementById("tab-draft"), frame: document.getElementById("frame-draft"), label: "DRAFT" },
+      rulev: { button: document.getElementById("tab-rulev"), frame: document.getElementById("frame-rulev"), label: "RULE V" },
+      fa: { button: document.getElementById("tab-fa"), frame: document.getElementById("frame-fa"), label: "FREE AGENCY" },
+      roster: { button: document.getElementById("tab-roster"), frame: document.getElementById("frame-roster"), label: "ROSTER" },
+      waivers: { button: document.getElementById("tab-waivers"), frame: document.getElementById("frame-waivers"), label: "WAIVERS" },
+      financials: { button: document.getElementById("tab-financials"), frame: document.getElementById("frame-financials"), label: "FINANCIALS" },
+      trades: { button: document.getElementById("tab-trades"), frame: document.getElementById("frame-trades"), label: "TRADES" },
     };
-
+    const activeBadge = document.getElementById("active-badge");
     function show(which){
       if (!tabs[which]) which = "fa";
-
       for (const [key, tab] of Object.entries(tabs)) {
         const active = key === which;
         tab.frame.classList.toggle("hidden", !active);
         tab.button.classList.toggle("active", active);
       }
-
       activeBadge.textContent = tabs[which].label;
-
       try { localStorage.setItem("bnsl.activeTab", which); } catch(e){}
     }
-
-    tDraft.onclick = () => show("draft");
-    tRulev.onclick = () => show("rulev");
-    tFa.onclick = () => show("fa");
-    tRoster.onclick = () => show("roster");
-    tFinancials.onclick = () => show("financials");
-    tTrades.onclick = () => show("trades");
-
-    (function boot(){
-      let which = "fa";
-      try {
-        which = localStorage.getItem("bnsl.activeTab") || "fa";
-      } catch(e){}
-      show(which);
-    })();
+    for (const [key, tab] of Object.entries(tabs)) tab.button.onclick = () => show(key);
+    (function boot(){ let which = "fa"; try { which = localStorage.getItem("bnsl.activeTab") || "fa"; } catch(e){} show(which); })();
   </script>
 </body>
 </html>

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from datetime import datetime, timezone
 import sqlite3
 from typing import Any, Dict, List
 
@@ -40,7 +41,7 @@ TEAM_FINANCIALS: Dict[str, Dict[str, Any]] = {
     "TB": {"team_name": "Tampa Bay Rays", "revenue": 138_430_000, "hard_cap": 159_805_000},
     "TEX": {"team_name": "Texas Rangers", "revenue": 127_445_000, "hard_cap": 148_725_000},
     "TOR": {"team_name": "Toronto Blue Jays", "revenue": 147_043_000, "hard_cap": 169_541_000},
-    "WAS": {"team_name": "Washington Nationals", "revenue": 147_924_000, "hard_cap": 169_704_000},
+    "WSH": {"team_name": "Washington Nationals", "revenue": 147_924_000, "hard_cap": 169_704_000},
 }
 
 
@@ -84,6 +85,38 @@ def init_payments_schema(conn: sqlite3.Connection) -> None:
     """)
     conn.execute("CREATE INDEX IF NOT EXISTS idx_finance_payments_teams ON finance_payments(payer_team_abbr, receiver_team_abbr, status)")
     conn.commit()
+
+
+def record_finance_payment(
+    source_type: str,
+    source_id: int | None,
+    payer_team_abbr: str,
+    receiver_team_abbr: str,
+    amount: float,
+    description: str,
+    effective_date: str | None = None,
+) -> None:
+    """Post a one-way financial payment into the shared finance_payments table."""
+    now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    effective = effective_date or now[:10]
+    conn = get_payments_conn()
+    conn.execute("""
+        INSERT OR IGNORE INTO finance_payments(
+            source_type, source_id, created_at, effective_date,
+            payer_team_abbr, receiver_team_abbr, amount, description, status
+        ) VALUES (?,?,?,?,?,?,?,?, 'posted')
+    """, (
+        source_type,
+        source_id,
+        now,
+        effective,
+        (payer_team_abbr or "").upper(),
+        (receiver_team_abbr or "").upper(),
+        float(amount or 0.0),
+        description,
+    ))
+    conn.commit()
+    conn.close()
 
 
 def _has_column(conn: sqlite3.Connection, table: str, column: str) -> bool:
