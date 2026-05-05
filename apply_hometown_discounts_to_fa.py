@@ -23,6 +23,8 @@ from typing import Any
 
 APP_DIR = Path(__file__).resolve().parent
 
+from bnsl_paths import db_path, generated_path
+
 ABBR_TO_TEAM = {
     "ARI": "Arizona Diamondbacks", "ATL": "Atlanta Braves", "BAL": "Baltimore Orioles", "BOS": "Boston Red Sox",
     "CHC": "Chicago Cubs", "CHW": "Chicago White Sox", "CIN": "Cincinnati Reds", "CLE": "Cleveland Guardians",
@@ -253,9 +255,9 @@ def apply_hometown_discounts(
 
 def main() -> None:
     ap = argparse.ArgumentParser(description="Apply hometown discount claims to fa.db/free_agents.")
-    ap.add_argument("--fa-db", type=Path, default=APP_DIR / "fa.db")
-    ap.add_argument("--roster-db", type=Path, default=APP_DIR / "roster.db")
-    ap.add_argument("--htd-db", type=Path, default=APP_DIR / "hometown_discounts.db")
+    ap.add_argument("--fa-db", type=Path, default=db_path("fa.db"))
+    ap.add_argument("--roster-db", type=Path, default=db_path("roster.db"))
+    ap.add_argument("--htd-db", type=Path, default=generated_path("hometown_discounts.db"))
     ap.add_argument("--keep-missing", action="store_true", help="Do not clear rows with no HTD match.")
     ap.add_argument("--dry-run", action="store_true")
     args = ap.parse_args()

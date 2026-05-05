@@ -1,6 +1,7 @@
-from pathlib import Path
 import os
 from flask import Flask, render_template
+
+from bnsl_paths import db_path, generated_path, input_path
 
 import fa_app
 import draft_app
@@ -24,17 +25,20 @@ def create_app():
     app = Flask(__name__)
     app.secret_key = os.environ.get("FLASK_SECRET_KEY", "your-secret")
 
-    APP_DIR = Path(__file__).resolve().parent
+    # All mutable/runtime state is routed through bnsl_paths.py.
+    # On Render, set BNSL_DATA_DIR=/data so these files live on the persistent disk.
+    # Locally, leave BNSL_DATA_DIR unset for the old repo-relative behavior, or set
+    # BNSL_DATA_DIR=.bnsl_data to test the persistent-disk layout.
+    app.config["DRAFT_DB_PATH"] = str(db_path("draft.db"))
+    app.config["FA_DB_PATH"] = str(db_path("fa.db"))
+    app.config["RULEV_DB_PATH"] = str(db_path("rulev.db"))
+    app.config["ROSTER_DB_PATH"] = str(db_path("roster.db"))
+    app.config["DRAFT_STOCK_DB_PATH"] = str(db_path("draft_stock.db"))
 
-    app.config["DRAFT_DB_PATH"]  = str(APP_DIR / "draft.db")
-    app.config["FA_DB_PATH"]     = str(APP_DIR / "fa.db")
-    app.config["RULEV_DB_PATH"]  = str(APP_DIR / "rulev.db")
-    app.config["ROSTER_DB_PATH"] = str(APP_DIR / "roster.db")
-    app.config["ROSTER_CSV_PATH"] = str(APP_DIR / "rostered_2025service.csv")
-    app.config["OOTP_FA_ROSTER_PATH"] = str(APP_DIR / "bnsl_ootp27_fixed_rosters_oldids_optionsupdated.txt")
-    app.config["HOMETOWN_DISCOUNTS_DB_PATH"] = str(APP_DIR / "hometown_discounts.db")
-    app.config["TRADES_LOG_PATH"] = str(APP_DIR / "trades.txt")
-    app.config["DRAFT_STOCK_DB_PATH"] = str(APP_DIR / "draft_stock.db")
+    app.config["ROSTER_CSV_PATH"] = str(input_path("rostered_2025service.csv"))
+    app.config["OOTP_FA_ROSTER_PATH"] = str(input_path("bnsl_ootp27_fixed_rosters_oldids_optionsupdated.txt"))
+    app.config["TRADES_LOG_PATH"] = str(input_path("trades.txt"))
+    app.config["HOMETOWN_DISCOUNTS_DB_PATH"] = str(generated_path("hometown_discounts.db"))
 
     app.register_blueprint(draft_bp,  url_prefix="/draft")
     app.register_blueprint(fa_bp,     url_prefix="/fa")

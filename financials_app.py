@@ -8,6 +8,7 @@ from typing import Any, Dict, List
 from flask import Blueprint, current_app, jsonify, render_template_string, request
 
 from ui_skin import BNSL_GAME_CSS
+from bnsl_paths import db_path
 
 financials_bp = Blueprint("financials", __name__)
 
@@ -61,7 +62,7 @@ def get_payments_db_path() -> Path:
     configured = current_app.config.get("DRAFT_STOCK_DB_PATH")
     if configured:
         return Path(configured)
-    return Path(__file__).resolve().parent / "draft_stock.db"
+    return db_path("draft_stock.db")
 
 
 def get_payments_conn() -> sqlite3.Connection:

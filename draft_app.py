@@ -63,35 +63,31 @@ from flask import (
 )
 import logging
 
-from flask import current_app
+from flask import current_app, has_app_context
+
+from bnsl_paths import db_path, input_path
 
 APP_DIR = Path(__file__).resolve().parent
 
-env_db = os.environ.get("DB_PATH")
-#if env_db:
-#    DB_PATH = Path(env_db)
-#elif Path("/data").exists():
-#    DB_PATH = Path("/data/draft.db")
-#else:
-DB_PATH = APP_DIR / "draft.db"   # ← local default
-
-# Make sure /data exists so SQLite can create the file there.
+DB_PATH = Path(os.environ.get("DRAFT_DB_PATH") or os.environ.get("DB_PATH") or str(db_path("draft.db")))
 DB_PATH.parent.mkdir(parents=True, exist_ok=True)
 
-PLAYERS_CSV = APP_DIR / "players.csv"
-DRAFT_ORDER_CSV = APP_DIR / "draft_order.csv"
+PLAYERS_CSV = Path(os.environ.get("BNSL_PLAYERS_CSV", str(input_path("players.csv"))))
+DRAFT_ORDER_CSV = Path(os.environ.get("BNSL_DRAFT_ORDER_CSV", str(input_path("draft_order.csv"))))
 
 from flask import Blueprint
 draft_bp = Blueprint("draft", __name__)
 
 
-from flask import current_app
-
 # --- Blueprint-safe accessors (no global `app` here) ---
 def get_db_path() -> Path:
-    # Use the Flask app's config if set (factory pattern), else fall back.
-    cfg = current_app.config.get("DRAFT_DB_PATH")
-    return Path(cfg) if cfg else DB_PATH
+    # Safe at import time and under Flask.  This matters because this module
+    # initializes draft.db during import.
+    if has_app_context():
+        cfg = current_app.config.get("DRAFT_DB_PATH")
+        if cfg:
+            return Path(cfg)
+    return DB_PATH
 
 @draft_bp.before_app_request
 def _ensure_db_dir_exists():
@@ -377,7 +373,7 @@ def send_email(to_addr: str, subject: str, body: str):
         s.send_message(msg)
 
 def get_conn() -> sqlite3.Connection:
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(str(get_db_path()))
     conn.row_factory = sqlite3.Row
 
     # Register unaccent(text) for accent-insensitive search/sort

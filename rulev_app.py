@@ -9,16 +9,17 @@ from pathlib import Path
 from datetime import datetime
 from typing import Any, Dict, List
 
-from flask import Blueprint, current_app, request, jsonify, session, render_template_string, abort
+from flask import Blueprint, current_app, has_app_context, request, jsonify, session, render_template_string, abort
 
 # Reuse teams + emails from your main draft app
 from team_config import MLB_TEAMS, TEAM_EMAILS, emails_equal
 from ui_skin import BNSL_GAME_CSS
+from bnsl_paths import db_path
 
 rulev_bp = Blueprint("rulev", __name__)
 
 APP_DIR = Path(__file__).resolve().parent
-DEFAULT_DB = APP_DIR / "rulev.db"
+DEFAULT_DB = db_path("rulev.db")
 
 
 # 2026 Rule V draft order: reverse of supplied 2025 standings finish
@@ -105,8 +106,11 @@ def canonical_team_abbr(team: Any) -> str:
 
 
 def get_db_path() -> Path:
-    cfg = current_app.config.get("RULEV_DB_PATH")
-    return Path(cfg) if cfg else DEFAULT_DB
+    if has_app_context():
+        cfg = current_app.config.get("RULEV_DB_PATH")
+        if cfg:
+            return Path(cfg)
+    return DEFAULT_DB
 
 
 def get_conn() -> sqlite3.Connection:
@@ -178,7 +182,7 @@ def init_db():
 
 def get_roster_db_path() -> Path:
     cfg = current_app.config.get("ROSTER_DB_PATH")
-    return Path(cfg) if cfg else (APP_DIR / "roster.db")
+    return Path(cfg) if cfg else db_path("roster.db")
 
 
 def _infer_two_digit_birth_year(yy: int) -> int:
@@ -824,7 +828,7 @@ if __name__ == "__main__":
 
     parser = argparse.ArgumentParser(description="Rule V roster-sync utilities")
     parser.add_argument("--rulev-db", default=str(DEFAULT_DB), help="Path to rulev.db")
-    parser.add_argument("--roster-db", default=str(APP_DIR / "roster.db"), help="Path to roster.db")
+    parser.add_argument("--roster-db", default=str(db_path("roster.db")), help="Path to roster.db")
     parser.add_argument("--sync-roster", action="store_true", help="Refresh Rule V eligible pool from roster.db")
     args = parser.parse_args()
 

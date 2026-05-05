@@ -6,6 +6,7 @@ from datetime import datetime, timedelta, timezone
 from typing import List, Dict, Any, Optional
 from ui_skin import BNSL_GAME_CSS
 from flask import Blueprint, current_app, request, jsonify, render_template_string
+from bnsl_paths import db_path
 
 from zoneinfo import ZoneInfo  # Python 3.9+
 EASTERN = ZoneInfo("America/New_York")
@@ -704,7 +705,8 @@ def _pick_stock_db_path():
     configured = current_app.config.get("DRAFT_STOCK_DB_PATH")
     if configured:
         return Path(configured)
-    return Path(current_app.config["DRAFT_DB_PATH"]).with_name("draft_stock.db")
+    draft_db = current_app.config.get("DRAFT_DB_PATH")
+    return Path(draft_db).with_name("draft_stock.db") if draft_db else db_path("draft_stock.db")
 
 
 def _pick_stock_conn() -> sqlite3.Connection:

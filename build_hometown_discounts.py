@@ -31,6 +31,8 @@ from typing import Any, Iterable
 
 APP_DIR = Path(__file__).resolve().parent
 
+from bnsl_paths import generated_path, input_path
+
 ABBR_TO_TEAM = {
     "ARI": "Arizona Diamondbacks",
     "ATL": "Atlanta Braves",
@@ -470,9 +472,9 @@ def build_database(
 
 def main() -> None:
     ap = argparse.ArgumentParser(description="Build BNSL hometown-discount reference DB from OOTP stat exports.")
-    ap.add_argument("--batting", type=Path, default=APP_DIR / "player_batting_stats.txt")
-    ap.add_argument("--pitching", type=Path, default=APP_DIR / "player_pitching_stats.txt")
-    ap.add_argument("--out", type=Path, default=APP_DIR / "hometown_discounts.db")
+    ap.add_argument("--batting", type=Path, default=input_path("player_batting_stats.txt"))
+    ap.add_argument("--pitching", type=Path, default=input_path("player_pitching_stats.txt"))
+    ap.add_argument("--out", type=Path, default=generated_path("hometown_discounts.db"))
     ap.add_argument("--current-year", type=int, default=2025)
     ap.add_argument("--previous-year", type=int, default=2024)
     args = ap.parse_args()

@@ -9,6 +9,8 @@ import sqlite3
 
 from flask import Blueprint, current_app, jsonify, render_template_string, request, session
 
+from bnsl_paths import db_path, input_path
+
 try:
     from ui_skin import BNSL_GAME_CSS
 except Exception:  # lets the parser/database builder run outside the full app too
@@ -109,15 +111,15 @@ def _app_dir() -> Path:
 
 
 def get_trades_log_path() -> Path:
-    return Path(_safe_config("TRADES_LOG_PATH") or (_app_dir() / "trades.txt"))
+    return Path(_safe_config("TRADES_LOG_PATH") or input_path("trades.txt"))
 
 
 def get_draft_stock_db_path() -> Path:
-    return Path(_safe_config("DRAFT_STOCK_DB_PATH") or (_app_dir() / "draft_stock.db"))
+    return Path(_safe_config("DRAFT_STOCK_DB_PATH") or db_path("draft_stock.db"))
 
 
 def get_roster_db_path() -> Path:
-    return Path(_safe_config("ROSTER_DB_PATH") or (_app_dir() / "roster.db"))
+    return Path(_safe_config("ROSTER_DB_PATH") or db_path("roster.db"))
 
 
 def connect_stock_db(db_path: Optional[Path] = None) -> sqlite3.Connection:

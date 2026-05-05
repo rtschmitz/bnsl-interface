@@ -61,16 +61,12 @@ import os
 import logging
 from flask import Blueprint, current_app, has_app_context
 
+from bnsl_paths import cache_path, db_path, generated_path, input_path
+
 APP_DIR = Path(__file__).resolve().parent
 
-# ---------- DB (module default; app factory can override via app.config["DB_PATH"]) ----------
-env_db = os.environ.get("DB_PATH")
-if env_db:
-    DB_PATH = Path(env_db)
-else:
-    DB_PATH = APP_DIR / "fa.db"
-
-# Ensure parent dir exists for the module-default DB_PATH.
+# ---------- DB (module default; app factory can override via app.config["FA_DB_PATH"]) ----------
+DB_PATH = Path(os.environ.get("FA_DB_PATH") or os.environ.get("DB_PATH") or str(db_path("fa.db")))
 DB_PATH.parent.mkdir(parents=True, exist_ok=True)
 
 def get_db_path() -> Path:
@@ -85,23 +81,23 @@ def get_db_path() -> Path:
     return DB_PATH
 
 # ---------- Files / dirs ----------
-FREE_AGENTS_CSV = APP_DIR / "free_agents.csv"
-PLAYER_REGISTRY_CSV = APP_DIR / "player_registry.csv"  # your new registry file
+FREE_AGENTS_CSV = Path(os.environ.get("BNSL_FREE_AGENTS_CSV", str(input_path("free_agents.csv"))))
+PLAYER_REGISTRY_CSV = Path(os.environ.get("BNSL_PLAYER_REGISTRY_CSV", str(input_path("player_registry.csv"))))
 
 # Roster CSV is now the source of truth for the FA tab.
 # Override with:
 #   export BNSL_ROSTER_CSV=/path/to/rostered_2025service_BNSL_arb_updated.csv
-ROSTER_CSV = Path(os.environ.get("BNSL_ROSTER_CSV", str(APP_DIR / "rostered_2025service_BNSL_arb_updated.csv")))
+ROSTER_CSV = Path(os.environ.get("BNSL_ROSTER_CSV", str(input_path("rostered_2025service_BNSL_arb_updated.csv"))))
 
 # Live roster DB is the source of truth for free agency eligibility.
 # The OOTP export is only used to backfill missing unsigned players into roster.db.
 OOTP_FA_ROSTER = Path(os.environ.get(
     "BNSL_OOTP_FA_ROSTER",
-    str(APP_DIR / "bnsl_ootp27_fixed_rosters_oldids_optionsupdated.txt"),
+    str(input_path("bnsl_ootp27_fixed_rosters_oldids_optionsupdated.txt")),
 ))
 HOMETOWN_DISCOUNTS_DB = Path(os.environ.get(
     "BNSL_HOMETOWN_DISCOUNTS_DB",
-    str(APP_DIR / "hometown_discounts.db"),
+    str(generated_path("hometown_discounts.db")),
 ))
 ROSTER_DB_SYNC_TTL_SECONDS = int(os.environ.get("BNSL_ROSTER_DB_SYNC_TTL_SECONDS", "15"))
 CURRENT_SEASON = 2025
@@ -115,7 +111,7 @@ ROSTER_SYNC_TTL_SECONDS = int(os.environ.get("BNSL_ROSTER_SYNC_TTL_SECONDS", "15
 ROSTERED_STATUSES = {"ACTIVE", "RESERVE"}
 
 
-HEADSHOT_DIR = APP_DIR / "static" / "player_images"
+HEADSHOT_DIR = Path(os.environ.get("BNSL_HEADSHOT_DIR", str(cache_path("player_images"))))
 HEADSHOT_DIR.mkdir(parents=True, exist_ok=True)
 
 from team_config import (
@@ -628,7 +624,7 @@ def get_roster_db_path() -> Path:
         cfg = current_app.config.get("ROSTER_DB_PATH")
         if cfg:
             return Path(cfg)
-    return APP_DIR / "roster.db"
+    return db_path("roster.db")
 
 
 def get_ootp_fa_roster_path() -> Path:
