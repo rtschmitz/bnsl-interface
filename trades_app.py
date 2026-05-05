@@ -23,7 +23,7 @@ except Exception:  # lets the parser/database builder run outside the full app t
     """
 
 try:
-    from draft_app import TEAM_EMAILS, emails_equal
+    from team_config import TEAM_EMAILS, emails_equal
 except Exception:
     TEAM_EMAILS = {}
     def emails_equal(a: str | None, b: str | None) -> bool:

@@ -18,46 +18,7 @@ from ui_skin import BNSL_GAME_CSS
 
 roster_bp = Blueprint("roster", __name__)
 
-TEAM_EMAILS = {
-    "TOR": "daniele.defeo@gmail.com",
-    "NYY": "dmsund66@gmail.com",
-    "BOS": "chris_lawrence@sbcglobal.net",
-    "TB": "smith.mark.louis@gmail.com",
-    "BAL": "bsweis@ptd.net",
-    "DET": "manconley@gmail.com",
-    "KC": "jim@timhafer.com",
-    "MIN": "jonathan.adelman@gmail.com",
-    "CHW": "bglover6@gmail.com",
-    "CLE": "bonfanti20@gmail.com",
-    "LAA": "dsucoff@gmail.com",
-    "SEA": "daniel_a_fisher@yahoo.com",
-    "OAK": "bspropp@hotmail.com",
-    "HOU": "golk624@protonmail.com",
-    "TEX": "Brianorr@live.com",
-    "WAS": "smsetnor@gmail.com",
-    "NYM": "kerkhoffc@gmail.com",
-    "PHI": "jdcarney26@gmail.com",
-    "ATL": "stevegaston@yahoo.com",
-    "MIA": "schmitz@ucsb.edu",
-    "STL": "parkbench@mac.com",
-    "CHC": "bryanhartman@gmail.com",
-    "PIT": "jseiner24@gmail.com",
-    "MIL": "tsurratt@hiaspire.com",
-    "CIN": "jpmile@yahoo.com",
-    "LAD": "jr92@comcast.net",
-    "COL": "GypsySon@gmail.com",
-    "ARI": "mhr4240@gmail.com",
-    "SF": "jasonmallet@gmail.com",
-    "SD": "mattaca77@gmail.com",
-}
-
-TEAM_ABBRS = sorted(TEAM_EMAILS.keys())
-
-
-def canonical_team_abbr(team: str | None) -> str:
-    """Use WAS as the single app-facing code for Washington."""
-    code = (team or "").strip().upper()
-    return "WAS" if code == "WSH" else code
+from team_config import TEAM_EMAILS_BY_ABBR as TEAM_EMAILS, TEAM_ABBRS, canonical_team_abbr, emails_equal
 
 POSITIONS = ["P","C","1B","2B","3B","SS","LF","CF","RF","DH","IF","OF"]
 CONTRACT_TYPES = ["R","A","X","FA"]
@@ -65,6 +26,41 @@ STATUS_TYPES = ["Active","40-man","Reserve"]
 FA_CLASSES = ["2026","2027","2028","2029","2030"]
 CURRENT_SEASON = 2025
 CURRENT_FA_CLASS = str(CURRENT_SEASON + 1)
+DRAFT_YEAR = 2025
+DRAFT_ROOKIE_OPTIONS_REMAINING = 3
+
+DRAFT_TEAM_ABBR = {
+    "Arizona Diamondbacks": "ARI",
+    "Atlanta Braves": "ATL",
+    "Baltimore Orioles": "BAL",
+    "Boston Red Sox": "BOS",
+    "Chicago Cubs": "CHC",
+    "Chicago White Sox": "CHW",
+    "Cincinnati Reds": "CIN",
+    "Cleveland Guardians": "CLE",
+    "Colorado Rockies": "COL",
+    "Detroit Tigers": "DET",
+    "Houston Astros": "HOU",
+    "Kansas City Royals": "KC",
+    "Los Angeles Angels": "LAA",
+    "Los Angeles Dodgers": "LAD",
+    "Miami Marlins": "MIA",
+    "Milwaukee Brewers": "MIL",
+    "Minnesota Twins": "MIN",
+    "New York Mets": "NYM",
+    "New York Yankees": "NYY",
+    "Oakland Athletics": "OAK",
+    "Philadelphia Phillies": "PHI",
+    "Pittsburgh Pirates": "PIT",
+    "San Diego Padres": "SD",
+    "San Francisco Giants": "SF",
+    "Seattle Mariners": "SEA",
+    "St. Louis Cardinals": "STL",
+    "Tampa Bay Rays": "TB",
+    "Texas Rangers": "TEX",
+    "Toronto Blue Jays": "TOR",
+    "Washington Nationals": "WAS",
+}
 
 
 def as_int(val, default=None):
@@ -214,10 +210,6 @@ def get_conn():
     return conn
 
 
-def emails_equal(a: str | None, b: str | None) -> bool:
-    if not a or not b:
-        return False
-    return a.strip().lower() == b.strip().lower()
 
 
 def roster_status_from_csv(
@@ -331,6 +323,7 @@ def rulev_eligible(
     contract_type: str | None = None,
     franchise: str | None = None,
     signed: Any = None,
+    draft_year: Any = None,
 ) -> bool:
     """
     Rule V eligibility used by the roster tab.
@@ -339,9 +332,14 @@ def rulev_eligible(
     roster, and were born in or before 2001.  In the roster tab's three-bucket
     model, Reserve means not on the 40-man.
 
+    Players drafted in the current 2025 BNSL draft are explicitly protected
+    from Rule V eligibility regardless of age.
+
     Contract type and signed are intentionally ignored here.  Franchise/status
     are the authoritative rostered-state fields for Rule V.
     """
+    if as_int(draft_year, None) == DRAFT_YEAR:
+        return False
     if (status or "").strip() != "Reserve":
         return False
     if not (franchise or "").strip():
@@ -491,6 +489,285 @@ def update_fa_last_team(player_id: int, team_abbr: str) -> None:
     except Exception:
         current_app.logger.exception("Failed to update FA last_team after roster action")
 
+
+def ensure_roster_draft_columns(conn: sqlite3.Connection) -> None:
+    cur = conn.cursor()
+    cur.execute("PRAGMA table_info(roster_players)")
+    cols = {row[1] for row in cur.fetchall()}
+    additions = {
+        "draft_player_id": "ALTER TABLE roster_players ADD COLUMN draft_player_id INTEGER",
+        "draft_year": "ALTER TABLE roster_players ADD COLUMN draft_year INTEGER",
+        "draft_round": "ALTER TABLE roster_players ADD COLUMN draft_round INTEGER",
+        "draft_pick": "ALTER TABLE roster_players ADD COLUMN draft_pick INTEGER",
+        "draft_label": "ALTER TABLE roster_players ADD COLUMN draft_label TEXT",
+        "drafted_at": "ALTER TABLE roster_players ADD COLUMN drafted_at TEXT",
+        "draft_team": "ALTER TABLE roster_players ADD COLUMN draft_team TEXT",
+    }
+    for col, ddl in additions.items():
+        if col not in cols:
+            cur.execute(ddl)
+    cur.execute("""
+        CREATE UNIQUE INDEX IF NOT EXISTS roster_players_draft_player_id_uq
+        ON roster_players(draft_player_id)
+        WHERE draft_player_id IS NOT NULL
+    """)
+
+
+def get_draft_db_path() -> Path:
+    configured = current_app.config.get("DRAFT_DB_PATH")
+    if configured:
+        return Path(configured)
+    return Path(__file__).resolve().parent / "draft.db"
+
+
+def draft_team_to_abbr(team: Any) -> str:
+    text = str(team or "").strip()
+    if not text:
+        return ""
+    if text in DRAFT_TEAM_ABBR:
+        return DRAFT_TEAM_ABBR[text]
+    return canonical_team_abbr(text)
+
+
+def split_draft_name(name: str) -> tuple[str, str]:
+    parts = [p for p in re.split(r"\s+", str(name or "").strip()) if p]
+    if not parts:
+        return "", ""
+    if len(parts) == 1:
+        return "", parts[0]
+    return parts[0], parts[-1]
+
+
+def draft_dob_from_row(row: sqlite3.Row) -> str:
+    dob = str(row["dob"] or "").strip()
+    if dob:
+        return normalize_roster_dob(dob)
+    y = as_int(row["dob_year"] if "dob_year" in row.keys() else None)
+    m = as_int(row["dob_month"] if "dob_month" in row.keys() else None)
+    d = as_int(row["dob_day"] if "dob_day" in row.keys() else None)
+    if y and m and d:
+        return f"{y:04d}-{m:02d}-{d:02d}"
+    return ""
+
+
+def normalized_identity_name(name: Any) -> str:
+    text = "".join(
+        ch for ch in unicodedata.normalize("NFKD", str(name or ""))
+        if not unicodedata.combining(ch)
+    ).lower()
+    return re.sub(r"[^a-z0-9]", "", text)
+
+
+def sync_drafted_players_from_draft_db(conn: sqlite3.Connection | None = None) -> tuple[int, int, int]:
+    """
+    Mirror completed 2025 draft picks into roster.db.
+
+    Drafted players become signed players on rookie contracts, assigned to the
+    drafting franchise's Reserve roster.  The sync is idempotent and stores the
+    source draft player id so repeated startup syncs or manual draft picks do
+    not create duplicates.
+    """
+    draft_db = get_draft_db_path()
+    if not draft_db.exists():
+        current_app.logger.info("Draft-to-roster sync skipped: draft DB does not exist: %s", draft_db)
+        return (0, 0, 0)
+
+    own_conn = conn is None
+    if conn is None:
+        conn = get_conn()
+    ensure_roster_draft_columns(conn)
+    cur = conn.cursor()
+
+    dconn = sqlite3.connect(str(draft_db))
+    dconn.row_factory = sqlite3.Row
+    try:
+        dcur = dconn.cursor()
+        dcur.execute("""
+            SELECT
+                d.id AS draft_order_id,
+                d.round AS draft_round,
+                d.pick AS draft_pick,
+                COALESCE(NULLIF(d.label, ''), printf('%d.%02d', d.round, d.pick)) AS draft_label,
+                d.team AS draft_team,
+                d.drafted_at,
+                p.id AS draft_player_id,
+                p.name,
+                p.dob,
+                p.position,
+                p.mlbamid,
+                p.first,
+                p.last,
+                p.bats,
+                p.throws,
+                p.dob_month,
+                p.dob_day,
+                p.dob_year
+            FROM draft_order d
+            JOIN players p ON p.id = d.player_id
+            WHERE d.player_id IS NOT NULL
+            ORDER BY d.round ASC, d.pick ASC, d.id ASC
+        """)
+        drafted_rows = dcur.fetchall()
+    except sqlite3.Error:
+        current_app.logger.exception("Draft-to-roster sync failed while reading %s", draft_db)
+        dconn.close()
+        if own_conn:
+            conn.close()
+        return (0, 0, 0)
+    finally:
+        try:
+            dconn.close()
+        except Exception:
+            pass
+
+    cur.execute("SELECT COALESCE(MAX(id), 0) FROM roster_players")
+    next_id = int(cur.fetchone()[0] or 0) + 1
+
+    seen = 0
+    inserted = 0
+    updated = 0
+    processed_draft_ids: set[int] = set()
+
+    for drow in drafted_rows:
+        draft_player_id = as_int(drow["draft_player_id"])
+        if not draft_player_id or draft_player_id in processed_draft_ids:
+            continue
+        processed_draft_ids.add(draft_player_id)
+
+        team_abbr = draft_team_to_abbr(drow["draft_team"])
+        if not team_abbr:
+            continue
+
+        name = str(drow["name"] or "").strip()
+        if not name:
+            continue
+
+        seen += 1
+        dob = draft_dob_from_row(drow)
+        mlbam_id = as_int(drow["mlbamid"], None)
+        first = str(drow["first"] or "").strip()
+        last = str(drow["last"] or "").strip()
+        if not first or not last:
+            f2, l2 = split_draft_name(name)
+            first = first or f2
+            last = last or l2
+
+        match_id = None
+        cur.execute("SELECT id FROM roster_players WHERE draft_player_id=?", (draft_player_id,))
+        match = cur.fetchone()
+        if match:
+            match_id = int(match["id"] if isinstance(match, sqlite3.Row) else match[0])
+
+        if match_id is None and mlbam_id:
+            cur.execute("SELECT id FROM roster_players WHERE mlbam_id=?", (mlbam_id,))
+            match = cur.fetchone()
+            if match:
+                match_id = int(match["id"] if isinstance(match, sqlite3.Row) else match[0])
+
+        if match_id is None and dob:
+            cur.execute("SELECT id, name FROM roster_players WHERE date_of_birth=?", (dob,))
+            target_name = normalized_identity_name(name)
+            for candidate in cur.fetchall():
+                if normalized_identity_name(candidate["name"]) == target_name:
+                    match_id = int(candidate["id"])
+                    break
+
+        values = (
+            1, "R", 0.0, None, None, 0, "",
+            0.0, 0.0, 0.0,
+            team_abbr, "", "Reserve", 0, DRAFT_ROOKIE_OPTIONS_REMAINING, "",
+            draft_player_id, DRAFT_YEAR,
+            as_int(drow["draft_round"], None),
+            as_int(drow["draft_pick"], None),
+            str(drow["draft_label"] or ""),
+            str(drow["drafted_at"] or ""),
+            team_abbr,
+        )
+
+        if match_id is None:
+            insert_id = next_id
+            next_id += 1
+            cur.execute("""
+                INSERT INTO roster_players (
+                    id, name, last_name, first_name, suffix, nickname,
+                    position, date_of_birth, bats, throws, signed,
+                    contract_type, salary, contract_initial_season,
+                    contract_length, contract_option, contract_expires,
+                    service_time, previous_service_time, service_time_2025,
+                    franchise, affiliate_team, roster_status, active_roster,
+                    options_remaining, fa_class, fangraphs_id, mlbam_id,
+                    draft_player_id, draft_year, draft_round, draft_pick,
+                    draft_label, drafted_at, draft_team
+                ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+            """, (
+                insert_id, name, last, first, "", "",
+                str(drow["position"] or "").strip(), dob,
+                str(drow["bats"] or "").strip(), str(drow["throws"] or "").strip(),
+                1, "R", 0.0, None, None, 0, "",
+                0.0, 0.0, 0.0,
+                team_abbr, "", "Reserve", 0,
+                DRAFT_ROOKIE_OPTIONS_REMAINING, "", "", mlbam_id,
+                draft_player_id, DRAFT_YEAR,
+                as_int(drow["draft_round"], None),
+                as_int(drow["draft_pick"], None),
+                str(drow["draft_label"] or ""),
+                str(drow["drafted_at"] or ""),
+                team_abbr,
+            ))
+            inserted += 1
+        else:
+            cur.execute("""
+                UPDATE roster_players
+                SET name=COALESCE(NULLIF(?, ''), name),
+                    last_name=COALESCE(NULLIF(?, ''), last_name),
+                    first_name=COALESCE(NULLIF(?, ''), first_name),
+                    position=COALESCE(NULLIF(?, ''), position),
+                    date_of_birth=COALESCE(NULLIF(?, ''), date_of_birth),
+                    bats=COALESCE(NULLIF(?, ''), bats),
+                    throws=COALESCE(NULLIF(?, ''), throws),
+                    signed=?,
+                    contract_type=?,
+                    salary=?,
+                    contract_initial_season=?,
+                    contract_length=?,
+                    contract_option=?,
+                    contract_expires=?,
+                    service_time=?,
+                    previous_service_time=?,
+                    service_time_2025=?,
+                    franchise=?,
+                    affiliate_team=?,
+                    roster_status=?,
+                    active_roster=?,
+                    options_remaining=?,
+                    fa_class=?,
+                    draft_player_id=?,
+                    draft_year=?,
+                    draft_round=?,
+                    draft_pick=?,
+                    draft_label=?,
+                    drafted_at=?,
+                    draft_team=?,
+                    mlbam_id=COALESCE(?, mlbam_id)
+                WHERE id=?
+            """, (
+                name, last, first, str(drow["position"] or "").strip(), dob,
+                str(drow["bats"] or "").strip(), str(drow["throws"] or "").strip(),
+                *values, mlbam_id, match_id,
+            ))
+            updated += 1
+
+    if own_conn:
+        conn.commit()
+        conn.close()
+
+    current_app.logger.info(
+        "Draft-to-roster sync complete: %s drafted players, %s inserted, %s updated",
+        seen, inserted, updated,
+    )
+    return (seen, inserted, updated)
+
+
 def bootstrap_roster():
     conn = get_conn()
     cur = conn.cursor()
@@ -541,6 +818,7 @@ def bootstrap_roster():
         cur.execute("ALTER TABLE roster_players ADD COLUMN fa_class TEXT")
 
     ensure_roster_decision_columns(conn)
+    ensure_roster_draft_columns(conn)
 
     cur.execute("SELECT COUNT(*) FROM roster_players")
     count = int(cur.fetchone()[0] or 0)
@@ -718,6 +996,9 @@ def bootstrap_roster():
                     WHERE id=?
                 """, (CURRENT_FA_CLASS, player_id))
 
+    # Bring completed 2025 draft picks into roster.db as reserve-roster rookies.
+    sync_drafted_players_from_draft_db(conn)
+
     # Keep arbitration status in sync with service-time rules for existing DBs.
     normalize_roster_contract_types(conn)
 
@@ -800,7 +1081,14 @@ def api_players():
     out = []
     for r in rows:
         row_fa_class = compute_fa_class(r)
-        row_rulev = rulev_eligible(r["roster_status"], r["date_of_birth"], r["contract_type"], r["franchise"], r["signed"])
+        row_rulev = rulev_eligible(
+            r["roster_status"],
+            r["date_of_birth"],
+            r["contract_type"],
+            r["franchise"],
+            r["signed"],
+            row_value(r, "draft_year", None),
+        )
 
         if rulev_only and not row_rulev:
             continue

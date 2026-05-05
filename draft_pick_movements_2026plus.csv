@@ -1,0 +1,66 @@
+id,trade_event_id,process_order,trade_date,title,from_team_abbr,to_team_abbr,pick_year,pick_round,original_team_abbr,previous_owner_abbr,new_owner_abbr,owner_chain_ok,pick_label
+1,114,1,2024-01-01,Royals quit Fitterer-ing around and make Adames big trade with New York,NYM,KC,2026,7,NYM,NYM,KC,1,2026 7.NYM
+2,106,2,2024-01-01,"Rays continue to shed salary. BNSL Dodgers defer cost. Art, life.",LAD,TB,2026,2,LAD,LAD,TB,1,2026 2.LAD
+3,106,3,2024-01-01,"Rays continue to shed salary. BNSL Dodgers defer cost. Art, life.",LAD,TB,2026,10,LAD,LAD,TB,1,2026 10.LAD
+4,105,4,2024-01-01,"Birds of a feather, trade together.",TOR,STL,2026,5,TOR,TOR,STL,1,2026 5.TOR
+5,104,5,2024-01-01,Ramon is movin' on up to the East side,NYM,CHC,2026,8,NYM,NYM,CHC,1,2026 8.NYM
+6,103,6,2024-01-01,Kansas City trades everything but the BBQ for MAJOR help from Tampa,KC,TB,2026,2,KC,KC,TB,1,2026 2.KC
+7,97,7,2024-01-01,"This House comes with a Loft(in), a Butler, and more!",TEX,TOR,2026,10,TEX,TEX,TOR,1,2026 10.TEX
+8,96,8,2024-01-01,Black Monday in New York brings Bregman to Miami,MIA,NYM,2026,2,MIA,MIA,NYM,1,2026 2.MIA
+9,94,9,2024-01-01,This trade is for the birds!,TOR,BAL,2026,9,TOR,TOR,BAL,1,2026 9.TOR
+10,94,10,2024-01-01,This trade is for the birds!,BAL,TOR,2026,4,BAL,BAL,TOR,1,2026 4.BAL
+11,91,11,2024-01-01,Cubs move assets for strong RP return from Nats,CHC,WAS,2026,10,CHC,CHC,WAS,1,2026 10.CHC
+12,85,12,2024-01-01,Pick to the Rays for Giant bag of cash,SF,TB,2026,4,SF,SF,TB,1,2026 4.SF
+13,80,13,2024-01-01,A Real Royal Homecoming,KC,TB,2026,5,KC,KC,TB,1,2026 5.KC
+14,60,14,2024-07-19,All Your Pick Are Belong to Mark,TB,MIN,2026,10,TB,TB,MIN,1,2026 10.TB
+15,58,15,2024-07-19,Angels in the banking system,LAA,TB,2026,10,LAA,LAA,TB,1,2026 10.LAA
+16,58,16,2024-07-19,Angels in the banking system,TB,LAA,2026,6,TB,TB,LAA,1,2026 6.TB
+17,57,17,2024-07-19,Guardians of the 9th and Twin 26's,CLE,MIN,2026,9,CLE,CLE,MIN,1,2026 9.CLE
+18,57,18,2024-07-19,Guardians of the 9th and Twin 26's,CLE,MIN,2026,10,CLE,CLE,MIN,1,2026 10.CLE
+19,55,19,2025-03-01,Twins Rebuilding No More,MIN,TB,2026,2,MIN,MIN,TB,1,2026 2.MIN
+20,55,20,2025-03-01,Twins Rebuilding No More,MIN,TB,2027,2,MIN,MIN,TB,1,2027 2.MIN
+21,54,21,2025-03-01,"Twins Buy a Catcher, Part I",MIN,BOS,2026,6,MIN,MIN,BOS,1,2026 6.MIN
+22,53,22,2025-03-01,NEWMAN!!!!,NYM,TB,2027,4,NYM,NYM,TB,1,2027 4.NYM
+23,46,23,2025-03-01,"Giants Sell Picks, Surprise No One",SF,TB,2026,2,SF,SF,TB,1,2026 2.SF
+24,46,24,2025-03-01,"Giants Sell Picks, Surprise No One",TB,SF,2026,10,LAA,TB,SF,1,2026 10.LAA
+25,44,25,2025-03-01,"Phillies Arm Up, Unload Springer on Rays",PHI,TB,2026,10,PHI,PHI,TB,1,2026 10.PHI
+26,44,26,2025-03-01,"Phillies Arm Up, Unload Springer on Rays",PHI,TB,2027,2,PHI,PHI,TB,1,2027 2.PHI
+27,42,27,2025-03-01,"Tigers, Dodgers Close Deal for Closer",DET,LAD,2026,10,DET,DET,LAD,1,2026 10.DET
+28,41,28,2025-03-01,Royals Add Gold[schmidt] to Treasury,KC,LAD,2026,10,KC,KC,LAD,1,2026 10.KC
+29,37,29,2025-03-01,Money for picks: The Baltimore-Tampa edition,BAL,TB,2026,3,BAL,BAL,TB,1,2026 3.BAL
+30,37,30,2025-03-01,Money for picks: The Baltimore-Tampa edition,TB,BAL,2026,10,LAD,TB,BAL,1,2026 10.LAD
+31,36,31,2025-03-01,Money for picks: The San Francisco-Texas edition,TEX,SF,2026,9,TEX,TEX,SF,1,2026 9.TEX
+32,36,32,2025-03-01,Money for picks: The San Francisco-Texas edition,SF,TEX,2026,3,SF,SF,TEX,1,2026 3.SF
+33,34,33,2025-03-01,This for That,TB,PHI,2026,10,PHI,TB,PHI,1,2026 10.PHI
+34,31,34,2025-03-01,Yu are a Marlin! EVERYBODY'S A MARLIN!,MIA,LAD,2026,5,MIA,MIA,LAD,1,2026 5.MIA
+35,29,35,2025-03-01,Rocky Mountain Lowe,COL,BAL,2026,6,COL,COL,BAL,1,2026 6.COL
+36,29,36,2025-03-01,Rocky Mountain Lowe,BAL,COL,2026,10,BAL,BAL,COL,1,2026 10.BAL
+37,25,37,2025-03-01,1-877 CASH4PICKS,MIA,OAK,2026,3,MIA,MIA,OAK,1,2026 3.MIA
+38,24,38,2025-03-01,Braves and White Sox,CHW,ATL,2026,9,CHW,CHW,ATL,1,2026 9.CHW
+39,24,39,2025-03-01,Braves and White Sox,ATL,CHW,2026,5,ATL,ATL,CHW,1,2026 5.ATL
+40,22,40,2025-03-01,Bank of Cleveland issues bond to Detroit,CLE,DET,2027,10,CLE,CLE,DET,1,2027 10.CLE
+41,22,41,2025-03-01,Bank of Cleveland issues bond to Detroit,DET,CLE,2027,9,DET,DET,CLE,1,2027 9.DET
+42,21,42,2025-07-07,Buehler? Anyone...Buehler?,KC,MIA,2027,8,KC,KC,MIA,1,2027 8.KC
+43,18,43,2025-07-07,Nola and Alonso trade BBQ for Cheesesteak,PHI,KC,2026,8,PHI,PHI,KC,1,2026 8.PHI
+44,17,44,2025-07-07,"Perdomo, may I have those picks, please?",CHW,TEX,2026,2,CHW,CHW,TEX,1,2026 2.CHW
+45,10,45,2025-07-07,So many picks to pick!,CHW,STL,2027,2,CHW,CHW,STL,1,2027 2.CHW
+46,10,46,2025-07-07,So many picks to pick!,CHW,STL,2026,5,CHW,CHW,STL,1,2026 5.CHW
+47,9,47,2025-07-07,City and Light...and some picks!,MIA,TOR,2026,4,MIA,MIA,TOR,1,2026 4.MIA
+48,9,48,2025-07-07,City and Light...and some picks!,TOR,MIA,2026,7,TOR,TOR,MIA,1,2026 7.TOR
+49,7,49,2025-07-07,Padres a-Ward-ed picks in trade with Cleveland,CLE,SD,2026,2,CLE,CLE,SD,1,2026 2.CLE
+50,7,50,2025-07-07,Padres a-Ward-ed picks in trade with Cleveland,CLE,SD,2026,7,CLE,CLE,SD,1,2026 7.CLE
+51,7,51,2025-07-07,Padres a-Ward-ed picks in trade with Cleveland,SD,CLE,2026,3,SD,SD,CLE,1,2026 3.SD
+52,6,52,2025-07-07,Adames good amount of Gold for an early pick,SD,KC,2026,2,CLE,SD,KC,1,2026 2.CLE
+53,5,53,2025-07-07,The Gunnar trade,CLE,LAA,2026,3,CLE,CLE,LAA,1,2026 3.CLE
+54,5,54,2025-07-07,The Gunnar trade,CLE,LAA,2027,4,CLE,CLE,LAA,1,2027 4.CLE
+55,5,55,2025-07-07,The Gunnar trade,LAA,CLE,2026,9,LAA,LAA,CLE,1,2026 9.LAA
+56,4,56,2025-07-07,"Angels embrace rebuild, Sox continue retool",LAA,CHW,2026,8,LAA,LAA,CHW,1,2026 8.LAA
+57,4,57,2025-07-07,"Angels embrace rebuild, Sox continue retool",CHW,LAA,2026,4,CHW,CHW,LAA,1,2026 4.CHW
+58,4,58,2025-07-07,"Angels embrace rebuild, Sox continue retool",CHW,LAA,2027,10,CHW,CHW,LAA,1,2027 10.CHW
+59,3,59,2025-07-07,A belated Rojas processing,CLE,MIA,2026,9,LAA,CLE,MIA,1,2026 9.LAA
+60,3,60,2025-07-07,A belated Rojas processing,MIA,CLE,2026,8,MIA,MIA,CLE,1,2026 8.MIA
+61,2,61,2025-07-07,Picks!,SD,MIA,2026,10,SD,SD,MIA,1,2026 10.SD
+62,2,62,2025-07-07,Picks!,SD,MIA,2027,10,SD,SD,MIA,1,2027 10.SD
+63,1,63,2025-07-07,Picked again!,TOR,TEX,2027,10,TOR,TOR,TEX,1,2027 10.TOR
+64,1,64,2025-07-07,Picked again!,TOR,TEX,2026,10,TOR,TOR,TEX,1,2026 10.TOR
+65,0,65,2025-07-07,Picked thrice!,SD,TB,2027,9,SD,SD,TB,1,2027 9.SD

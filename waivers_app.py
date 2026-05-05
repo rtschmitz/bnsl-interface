@@ -15,39 +15,7 @@ waivers_bp = Blueprint("waivers", __name__)
 EASTERN = ZoneInfo("America/New_York")
 WAIVER_CLAIM_FEE = 50_000.0
 
-TEAM_EMAILS = {
-    "TOR": "daniele.defeo@gmail.com",
-    "NYY": "dmsund66@gmail.com",
-    "BOS": "chris_lawrence@sbcglobal.net",
-    "TB": "smith.mark.louis@gmail.com",
-    "BAL": "bsweis@ptd.net",
-    "DET": "manconley@gmail.com",
-    "KC": "jim@timhafer.com",
-    "MIN": "jonathan.adelman@gmail.com",
-    "CHW": "bglover6@gmail.com",
-    "CLE": "bonfanti20@gmail.com",
-    "LAA": "dsucoff@gmail.com",
-    "SEA": "daniel_a_fisher@yahoo.com",
-    "OAK": "bspropp@hotmail.com",
-    "HOU": "golk624@protonmail.com",
-    "TEX": "Brianorr@live.com",
-    "WAS": "smsetnor@gmail.com",
-    "NYM": "kerkhoffc@gmail.com",
-    "PHI": "jdcarney26@gmail.com",
-    "ATL": "stevegaston@yahoo.com",
-    "MIA": "schmitz@ucsb.edu",
-    "STL": "parkbench@mac.com",
-    "CHC": "bryanhartman@gmail.com",
-    "PIT": "jseiner24@gmail.com",
-    "MIL": "tsurratt@hiaspire.com",
-    "CIN": "jpmile@yahoo.com",
-    "LAD": "jr92@comcast.net",
-    "COL": "GypsySon@gmail.com",
-    "ARI": "mhr4240@gmail.com",
-    "SF": "jasonmallet@gmail.com",
-    "SD": "mattaca77@gmail.com",
-}
-TEAM_ABBRS = sorted(TEAM_EMAILS.keys())
+from team_config import TEAM_EMAILS_BY_ABBR as TEAM_EMAILS, TEAM_ABBRS, canonical_team_abbr, emails_equal
 
 # User-provided finishing order, inverted for default waiver priority.
 # CWS is normalized to the rest of this app's CHW code.
@@ -59,10 +27,6 @@ FINISHING_ORDER = [
 DEFAULT_WAIVER_PRIORITY = list(reversed(FINISHING_ORDER))
 
 
-def canonical_team_abbr(team: str | None) -> str:
-    """Use WAS as the single app-facing code for Washington."""
-    code = (team or "").strip().upper()
-    return "WAS" if code == "WSH" else code
 
 
 def utcnow() -> datetime:
@@ -80,10 +44,6 @@ def parse_iso(value: str) -> datetime:
     return dt.astimezone(timezone.utc)
 
 
-def emails_equal(a: str | None, b: str | None) -> bool:
-    if not a or not b:
-        return False
-    return a.strip().lower() == b.strip().lower()
 
 
 def get_roster_conn() -> sqlite3.Connection:

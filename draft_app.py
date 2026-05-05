@@ -102,63 +102,7 @@ def _ensure_db_dir_exists():
 # Logging: don't touch app.logger here; let app.py configure logging if you want.
 logging.basicConfig(level=logging.INFO)
 
-MLB_TEAMS = [
-    "Arizona Diamondbacks","Atlanta Braves","Baltimore Orioles","Boston Red Sox",
-    "Chicago Cubs","Chicago White Sox","Cincinnati Reds","Cleveland Guardians",
-    "Colorado Rockies","Detroit Tigers","Houston Astros","Kansas City Royals",
-    "Los Angeles Angels","Los Angeles Dodgers","Miami Marlins","Milwaukee Brewers",
-    "Minnesota Twins","New York Mets","New York Yankees","Oakland Athletics",
-    "Philadelphia Phillies","Pittsburgh Pirates","San Diego Padres","San Francisco Giants",
-    "Seattle Mariners","St. Louis Cardinals","Tampa Bay Rays","Texas Rangers",
-    "Toronto Blue Jays","Washington Nationals",
-]
-
-# Map all teams to four test emails (round-robin) so you can exercise the system easily.
-#_TEST_EMAILS = [
-#    "ryanschmitz43@yahoo.com",
-#    "ryanschmitz43@gmail.com",
-#    "schmitz@ucsb.edu",
-#    "condor2199@yahoo.com",
-#]
-#TEAM_EMAILS = {team: _TEST_EMAILS[i % len(_TEST_EMAILS)] for i, team in enumerate(MLB_TEAMS)}
-
-TEAM_EMAILS = {
-    "Toronto Blue Jays": "daniele.defeo@gmail.com",
-    "New York Yankees": "dmsund66@gmail.com",
-    "Boston Red Sox": "chris_lawrence@sbcglobal.net",
-    "Tampa Bay Rays": "smith.mark.louis@gmail.com",
-    "Baltimore Orioles": "bsweis@ptd.net",
-
-    "Detroit Tigers": "manconley@gmail.com",
-    "Kansas City Royals": "jim@timhafer.com",
-    "Minnesota Twins": "jonathan.adelman@gmail.com",
-    "Chicago White Sox": "bglover6@gmail.com",
-    "Cleveland Guardians": "bonfanti20@gmail.com",
-
-    "Los Angeles Angels": "dsucoff@gmail.com",
-    "Seattle Mariners": "daniel_a_fisher@yahoo.com",
-    "Oakland Athletics": "bspropp@hotmail.com",
-    "Houston Astros": "golk624@protonmail.com",
-    "Texas Rangers": "Brianorr@live.com",
-
-    "Washington Nationals": "smsetnor@gmail.com",
-    "New York Mets": "kerkhoffc@gmail.com",
-    "Philadelphia Phillies": "jdcarney26@gmail.com",
-    "Atlanta Braves": "stevegaston@yahoo.com",
-    "Miami Marlins": "schmitz@ucsb.edu",
-
-    "St. Louis Cardinals": "parkbench@mac.com",
-    "Chicago Cubs": "bryanhartman@gmail.com",
-    "Pittsburgh Pirates": "jseiner24@gmail.com",
-    "Milwaukee Brewers": "tsurratt@hiaspire.com",
-    "Cincinnati Reds": "jpmile@yahoo.com",
-
-    "Los Angeles Dodgers": "jr92@comcast.net",
-    "Colorado Rockies": "GypsySon@gmail.com",
-    "Arizona Diamondbacks": "mhr4240@gmail.com",
-    "San Francisco Giants": "jasonmallet@gmail.com",
-    "San Diego Padres": "mattaca77@gmail.com",
-}
+from team_config import MLB_TEAMS, TEAM_EMAILS, emails_equal
 
 
 # -------------------------
@@ -186,6 +130,17 @@ def remove_player_from_all_queues(player_id: int):
     cur.execute("DELETE FROM draft_queue WHERE player_id = ?", (player_id,))
     conn.commit()
     conn.close()
+
+
+def sync_roster_after_draft_pick() -> None:
+    """Best-effort sync from completed draft picks into roster.db."""
+    try:
+        from roster_app import sync_drafted_players_from_draft_db, sync_after_roster_mutation
+        sync_drafted_players_from_draft_db()
+        sync_after_roster_mutation()
+    except Exception as e:
+        print(f"[roster-sync] failed after draft pick: {e}")
+
 
 def get_team_queue(team: str) -> list[sqlite3.Row]:
     """
@@ -307,6 +262,7 @@ def perform_draft_internal(team: str, player_id: int, draft_order_id: int) -> No
     except Exception as e:
         print(f"[discord] failed: {e}")
     conn.close()
+    sync_roster_after_draft_pick()
     # clean queues
     remove_player_from_all_queues(player_id)
 
@@ -435,10 +391,6 @@ def get_conn() -> sqlite3.Connection:
     return conn
 
 
-def emails_equal(a: str | None, b: str | None) -> bool:
-    if not a or not b:
-        return False
-    return a.strip().lower() == b.strip().lower()
 
 from zoneinfo import ZoneInfo
 EASTERN = ZoneInfo("America/New_York")
@@ -2509,6 +2461,8 @@ def api_draft():
         except Exception as e:
             print(f"[notify] failed: {e}")
         remove_player_from_all_queues(player_id)
+
+        sync_roster_after_draft_pick()
 
         try:
             enforce_queue_actions()

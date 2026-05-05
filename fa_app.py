@@ -118,43 +118,20 @@ ROSTERED_STATUSES = {"ACTIVE", "RESERVE"}
 HEADSHOT_DIR = APP_DIR / "static" / "player_images"
 HEADSHOT_DIR.mkdir(parents=True, exist_ok=True)
 
-# Map franchise abbreviations -> your full MLB_TEAMS strings.
-ABBR_TO_TEAM = {
-    "ARI":"Arizona Diamondbacks","ATL":"Atlanta Braves","BAL":"Baltimore Orioles","BOS":"Boston Red Sox",
-    "CHC":"Chicago Cubs","CHW":"Chicago White Sox","CIN":"Cincinnati Reds","CLE":"Cleveland Guardians",
-    "COL":"Colorado Rockies","DET":"Detroit Tigers","HOU":"Houston Astros","KCR":"Kansas City Royals",
-    "LAA":"Los Angeles Angels","LAD":"Los Angeles Dodgers","MIA":"Miami Marlins","MIL":"Milwaukee Brewers",
-    "MIN":"Minnesota Twins","NYM":"New York Mets","NYY":"New York Yankees","OAK":"Oakland Athletics",
-    "PHI":"Philadelphia Phillies","PIT":"Pittsburgh Pirates","SDP":"San Diego Padres","SFG":"San Francisco Giants",
-    "SEA":"Seattle Mariners","STL":"St. Louis Cardinals","TBR":"Tampa Bay Rays","TEX":"Texas Rangers",
-    "TOR":"Toronto Blue Jays","WSN":"Washington Nationals",
-}
-
-# Common roster/export aliases that differ from the display-team dictionary above.
-ABBR_TO_TEAM.update({
-    "KC": "Kansas City Royals",
-    "KCR": "Kansas City Royals",
-    "SD": "San Diego Padres",
-    "SDP": "San Diego Padres",
-    "SF": "San Francisco Giants",
-    "SFG": "San Francisco Giants",
-    "TB": "Tampa Bay Rays",
-    "TBR": "Tampa Bay Rays",
-    "WAS": "Washington Nationals",
-    "WSH": "Washington Nationals",
-    "WSN": "Washington Nationals",
-})
+from team_config import (
+    MLB_TEAMS, TEAM_EMAILS, ABBR_TO_TEAM, TEAM_NAME_TO_ABBR,
+    canonical_team_abbr, emails_equal,
+)
 
 # Roster tab stores franchise as abbreviations, while FA tab uses full team names.
-TEAM_TO_ABBR = {full: abbr for abbr, full in ABBR_TO_TEAM.items() if len(abbr) <= 3}
+TEAM_TO_ABBR = dict(TEAM_NAME_TO_ABBR)
 TEAM_TO_ABBR.update({
+    "Athletics": "OAK",
     "Kansas City Royals": "KC",
     "San Diego Padres": "SD",
     "San Francisco Giants": "SF",
     "Tampa Bay Rays": "TB",
     "Washington Nationals": "WAS",
-    "Oakland Athletics": "OAK",
-    "Athletics": "OAK",
 })
 
 OOTP_POSITION_MAP = {
@@ -162,7 +139,6 @@ OOTP_POSITION_MAP = {
     7: "LF", 8: "CF", 9: "RF", 10: "DH", 11: "P", 12: "P", 13: "P",
 }
 OOTP_BT_MAP = {1: "R", 2: "L", 3: "S"}
-
 
 # ---------- Blueprint ----------
 fa_bp = Blueprint("fa", __name__)
@@ -1023,6 +999,16 @@ def apply_hometown_discounts_to_free_agents(clear_missing: bool = True) -> tuple
     return (checked, matched, cleared)
 
 
+def assign_hometown_discounts_now(clear_missing: bool = True) -> dict[str, int]:
+    """Explicit HTD maintenance action for CLI and /fa/history button."""
+    checked, matched, cleared = apply_hometown_discounts_to_free_agents(clear_missing=clear_missing)
+    return {
+        "checked": int(checked),
+        "matched": int(matched),
+        "cleared": int(cleared),
+    }
+
+
 def _ootp_get(headers: list[str], values: list[str], name: str) -> str:
     target = name.strip().lower()
     for i, h in enumerate(headers):
@@ -1559,7 +1545,6 @@ def fetch_free_agents(search: str = "", hide_signed: bool = False) -> List[Dict[
     clauses = []
     params: List[Any] = []
 
-    # Always show only players currently unrostered in live roster.db.
     clauses.append("COALESCE(is_roster_unrostered,0)=1")
 
     if search.strip():
@@ -1615,8 +1600,6 @@ def compute_preview(team: str, pid: int, years: int, has_option: bool, aav_m: fl
     conn.close()
     if not p:
         raise ValueError("player not found")
-    if int(p["is_roster_unrostered"] or 0) != 1:
-        raise ValueError("player is no longer an eligible free agent")
 
     signed = bool((p["signed_team"] or "").strip())
     leader = get_current_leader(pid)
@@ -1686,12 +1669,12 @@ def place_bid(team: str, pid: int, years: int, has_option: bool, aav_m: float) -
     if not p:
         conn.close()
         return (False, "Player not found.")
-    if int(p["is_roster_unrostered"] or 0) != 1:
-        conn.close()
-        return (False, "Player is no longer an eligible free agent.")
     if (p["signed_team"] or "").strip():
         conn.close()
         return (False, "Player already signed.")
+    if "is_roster_unrostered" in p.keys() and int(p["is_roster_unrostered"] or 0) != 1:
+        conn.close()
+        return (False, "Player is no longer an eligible free agent.")
 
     # preview for validations
     try:
@@ -1736,22 +1719,15 @@ def place_bid(team: str, pid: int, years: int, has_option: bool, aav_m: float) -
 
 def bootstrap_fa():
     """
-    Call this from app.py AFTER the Flask app exists (inside app.app_context()).
+    Call this from app.py AFTER roster_app.bootstrap_roster() has run.
+
+    The FA table is now sourced from live roster.db plus the OOTP FA export.
+    Do not seed demo/sample players here; an empty FA DB should be populated
+    only by syncing current unrostered players from roster.db.
     """
     init_db()
-
-    # If you have a real registry, prefer it.
-    if db_is_empty() and PLAYER_REGISTRY_CSV.exists():
-        import_player_registry_csv(PLAYER_REGISTRY_CSV)
-    else:
-        generate_sample_free_agents_csv(FREE_AGENTS_CSV)
-        if db_is_empty():
-            import_free_agents_csv(FREE_AGENTS_CSV)
-
     sync_free_agents_from_roster_if_needed(force=True)
-
     seed_qualifying_offers(qo_aav_m=21.2)
-
 
 # ---------- UI (templates) ----------
 BASE_STYLE = r"""
@@ -2581,10 +2557,10 @@ WATCHLIST_HTML = f"""
 <div class="page">
   <div class="brand">
     <div>
-      <h1>WATCHLIST</h1>
-      <div class="sub">Quick bid from your tracked players</div>
+      <h1>BID HISTORY</h1>
+      <div class="sub">Bid log and maintenance actions</div>
     </div>
-    <div class="right"><span class="badge">TRACKING</span></div>
+    <div class="right"><span class="badge">HISTORY</span></div>
   </div>
 
   <div class="panel pad">
@@ -2901,6 +2877,8 @@ HISTORY_HTML = f"""
       <input id="search" type="text" placeholder="e.g. Ruth" style="border:1px solid #ddd; padding:6px 8px; border-radius:6px; min-width: 240px;" />
     </div>
     <button class="btn" id="refresh">Refresh</button>
+    <button class="btn" id="assign-htd">Assign HTD</button>
+    <span class="muted" id="htd-status"></span>
   </div>
 
   <table>
@@ -2923,6 +2901,8 @@ HISTORY_HTML = f"""
 const body = document.getElementById('hist-body');
 const search = document.getElementById('search');
 const refreshBtn = document.getElementById('refresh');
+const assignHtdBtn = document.getElementById('assign-htd');
+const htdStatus = document.getElementById('htd-status');
 
 function moneyM(x) {{
   if (x === null || x === undefined) return "—";
@@ -2978,6 +2958,28 @@ function debounce(fn, ms) {{
 
 search.addEventListener('input', debounce(load, 150));
 refreshBtn.onclick = load;
+
+assignHtdBtn.onclick = async () => {{
+  const ok = confirm('Assign hometown discounts from hometown_discounts.db to the current FA pool?');
+  if (!ok) return;
+
+  assignHtdBtn.disabled = true;
+  htdStatus.textContent = 'Assigning HTD…';
+
+  try {{
+    const resp = await fetch('/fa/api/assign_htd', {{ method: 'POST' }});
+    if (!resp.ok) {{
+      htdStatus.textContent = '';
+      alert('HTD assignment failed: ' + await resp.text());
+      return;
+    }}
+    const data = await resp.json();
+    htdStatus.textContent = `HTD: ${{data.matched}} matched / ${{data.checked}} checked; ${{data.cleared}} cleared`;
+    await load();
+  }} finally {{
+    assignHtdBtn.disabled = false;
+  }}
+}};
 
 load();
 </script>
@@ -3144,6 +3146,17 @@ def api_bid():
         return (msg, 409)
     return ("", 204)
 
+@fa_bp.post("/api/assign_htd")
+def api_assign_htd():
+    _require_authed_team()
+    try:
+        summary = assign_hometown_discounts_now(clear_missing=True)
+        return jsonify({"ok": True, **summary})
+    except Exception as exc:
+        logging.exception("HTD assignment failed")
+        return (f"HTD assignment failed: {exc}", 500)
+
+
 @fa_bp.get("/api/bid_history")
 def api_bid_history():
     enforce_expirations()
@@ -3204,7 +3217,7 @@ if __name__ == "__main__":
     ap = argparse.ArgumentParser()
     ap.add_argument("--sync-registry", action="store_true", help="Import/refresh players from player_registry.csv into DB")
     ap.add_argument("--sync-roster", action="store_true", help="Import/refresh free agents from live roster.db and OOTP FA export")
-    ap.add_argument("--apply-htd", action="store_true", help="Apply hometown discounts from hometown_discounts.db to current free_agents rows")
+    ap.add_argument("--apply-htd", action="store_true", help="Apply hometown discounts from hometown_discounts.db to current free agents")
     ap.add_argument("--prefetch-headshots", action="store_true", help="Download headshots for all players with mlbam_id")
     args = ap.parse_args()
 
@@ -3213,14 +3226,14 @@ if __name__ == "__main__":
         sync_free_agents_from_roster_if_needed(force=True)
         print("✅ Roster free agents synced.")
         if args.apply_htd:
-            checked, matched, cleared = apply_hometown_discounts_to_free_agents(clear_missing=True)
-            print(f"✅ Hometown discounts applied: {checked} checked, {matched} matched, {cleared} cleared.")
+            summary = assign_hometown_discounts_now(clear_missing=True)
+            print(f"✅ Hometown discounts applied: {summary}")
         raise SystemExit(0)
 
     if args.apply_htd:
         init_db()
-        checked, matched, cleared = apply_hometown_discounts_to_free_agents(clear_missing=True)
-        print(f"✅ Hometown discounts applied: {checked} checked, {matched} matched, {cleared} cleared.")
+        summary = assign_hometown_discounts_now(clear_missing=True)
+        print(f"✅ Hometown discounts applied: {summary}")
         raise SystemExit(0)
 
     if args.sync_registry:
@@ -3231,8 +3244,8 @@ if __name__ == "__main__":
             sync_free_agents_from_roster_if_needed(force=True)
             print("✅ Roster free agents synced.")
         if args.apply_htd:
-            checked, matched, cleared = apply_hometown_discounts_to_free_agents(clear_missing=True)
-            print(f"✅ Hometown discounts applied: {checked} checked, {matched} matched, {cleared} cleared.")
+            summary = assign_hometown_discounts_now(clear_missing=True)
+            print(f"✅ Hometown discounts applied: {summary}")
         if args.prefetch_headshots:
             conn = get_conn()
             cur = conn.cursor()

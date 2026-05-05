@@ -12,7 +12,7 @@ from typing import Any, Dict, List
 from flask import Blueprint, current_app, request, jsonify, session, render_template_string, abort
 
 # Reuse teams + emails from your main draft app
-from draft_app import MLB_TEAMS, TEAM_EMAILS, emails_equal
+from team_config import MLB_TEAMS, TEAM_EMAILS, emails_equal
 from ui_skin import BNSL_GAME_CSS
 
 rulev_bp = Blueprint("rulev", __name__)
@@ -56,6 +56,52 @@ RULEV_DRAFT_ORDER_2026 = [
     "Detroit Tigers",
     "Miami Marlins",
 ]
+
+RULEV_PICK_FEE = 250_000.0
+RULEV_PROTECTED_DRAFT_YEAR = 2025
+
+RULEV_TEAM_ABBR = {
+    "Arizona Diamondbacks": "ARI",
+    "Atlanta Braves": "ATL",
+    "Baltimore Orioles": "BAL",
+    "Boston Red Sox": "BOS",
+    "Chicago Cubs": "CHC",
+    "Chicago White Sox": "CHW",
+    "Cincinnati Reds": "CIN",
+    "Cleveland Guardians": "CLE",
+    "Colorado Rockies": "COL",
+    "Detroit Tigers": "DET",
+    "Houston Astros": "HOU",
+    "Kansas City Royals": "KC",
+    "Los Angeles Angels": "LAA",
+    "Los Angeles Dodgers": "LAD",
+    "Miami Marlins": "MIA",
+    "Milwaukee Brewers": "MIL",
+    "Minnesota Twins": "MIN",
+    "New York Mets": "NYM",
+    "New York Yankees": "NYY",
+    "Oakland Athletics": "OAK",
+    "Philadelphia Phillies": "PHI",
+    "Pittsburgh Pirates": "PIT",
+    "San Diego Padres": "SD",
+    "San Francisco Giants": "SF",
+    "Seattle Mariners": "SEA",
+    "St. Louis Cardinals": "STL",
+    "Tampa Bay Rays": "TB",
+    "Texas Rangers": "TEX",
+    "Toronto Blue Jays": "TOR",
+    "Washington Nationals": "WAS",
+}
+
+
+def canonical_team_abbr(team: Any) -> str:
+    text = str(team or "").strip()
+    if not text:
+        return ""
+    if text in RULEV_TEAM_ABBR:
+        return RULEV_TEAM_ABBR[text]
+    code = text.upper()
+    return "WAS" if code == "WSH" else code
 
 
 def get_db_path() -> Path:
@@ -191,6 +237,7 @@ def _is_rulev_eligible_roster_row(row: sqlite3.Row) -> bool:
       - rostered to an organization, represented by a non-empty franchise
       - not protected on the 40-man roster, which is roster_status='Reserve'
       - born in or before 2001
+      - not drafted in the protected 2025 BNSL draft class
 
     Do not use roster_players.signed here.  In the roster import, signed can be
     blank/0 for players who are still rostered to an org, so franchise/status
@@ -199,10 +246,17 @@ def _is_rulev_eligible_roster_row(row: sqlite3.Row) -> bool:
     franchise = str(row["franchise"] or "").strip()
     roster_status = str(row["roster_status"] or "").strip()
     birth_year = _safe_birth_year(row["date_of_birth"] if "date_of_birth" in row.keys() else "")
+    draft_year = 0
+    if "draft_year" in row.keys():
+        try:
+            draft_year = int(float(row["draft_year"] or 0))
+        except Exception:
+            draft_year = 0
 
     return (
         franchise != ""
         and roster_status == "Reserve"
+        and draft_year != RULEV_PROTECTED_DRAFT_YEAR
         and birth_year is not None
         and birth_year <= 2001
     )
@@ -410,7 +464,7 @@ __BNSL_GAME_CSS__
 
         <div class="pill" style="margin-left:auto;">
           <span class="muted">Tip:</span>
-          <span>Login to unlock picks when your team is on the clock.</span>
+          <span>Login to unlock picks when your team is on the clock. Each pick posts a $0.25M fee to the player's old org.</span>
         </div>
       </div>
 
@@ -726,7 +780,7 @@ def api_pick():
     c = conn.cursor()
 
     # validate player availability
-    c.execute("SELECT drafted_by FROM rulev_players WHERE id=?", (player_id,))
+    c.execute("SELECT id, name, org, drafted_by FROM rulev_players WHERE id=?", (player_id,))
     r = c.fetchone()
     if not r:
         conn.close()
@@ -736,12 +790,30 @@ def api_pick():
         return ("Player already picked", 409)
 
     now = datetime.utcnow().isoformat(timespec="seconds")
+    losing_team = canonical_team_abbr(r["org"] or "")
+    picking_team = canonical_team_abbr(team)
+    player_name = str(r["name"] or "").strip()
 
     # assign player + mark order
     c.execute("UPDATE rulev_players SET drafted_by=?, drafted_at=? WHERE id=?", (team, now, player_id))
     c.execute("UPDATE rulev_order SET player_id=?, drafted_at=? WHERE id=?", (player_id, now, cur["id"]))
     conn.commit()
     conn.close()
+
+    if losing_team and picking_team:
+        try:
+            from financials_app import record_finance_payment
+            record_finance_payment(
+                source_type="rulev_pick_fee",
+                source_id=int(cur["id"]),
+                payer_team_abbr=picking_team,
+                receiver_team_abbr=losing_team,
+                amount=RULEV_PICK_FEE,
+                description=f"Rule V draft fee for {player_name}",
+                effective_date=now[:10],
+            )
+        except Exception:
+            current_app.logger.exception("Failed to post Rule V draft payment")
 
     return ("", 204)
 
