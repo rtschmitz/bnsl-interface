@@ -18,7 +18,46 @@ from ui_skin import BNSL_GAME_CSS
 
 roster_bp = Blueprint("roster", __name__)
 
-from team_config import TEAM_EMAILS_BY_ABBR as TEAM_EMAILS, TEAM_ABBRS, canonical_team_abbr, emails_equal
+TEAM_EMAILS = {
+    "TOR": "daniele.defeo@gmail.com",
+    "NYY": "dmsund66@gmail.com",
+    "BOS": "chris_lawrence@sbcglobal.net",
+    "TB": "smith.mark.louis@gmail.com",
+    "BAL": "bsweis@ptd.net",
+    "DET": "manconley@gmail.com",
+    "KC": "jim@timhafer.com",
+    "MIN": "jonathan.adelman@gmail.com",
+    "CHW": "bglover6@gmail.com",
+    "CLE": "bonfanti20@gmail.com",
+    "LAA": "dsucoff@gmail.com",
+    "SEA": "daniel_a_fisher@yahoo.com",
+    "OAK": "bspropp@hotmail.com",
+    "HOU": "golk624@protonmail.com",
+    "TEX": "Brianorr@live.com",
+    "WAS": "smsetnor@gmail.com",
+    "NYM": "kerkhoffc@gmail.com",
+    "PHI": "jdcarney26@gmail.com",
+    "ATL": "stevegaston@yahoo.com",
+    "MIA": "schmitz@ucsb.edu",
+    "STL": "parkbench@mac.com",
+    "CHC": "bryanhartman@gmail.com",
+    "PIT": "jseiner24@gmail.com",
+    "MIL": "tsurratt@hiaspire.com",
+    "CIN": "jpmile@yahoo.com",
+    "LAD": "jr92@comcast.net",
+    "COL": "GypsySon@gmail.com",
+    "ARI": "mhr4240@gmail.com",
+    "SF": "jasonmallet@gmail.com",
+    "SD": "mattaca77@gmail.com",
+}
+
+TEAM_ABBRS = sorted(TEAM_EMAILS.keys())
+
+
+def canonical_team_abbr(team: str | None) -> str:
+    """Use WAS as the single app-facing code for Washington."""
+    code = (team or "").strip().upper()
+    return "WAS" if code == "WSH" else code
 
 POSITIONS = ["P","C","1B","2B","3B","SS","LF","CF","RF","DH","IF","OF"]
 CONTRACT_TYPES = ["R","A","X","FA"]
@@ -28,6 +67,7 @@ CURRENT_SEASON = 2025
 CURRENT_FA_CLASS = str(CURRENT_SEASON + 1)
 DRAFT_YEAR = 2025
 DRAFT_ROOKIE_OPTIONS_REMAINING = 3
+ROOKIE_MINIMUM_SALARY = 673_000
 
 DRAFT_TEAM_ABBR = {
     "Arizona Diamondbacks": "ARI",
@@ -210,6 +250,10 @@ def get_conn():
     return conn
 
 
+def emails_equal(a: str | None, b: str | None) -> bool:
+    if not a or not b:
+        return False
+    return a.strip().lower() == b.strip().lower()
 
 
 def roster_status_from_csv(
@@ -673,7 +717,7 @@ def sync_drafted_players_from_draft_db(conn: sqlite3.Connection | None = None) -
                     break
 
         values = (
-            1, "R", 0.0, None, None, 0, "",
+            1, "R", ROOKIE_MINIMUM_SALARY, None, None, 0, "",
             0.0, 0.0, 0.0,
             team_abbr, "", "Reserve", 0, DRAFT_ROOKIE_OPTIONS_REMAINING, "",
             draft_player_id, DRAFT_YEAR,
@@ -703,7 +747,7 @@ def sync_drafted_players_from_draft_db(conn: sqlite3.Connection | None = None) -
                 insert_id, name, last, first, "", "",
                 str(drow["position"] or "").strip(), dob,
                 str(drow["bats"] or "").strip(), str(drow["throws"] or "").strip(),
-                1, "R", 0.0, None, None, 0, "",
+                1, "R", ROOKIE_MINIMUM_SALARY, None, None, 0, "",
                 0.0, 0.0, 0.0,
                 team_abbr, "", "Reserve", 0,
                 DRAFT_ROOKIE_OPTIONS_REMAINING, "", "", mlbam_id,
