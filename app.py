@@ -9,6 +9,7 @@ import roster_app
 import rulev_app
 import trades_app
 import waivers_app
+import admin_app
 
 from fa_app import fa_bp
 from draft_app import draft_bp
@@ -19,6 +20,7 @@ from rulev_app import rulev_bp
 from rulev_order_page import rulev_order_bp
 from trades_app import trades_bp
 from waivers_app import waivers_bp
+from admin_app import admin_bp
 
 
 def create_app():
@@ -34,6 +36,7 @@ def create_app():
     app.config["RULEV_DB_PATH"] = str(db_path("rulev.db"))
     app.config["ROSTER_DB_PATH"] = str(db_path("roster.db"))
     app.config["DRAFT_STOCK_DB_PATH"] = str(db_path("draft_stock.db"))
+    app.config["ADMIN_DB_PATH"] = str(db_path("admin.db"))
 
     app.config["ROSTER_CSV_PATH"] = str(input_path("rostered_2025service.csv"))
     app.config["OOTP_FA_ROSTER_PATH"] = str(input_path("bnsl_ootp27_fixed_rosters_oldids_optionsupdated.txt"))
@@ -49,6 +52,7 @@ def create_app():
     app.register_blueprint(rulev_order_bp, url_prefix="/rulev")
     app.register_blueprint(trades_bp, url_prefix="/trades")
     app.register_blueprint(waivers_bp, url_prefix="/waivers")
+    app.register_blueprint(admin_bp, url_prefix="/admin")
 
     with app.app_context():
         # roster.db must exist before FA/Rule V syncs use it as the source of truth.
@@ -57,6 +61,7 @@ def create_app():
         rulev_app.bootstrap_rulev()
         fa_app.bootstrap_fa()
         trades_app.bootstrap_trades()
+        admin_app.bootstrap_admin()
 
     @app.get("/")
     def home():

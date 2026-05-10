@@ -34,7 +34,7 @@ TEAM_EMAILS = {
     "Seattle Mariners": "daniel_a_fisher@yahoo.com",
     "Oakland Athletics": "bspropp@hotmail.com",
     "Houston Astros": "golk624@protonmail.com",
-    "Texas Rangers": "Brianorr@live.com",
+    "Texas Rangers": "andrewschwartz1212@gmail.com",
 
     "Washington Nationals": "smsetnor@gmail.com",
     "New York Mets": "kerkhoffc@gmail.com",

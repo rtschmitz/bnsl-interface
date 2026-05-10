@@ -15,49 +15,16 @@ from flask import (
 )
 
 from ui_skin import BNSL_GAME_CSS
+from team_config import (
+    TEAM_EMAILS_BY_ABBR as TEAM_EMAILS,
+    TEAM_ABBRS,
+    TEAM_NAME_TO_ABBR,
+    canonical_team_abbr,
+    emails_equal,
+)
 
 roster_bp = Blueprint("roster", __name__)
 
-TEAM_EMAILS = {
-    "TOR": "daniele.defeo@gmail.com",
-    "NYY": "dmsund66@gmail.com",
-    "BOS": "chris_lawrence@sbcglobal.net",
-    "TB": "smith.mark.louis@gmail.com",
-    "BAL": "bsweis@ptd.net",
-    "DET": "manconley@gmail.com",
-    "KC": "jim@timhafer.com",
-    "MIN": "jonathan.adelman@gmail.com",
-    "CHW": "bglover6@gmail.com",
-    "CLE": "bonfanti20@gmail.com",
-    "LAA": "dsucoff@gmail.com",
-    "SEA": "daniel_a_fisher@yahoo.com",
-    "OAK": "bspropp@hotmail.com",
-    "HOU": "golk624@protonmail.com",
-    "TEX": "Brianorr@live.com",
-    "WAS": "smsetnor@gmail.com",
-    "NYM": "kerkhoffc@gmail.com",
-    "PHI": "jdcarney26@gmail.com",
-    "ATL": "stevegaston@yahoo.com",
-    "MIA": "schmitz@ucsb.edu",
-    "STL": "parkbench@mac.com",
-    "CHC": "bryanhartman@gmail.com",
-    "PIT": "jseiner24@gmail.com",
-    "MIL": "tsurratt@hiaspire.com",
-    "CIN": "jpmile@yahoo.com",
-    "LAD": "jr92@comcast.net",
-    "COL": "GypsySon@gmail.com",
-    "ARI": "mhr4240@gmail.com",
-    "SF": "jasonmallet@gmail.com",
-    "SD": "mattaca77@gmail.com",
-}
-
-TEAM_ABBRS = sorted(TEAM_EMAILS.keys())
-
-
-def canonical_team_abbr(team: str | None) -> str:
-    """Use WAS as the single app-facing code for Washington."""
-    code = (team or "").strip().upper()
-    return "WAS" if code == "WSH" else code
 
 POSITIONS = ["P","C","1B","2B","3B","SS","LF","CF","RF","DH","IF","OF"]
 CONTRACT_TYPES = ["R","A","X","FA"]
@@ -68,39 +35,6 @@ CURRENT_FA_CLASS = str(CURRENT_SEASON + 1)
 DRAFT_YEAR = 2025
 DRAFT_ROOKIE_OPTIONS_REMAINING = 3
 ROOKIE_MINIMUM_SALARY = 673_000
-
-DRAFT_TEAM_ABBR = {
-    "Arizona Diamondbacks": "ARI",
-    "Atlanta Braves": "ATL",
-    "Baltimore Orioles": "BAL",
-    "Boston Red Sox": "BOS",
-    "Chicago Cubs": "CHC",
-    "Chicago White Sox": "CHW",
-    "Cincinnati Reds": "CIN",
-    "Cleveland Guardians": "CLE",
-    "Colorado Rockies": "COL",
-    "Detroit Tigers": "DET",
-    "Houston Astros": "HOU",
-    "Kansas City Royals": "KC",
-    "Los Angeles Angels": "LAA",
-    "Los Angeles Dodgers": "LAD",
-    "Miami Marlins": "MIA",
-    "Milwaukee Brewers": "MIL",
-    "Minnesota Twins": "MIN",
-    "New York Mets": "NYM",
-    "New York Yankees": "NYY",
-    "Oakland Athletics": "OAK",
-    "Philadelphia Phillies": "PHI",
-    "Pittsburgh Pirates": "PIT",
-    "San Diego Padres": "SD",
-    "San Francisco Giants": "SF",
-    "Seattle Mariners": "SEA",
-    "St. Louis Cardinals": "STL",
-    "Tampa Bay Rays": "TB",
-    "Texas Rangers": "TEX",
-    "Toronto Blue Jays": "TOR",
-    "Washington Nationals": "WAS",
-}
 
 
 def as_int(val, default=None):
@@ -249,11 +183,6 @@ def get_conn():
     conn.create_function("unaccent", 1, _unaccent)
     return conn
 
-
-def emails_equal(a: str | None, b: str | None) -> bool:
-    if not a or not b:
-        return False
-    return a.strip().lower() == b.strip().lower()
 
 
 def roster_status_from_csv(
@@ -568,8 +497,8 @@ def draft_team_to_abbr(team: Any) -> str:
     text = str(team or "").strip()
     if not text:
         return ""
-    if text in DRAFT_TEAM_ABBR:
-        return DRAFT_TEAM_ABBR[text]
+    if text in TEAM_NAME_TO_ABBR:
+        return TEAM_NAME_TO_ABBR[text]
     return canonical_team_abbr(text)
 
 

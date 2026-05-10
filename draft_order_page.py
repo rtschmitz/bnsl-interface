@@ -152,6 +152,26 @@ def bump_if_sunday(dt: datetime) -> datetime:
         nd = nd + timedelta(days=1)
     return nd
 
+
+def evening_miss_slot(start_day: date, offset: int) -> datetime:
+    """Return the offset-th evening miss slot, capped to valid clock hours.
+
+    Missed picks start at 7 PM ET.  Python datetimes cannot use hour 24+,
+    so when more than five picks are queued for the same evening we spill the
+    extra slots to the next non-Sunday evening at 7 PM, preserving order.
+    """
+    slots_per_evening = max(1, 24 - END_OF_DAY_MISS_HOUR)  # 19,20,21,22,23
+    extra_days, slot_in_day = divmod(max(0, int(offset)), slots_per_evening)
+    day = next_non_sunday_date(start_day)
+    advanced = 0
+    while advanced < extra_days:
+        day = next_non_sunday_date(day + timedelta(days=1))
+        advanced += 1
+    return datetime(
+        day.year, day.month, day.day,
+        END_OF_DAY_MISS_HOUR + slot_in_day, 0, 0, tzinfo=EASTERN
+    )
+
 def base_slot_for_index(i: int) -> datetime:
     """
     Initial designated time for pick index i (0-based), skipping Sundays entirely.
@@ -481,9 +501,7 @@ def _compute_scheduled_times(now: datetime) -> Dict[int, datetime]:
 
         for j, idx in enumerate(evening_queue):
             # Proposed evening slot for this item on 'day'
-            slot_dt = bump_if_sunday(
-                datetime(day.year, day.month, day.day, END_OF_DAY_MISS_HOUR + j, 0, 0, tzinfo=EASTERN)
-            )
+            slot_dt = evening_miss_slot(day, j)
 
 
             # Evening picks are one-hour windows: deadline is always start + 1 hour
@@ -508,9 +526,7 @@ def _compute_scheduled_times(now: datetime) -> Dict[int, datetime]:
     if carryover_eod:
         nd = next_non_sunday_date(day)
         for j, idx in enumerate(carryover_eod):
-            scheduled_time[idx] = bump_if_sunday(
-                datetime(nd.year, nd.month, nd.day, END_OF_DAY_MISS_HOUR + j, 0, 0, tzinfo=EASTERN)
-            )
+            scheduled_time[idx] = evening_miss_slot(nd, j)
 
     return scheduled_time
 

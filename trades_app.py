@@ -24,51 +24,22 @@ except Exception:  # lets the parser/database builder run outside the full app t
     </style>
     """
 
-try:
-    from team_config import TEAM_EMAILS, emails_equal
-except Exception:
-    TEAM_EMAILS = {}
-    def emails_equal(a: str | None, b: str | None) -> bool:
-        return bool(a and b and a.strip().lower() == b.strip().lower())
+from team_config import (
+    TEAM_EMAILS_BY_ABBR as TEAM_EMAILS,
+    TEAM_ABBRS,
+    ABBR_TO_TEAM,
+    TEAM_NAME_TO_ABBR,
+    canonical_team_abbr,
+    emails_equal,
+)
 
 trades_bp = Blueprint("trades", __name__)
 
-# BNSL trade-log abbreviations. This intentionally uses CHW because that is what
-# the uploaded trade log uses for the White Sox.
-ABBR_TO_FULL: dict[str, str] = {
-    "ARI": "Arizona Diamondbacks",
-    "ATL": "Atlanta Braves",
-    "BAL": "Baltimore Orioles",
-    "BOS": "Boston Red Sox",
-    "CHC": "Chicago Cubs",
-    "CHW": "Chicago White Sox",
-    "CIN": "Cincinnati Reds",
-    "CLE": "Cleveland Guardians",
-    "COL": "Colorado Rockies",
-    "DET": "Detroit Tigers",
-    "HOU": "Houston Astros",
-    "KC": "Kansas City Royals",
-    "LAA": "Los Angeles Angels",
-    "LAD": "Los Angeles Dodgers",
-    "MIA": "Miami Marlins",
-    "MIL": "Milwaukee Brewers",
-    "MIN": "Minnesota Twins",
-    "NYM": "New York Mets",
-    "NYY": "New York Yankees",
-    "OAK": "Oakland Athletics",
-    "PHI": "Philadelphia Phillies",
-    "PIT": "Pittsburgh Pirates",
-    "SD": "San Diego Padres",
-    "SEA": "Seattle Mariners",
-    "SF": "San Francisco Giants",
-    "STL": "St. Louis Cardinals",
-    "TB": "Tampa Bay Rays",
-    "TEX": "Texas Rangers",
-    "TOR": "Toronto Blue Jays",
-    "WAS": "Washington Nationals",
-}
-TEAM_ORDER = list(ABBR_TO_FULL.keys())
-FULL_TO_ABBR = {v: k for k, v in ABBR_TO_FULL.items()}
+# BNSL trade-log abbreviations are centralized in team_config.py.
+# Use only canonical BNSL abbreviations here; aliases are normalized at inputs.
+TEAM_ORDER = list(TEAM_ABBRS)
+ABBR_TO_FULL: dict[str, str] = {abbr: ABBR_TO_TEAM[abbr] for abbr in TEAM_ORDER}
+FULL_TO_ABBR = dict(TEAM_NAME_TO_ABBR)
 
 HEADER_RE = re.compile(r"^(\d{4}-\d{2}-\d{2}):\s*(.+?)\s*$")
 LEG_RE = re.compile(r"^From\s+([A-Z]{2,3})\s+to\s+([A-Z]{2,3}):\s*(.*?)\s*$")
@@ -148,15 +119,6 @@ def team_label(abbr: str | None) -> str:
     full = display_team(abbr)
     return f"{abbr} — {full}" if full != abbr else abbr
 
-
-def team_email_lookup() -> dict[str, str]:
-    """Return expected manager emails keyed by BNSL abbreviation."""
-    lookup: dict[str, str] = {}
-    for full, email in TEAM_EMAILS.items():
-        abbr = FULL_TO_ABBR.get(full)
-        if abbr and email:
-            lookup[abbr] = email
-    return lookup
 
 
 def authed_team() -> str:
@@ -1715,11 +1677,11 @@ def api_auth():
 @trades_bp.post("/api/login")
 def api_login():
     data = request.get_json(force=True, silent=True) or {}
-    team = (data.get("team") or "").strip().upper()
+    team = canonical_team_abbr(data.get("team"))
     email = (data.get("email") or "").strip()
     if team not in ABBR_TO_FULL:
         return ("Unknown team", 400)
-    expected = team_email_lookup().get(team)
+    expected = TEAM_EMAILS.get(team)
     if not expected:
         return ("No email configured for team", 400)
     if not emails_equal(email, expected):

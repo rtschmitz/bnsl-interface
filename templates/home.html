@@ -55,7 +55,7 @@
     <div class="brand">
       <div>
         <h1>BNSL INTERFACE</h1>
-        <div class="sub">Draft • Rule V • Free Agency • Rosters • Waivers • Financials • Trades</div>
+        <div class="sub">Draft • Rule V • Free Agency • Rosters • Waivers • Financials • Trades • Admin</div>
       </div>
       <span class="badge" id="active-badge">FREE AGENCY</span>
     </div>
@@ -70,6 +70,7 @@
           <button class="tab" id="tab-waivers"><span class="dot"></span> Waivers</button>
           <button class="tab" id="tab-financials"><span class="dot"></span> Financials</button>
           <button class="tab" id="tab-trades"><span class="dot"></span> Trades</button>
+          <button class="tab" id="tab-admin"><span class="dot"></span> Admin</button>
         </div>
       </div>
     </div>
@@ -83,6 +84,7 @@
         <iframe id="frame-waivers" src="/waivers/" class="hidden"></iframe>
         <iframe id="frame-financials" src="/financials/" class="hidden"></iframe>
         <iframe id="frame-trades" src="/trades/" class="hidden"></iframe>
+        <iframe id="frame-admin" src="/admin/" class="hidden"></iframe>
       </div>
     </div>
   </div>
@@ -96,6 +98,7 @@
       waivers: { button: document.getElementById("tab-waivers"), frame: document.getElementById("frame-waivers"), label: "WAIVERS" },
       financials: { button: document.getElementById("tab-financials"), frame: document.getElementById("frame-financials"), label: "FINANCIALS" },
       trades: { button: document.getElementById("tab-trades"), frame: document.getElementById("frame-trades"), label: "TRADES" },
+      admin: { button: document.getElementById("tab-admin"), frame: document.getElementById("frame-admin"), label: "ADMIN" },
     };
     const activeBadge = document.getElementById("active-badge");
     function show(which){
@@ -109,6 +112,19 @@
       try { localStorage.setItem("bnsl.activeTab", which); } catch(e){}
     }
     for (const [key, tab] of Object.entries(tabs)) tab.button.onclick = () => show(key);
+
+    window.addEventListener("message", (event) => {
+      if (event.origin !== window.location.origin) return;
+      const data = event.data || {};
+      if (data.type !== "bnsl-admin-refresh") return;
+      const targets = Array.isArray(data.targets) ? data.targets : [];
+      for (const target of targets) {
+        const tab = tabs[target];
+        if (!tab || !tab.frame) continue;
+        try { tab.frame.contentWindow.location.reload(); }
+        catch(e) { tab.frame.src = tab.frame.src; }
+      }
+    });
     (function boot(){ let which = "fa"; try { which = localStorage.getItem("bnsl.activeTab") || "fa"; } catch(e){} show(which); })();
   </script>
 </body>

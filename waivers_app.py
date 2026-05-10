@@ -44,6 +44,45 @@ def parse_iso(value: str) -> datetime:
     return dt.astimezone(timezone.utc)
 
 
+def ensure_app_meta(conn: sqlite3.Connection) -> None:
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS app_meta (
+            key TEXT PRIMARY KEY,
+            value TEXT NOT NULL
+        )
+    """)
+
+
+def get_custom_next_waiver_run_at(dt: datetime | None = None) -> datetime | None:
+    """Return an admin-set waiver run while it is still in the future.
+
+    The admin panel stores this in roster.db/app_meta and rewrites active
+    waiver_entries.run_at to the same value.  Once the custom run is no longer
+    future-facing, it is cleared and the normal Sunday noon ET rule resumes.
+    """
+    try:
+        now = (dt or utcnow()).astimezone(timezone.utc)
+        conn = get_roster_conn()
+        ensure_app_meta(conn)
+        cur = conn.cursor()
+        cur.execute("SELECT value FROM app_meta WHERE key='next_waiver_run_at'")
+        row = cur.fetchone()
+        if not row:
+            conn.close()
+            return None
+        custom = parse_iso(row["value"])
+        if custom > now:
+            conn.close()
+            return custom
+        cur.execute("DELETE FROM app_meta WHERE key='next_waiver_run_at'")
+        conn.commit()
+        conn.close()
+    except Exception:
+        try:
+            current_app.logger.exception("Failed to read custom waiver run date")
+        except Exception:
+            pass
+    return None
 
 
 def get_roster_conn() -> sqlite3.Connection:
@@ -66,8 +105,13 @@ def next_waiver_run_at(dt: datetime | None = None) -> datetime:
 
     Newly waived players must be on waivers more than 48 hours before the
     Sunday noon ET deadline.  If the next deadline is within 48 hours, they
-    roll to the following Sunday's run.
+    roll to the following Sunday's run.  An admin-set custom run date overrides
+    this default while that custom run remains in the future.
     """
+    custom = get_custom_next_waiver_run_at(dt)
+    if custom is not None:
+        return custom
+
     now_et = (dt or utcnow()).astimezone(EASTERN)
     days_until_sunday = (6 - now_et.weekday()) % 7  # Monday=0, Sunday=6
     run_et = (now_et + timedelta(days=days_until_sunday)).replace(
@@ -487,7 +531,6 @@ def waiver_to_dict(row: sqlite3.Row, authed_team: str = "", claims_by_waiver: di
         "run_at_et": format_et(row["run_at"]),
         "claimed_by_team": canonical_team_abbr(row["claimed_by_team"]),
         "processed_at_et": format_et(row["processed_at"]),
-        "claims": claims,
         "claim_count": len(claims),
         "my_claim": bool(canonical_team_abbr(authed_team) and canonical_team_abbr(authed_team) in [canonical_team_abbr(c) for c in claims]),
         "can_claim": bool(canonical_team_abbr(authed_team) and row["status"] == "active" and canonical_team_abbr(authed_team) != canonical_team_abbr(row["waived_from_team"] or "")),
@@ -784,7 +827,6 @@ WAIVERS_HTML = """
           <th>Restores if claimed</th>
           <th class="num">Salary</th>
           <th>Run</th>
-          <th>Claims</th>
           <th>Action</th>
         </tr>
       </thead>
@@ -905,7 +947,6 @@ async function fetchWaivers() {
   body.innerHTML = "";
   for (const w of data.waivers || []) {
     const tr = document.createElement("tr");
-    const claimText = w.claim_count ? `${w.claim_count} claim(s): ${w.claims.join(", ")}` : "None";
     const action = w.status === "active"
       ? `<button class="btn claim-btn" data-id="${w.id}" ${!w.can_claim || w.my_claim ? "disabled" : ""}>${w.my_claim ? "Claim entered" : "Claim"}</button>`
       : `<span>${w.status === "claimed" ? "Claimed by " + esc(w.claimed_by_team) : "Unclaimed"}</span>`;
@@ -917,7 +958,6 @@ async function fetchWaivers() {
       <td>${esc(w.claim_restore_status)}</td>
       <td class="num">${moneyM(w.salary_m)}</td>
       <td>${esc(w.run_at_et)}</td>
-      <td>${esc(claimText)}</td>
       <td>${action}</td>
     `;
     body.appendChild(tr);
