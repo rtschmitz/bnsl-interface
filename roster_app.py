@@ -1154,6 +1154,13 @@ def require_roster_team() -> str:
     session["roster_authed_team"] = team
     return team
 
+def fmt_salary(value: Any) -> str:
+    try:
+        return f"${float(value or 0):,.0f}"
+    except Exception:
+        return "$0"
+
+
 def notify_roster_transaction(team: str, player_name: str, message: str) -> None:
     """Notify the transactions channel, or log locally when no webhook is set."""
     team = canonical_team_abbr(team) or str(team or "").strip()
@@ -1327,7 +1334,7 @@ def api_player_action():
                 option_decision_at=?
             WHERE id=?
         """, (stamp, player_id))
-        msg = "Option exercised."
+        msg = f"Option exercised at {fmt_salary(row['salary'])}."
 
     elif action == "decline_option":
         if not pending_option_decision(row):
@@ -1370,7 +1377,7 @@ def api_player_action():
                 arbitration_decision_at=?
             WHERE id=?
         """, (stamp, player_id))
-        msg = "Arbitration salary tendered."
+        msg = f"Arbitration salary tendered at {fmt_salary(row['salary'])}."
 
     elif action == "decline_arbitration":
         if not pending_arbitration_decision(row):
@@ -1389,8 +1396,8 @@ def api_player_action():
     try:
         action_messages = {
             "release": f"released from {old_status or 'Unknown'} and placed on waivers.",
-            "exercise_option": "exercised club option.",
-            "tender_arbitration": "tendered arbitration contract.",
+            "exercise_option": f"exercised club option at {fmt_salary(row['salary'])}.",
+            "tender_arbitration": f"tendered arbitration contract at {fmt_salary(row['salary'])}.",
             "decline_arbitration": "non-tendered arbitration contract; released to free agency.",
         }
         notify_roster_transaction(team, player_name, action_messages.get(action, msg or action))

@@ -61,6 +61,8 @@ RULEV_DRAFT_ORDER_2026 = [
 
 RULEV_PICK_FEE = 250_000.0
 RULEV_PROTECTED_DRAFT_YEAR = 2025
+RULEV_ROSTER_STATUS = "Active"
+RULEV_MINIMUM_SALARY = 673_000.0
 
 
 def canonical_team_abbr(team: Any) -> str:
@@ -145,6 +147,105 @@ def init_db():
 def get_roster_db_path() -> Path:
     cfg = current_app.config.get("ROSTER_DB_PATH")
     return Path(cfg) if cfg else db_path("roster.db")
+
+
+def _safe_float(value: Any, default: float = 0.0) -> float:
+    try:
+        return float(value or 0.0)
+    except Exception:
+        return default
+
+
+def apply_rulev_pick_to_roster(rulev_player_id: int, picking_team_abbr: str, drafted_at: str) -> dict[str, Any]:
+    """Move the selected Rule V player in roster.db to the drafting team.
+
+    The Rule V player pool is synced from roster.db and stores roster_player_id.
+    A pick should therefore mutate that original roster row, not merely mark the
+    player as drafted inside rulev.db.  Rule V selections are placed on the
+    drafting team's Active roster so the financials page immediately counts the
+    salary.  If the source row has no salary, fall back to the league minimum.
+    """
+    picking_team_abbr = canonical_team_abbr(picking_team_abbr)
+    if not picking_team_abbr:
+        return {"updated": False, "reason": "missing drafting team"}
+
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("SELECT * FROM rulev_players WHERE id=?", (int(rulev_player_id),))
+    rv_row = cur.fetchone()
+    conn.close()
+    if not rv_row:
+        return {"updated": False, "reason": "rulev player not found"}
+
+    roster_player_id = 0
+    if "roster_player_id" in rv_row.keys():
+        try:
+            roster_player_id = int(rv_row["roster_player_id"] or 0)
+        except Exception:
+            roster_player_id = 0
+    if roster_player_id <= 0:
+        return {"updated": False, "reason": "rulev player is not linked to roster.db"}
+
+    roster_path = get_roster_db_path()
+    rconn = sqlite3.connect(str(roster_path))
+    rconn.row_factory = sqlite3.Row
+    rcur = rconn.cursor()
+    rcur.execute("SELECT * FROM roster_players WHERE id=?", (roster_player_id,))
+    roster_row = rcur.fetchone()
+    if not roster_row:
+        rconn.close()
+        return {"updated": False, "reason": f"roster player {roster_player_id} not found"}
+
+    old_team = str(roster_row["franchise"] or "").strip() if "franchise" in roster_row.keys() else ""
+    old_status = str(roster_row["roster_status"] or "").strip() if "roster_status" in roster_row.keys() else ""
+    existing_contract = str(roster_row["contract_type"] or "").strip().upper() if "contract_type" in roster_row.keys() else ""
+    existing_salary = _safe_float(roster_row["salary"] if "salary" in roster_row.keys() else 0.0, 0.0)
+    new_contract = existing_contract or "R"
+    new_salary = existing_salary if existing_salary > 0 else RULEV_MINIMUM_SALARY
+
+    rcur.execute("""
+        UPDATE roster_players
+        SET signed=1,
+            franchise=?,
+            affiliate_team='',
+            roster_status=?,
+            active_roster=1,
+            contract_type=?,
+            salary=?
+        WHERE id=?
+    """, (
+        picking_team_abbr,
+        RULEV_ROSTER_STATUS,
+        new_contract,
+        new_salary,
+        roster_player_id,
+    ))
+    rconn.commit()
+    rconn.close()
+
+    return {
+        "updated": True,
+        "roster_player_id": roster_player_id,
+        "old_team": old_team,
+        "old_status": old_status,
+        "new_team": picking_team_abbr,
+        "new_status": RULEV_ROSTER_STATUS,
+        "salary": new_salary,
+        "drafted_at": drafted_at,
+    }
+
+
+def sync_after_rulev_roster_mutation() -> None:
+    try:
+        sync_rulev_from_roster_db()
+    except Exception:
+        current_app.logger.exception("Rule V sync failed after Rule V roster mutation")
+
+    try:
+        from fa_app import sync_free_agents_from_roster_db
+        sync_free_agents_from_roster_db()
+    except Exception:
+        current_app.logger.exception("FA sync failed after Rule V roster mutation")
 
 
 def _infer_two_digit_birth_year(yy: int) -> int:
@@ -795,6 +896,15 @@ def api_pick():
     rulev_order_id = int(cur["id"])
     conn.commit()
     conn.close()
+
+    roster_update = apply_rulev_pick_to_roster(player_id, picking_team, now)
+    if roster_update.get("updated"):
+        sync_after_rulev_roster_mutation()
+    else:
+        current_app.logger.warning(
+            "Rule V pick did not update roster.db for rulev_player_id=%s: %s",
+            player_id, roster_update.get("reason", "unknown reason")
+        )
 
     try:
         notify_discord_rulev_pick(rulev_order_id)
