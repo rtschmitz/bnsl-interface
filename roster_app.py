@@ -15,6 +15,7 @@ from flask import (
 )
 
 from ui_skin import BNSL_GAME_CSS
+from discord_notifier import send_discord_message
 from team_config import (
     TEAM_EMAILS_BY_ABBR as TEAM_EMAILS,
     TEAM_ABBRS,
@@ -1153,6 +1154,27 @@ def require_roster_team() -> str:
     session["roster_authed_team"] = team
     return team
 
+def notify_roster_transaction(team: str, player_name: str, message: str) -> None:
+    """Notify the transactions channel, or log locally when no webhook is set."""
+    team = canonical_team_abbr(team) or str(team or "").strip()
+    player_name = str(player_name or "Unknown player").strip()
+    send_discord_message(
+        "BNSL_DISCORD_TRANSACTIONS_WEBHOOK_URL",
+        f"**Roster transaction:** {team} — {player_name}: {message}",
+        fallback_label="transactions",
+    )
+
+
+def safe_notify_waiver_created(waiver_id: int | None) -> None:
+    if not waiver_id:
+        return
+    try:
+        from waivers_app import notify_waiver_created
+        notify_waiver_created(int(waiver_id))
+    except Exception:
+        current_app.logger.exception("Failed to post waiver Discord notification")
+
+
 @roster_bp.post("/api/update_player")
 def api_update_player():
     team = require_roster_team()
@@ -1210,9 +1232,10 @@ def api_update_player():
         should_waive = True
         waiver_reason = "Removed from 40-man roster"
 
+    waiver_id = None
     if should_waive:
         from waivers_app import create_waiver_from_roster_row
-        create_waiver_from_roster_row(
+        waiver_id = create_waiver_from_roster_row(
             conn,
             row,
             waived_from_team=team,
@@ -1227,10 +1250,19 @@ def api_update_player():
         WHERE id=?
     """, (new_status, 1 if new_status == "Active" else 0, player_id))
 
+    player_name = str(row["name"] or "").strip()
     conn.commit()
     conn.close()
 
     sync_after_roster_mutation()
+    try:
+        detail = f"moved from {old_status or 'Unknown'} to {new_status}"
+        if should_waive:
+            detail += f"; placed on waivers ({waiver_reason})"
+        notify_roster_transaction(team, player_name, detail + ".")
+        safe_notify_waiver_created(waiver_id)
+    except Exception:
+        current_app.logger.exception("Failed to post roster transaction Discord notification")
     return jsonify({"ok": True, "waiver_created": should_waive})
 
 
@@ -1263,6 +1295,8 @@ def api_player_action():
 
     old_team = row["franchise"] or ""
     old_status = row["roster_status"] or ""
+    player_name = str(row["name"] or "").strip()
+    waiver_id = None
     msg = ""
 
     if action == "release":
@@ -1270,7 +1304,7 @@ def api_player_action():
             conn.close()
             return ("This player has a pending contract decision. Use tender/non-tender or exercise/decline option instead.", 409)
         from waivers_app import create_waiver_from_roster_row
-        create_waiver_from_roster_row(
+        waiver_id = create_waiver_from_roster_row(
             conn,
             row,
             waived_from_team=team,
@@ -1319,6 +1353,10 @@ def api_player_action():
             current_app.logger.exception("Failed to post option buyout")
         sync_after_roster_mutation()
         update_fa_last_team(player_id, old_team)
+        try:
+            notify_roster_transaction(team, player_name, f"declined club option and released to free agency; buyout posted: ${buyout:,.0f}.")
+        except Exception:
+            current_app.logger.exception("Failed to post option-decline Discord notification")
         return jsonify({"ok": True, "message": msg})
 
     elif action == "tender_arbitration":
@@ -1347,6 +1385,18 @@ def api_player_action():
     sync_after_roster_mutation()
     if action in {"release", "decline_arbitration"}:
         update_fa_last_team(player_id, old_team)
+
+    try:
+        action_messages = {
+            "release": f"released from {old_status or 'Unknown'} and placed on waivers.",
+            "exercise_option": "exercised club option.",
+            "tender_arbitration": "tendered arbitration contract.",
+            "decline_arbitration": "non-tendered arbitration contract; released to free agency.",
+        }
+        notify_roster_transaction(team, player_name, action_messages.get(action, msg or action))
+        safe_notify_waiver_created(waiver_id)
+    except Exception:
+        current_app.logger.exception("Failed to post roster action Discord notification")
     return jsonify({"ok": True, "message": msg})
 
 ROSTER_HTML = """

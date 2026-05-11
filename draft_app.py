@@ -66,6 +66,7 @@ import logging
 from flask import current_app, has_app_context
 
 from bnsl_paths import db_path, input_path
+from discord_notifier import send_discord_message
 
 APP_DIR = Path(__file__).resolve().parent
 
@@ -588,69 +589,13 @@ TEAM_ABBR = {
 }
 
 def _discord_post(content: str) -> None:
-    """Post a simple message to Discord via webhook. Uses stdlib only, with diagnostics."""
-    url = os.environ.get("DISCORD_WEBHOOK_URL")
-    if not url:
-        print(f"[DISCORD-DRYRUN] {content}")
-        return
-
-    import json, urllib.request, urllib.error, time
-    payload = {"content": content}
-    data = json.dumps(payload).encode("utf-8")
-    req = urllib.request.Request(
-        url,
-        data=data,
-        headers={
-            "Content-Type": "application/json",
-            "User-Agent": "bnsl-draft-bot/1.0 (+https://bnsldraft.onrender.com)"
-        },
-        method="POST",
+    """Post a draft-pick message to Discord, or log it when no webhook is configured."""
+    send_discord_message(
+        "BNSL_DISCORD_DRAFT_PICKS_WEBHOOK_URL",
+        content,
+        fallback_label="draft-picks",
+        legacy_env_vars=("DISCORD_WEBHOOK_URL",),
     )
-
-    def do_post():
-        with urllib.request.urlopen(req, timeout=15) as resp:
-            # Success is usually 204 No Content
-            if resp.status in (200, 204):
-                return True, resp.status, b""
-            # Non-2xx with body
-            body = resp.read()
-            return False, resp.status, body
-
-    try:
-        ok, status, body = do_post()
-        if ok:
-            print(f"[DISCORD] ok status={status}")
-            return
-
-        # Handle rate limit (429) once
-        if status == 429:
-            retry_after = 1.0
-            try:
-                # discord returns JSON: {"retry_after": seconds, ...}
-                obj = json.loads(body.decode("utf-8", "ignore"))
-                retry_after = float(obj.get("retry_after", retry_after))
-            except Exception:
-                pass
-            print(f"[DISCORD] rate limited, retrying after {retry_after}s")
-            time.sleep(min(3.0, max(0.5, retry_after)))
-            ok2, status2, body2 = do_post()
-            if ok2:
-                print(f"[DISCORD] ok after retry status={status2}")
-                return
-            print(f"[DISCORD] failed after retry status={status2} body={body2[:300]!r}")
-            return
-
-        print(f"[DISCORD] non-2xx status={status} body={body[:300]!r}")
-
-    except urllib.error.HTTPError as e:
-        body = e.read() if hasattr(e, "read") else b""
-        print(f"[DISCORD] HTTPError status={getattr(e, 'code', '???')} body={body[:300]!r}")
-    except urllib.error.URLError as e:
-        # This will show SSL errors / DNS / connection issues if any
-        print(f"[DISCORD] URLError: {e}")
-    except Exception as e:
-        print(f"[DISCORD] post failed: {e}")
-
 
 
 def notify_discord_pick(draft_order_id: int) -> None:
@@ -2358,9 +2303,9 @@ def api_draft_status():
 
 @draft_bp.post("/tasks/test_discord")
 def test_discord():
-    url = os.environ.get("DISCORD_WEBHOOK_URL")
+    url = os.environ.get("BNSL_DISCORD_DRAFT_PICKS_WEBHOOK_URL") or os.environ.get("DISCORD_WEBHOOK_URL")
     if not url:
-        return jsonify({"ok": False, "error": "DISCORD_WEBHOOK_URL not set in this process"}), 500
+        return jsonify({"ok": False, "error": "BNSL_DISCORD_DRAFT_PICKS_WEBHOOK_URL not set in this process"}), 500
     try:
         _discord_post("Test from BNSL Draft webhook")
         return jsonify({"ok": True}), 200

@@ -15,6 +15,7 @@ from flask import Blueprint, current_app, has_app_context, request, jsonify, ses
 from team_config import MLB_TEAMS, TEAM_EMAILS, team_abbr_for_name, emails_equal
 from ui_skin import BNSL_GAME_CSS
 from bnsl_paths import db_path
+from discord_notifier import send_discord_message
 
 rulev_bp = Blueprint("rulev", __name__)
 
@@ -386,6 +387,35 @@ def current_pick() -> Dict[str, Any] | None:
         "picks_made": made,
         "total_picks": total,
     }
+
+
+def notify_discord_rulev_pick(rulev_order_id: int) -> None:
+    """Post a Rule V pick message to the shared draft-picks webhook."""
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("""
+      SELECT o.round, o.pick, o.team, p.name, p.position
+      FROM rulev_order o
+      JOIN rulev_players p ON p.id = o.player_id
+      WHERE o.id=?
+    """, (rulev_order_id,))
+    row = cur.fetchone()
+    conn.close()
+    if not row:
+        return
+
+    pick_label = f"Rule V {int(row['round'])}.{int(row['pick'])}"
+    team = row["team"] or ""
+    abbr = canonical_team_abbr(team) or team
+    pos = (row["position"] or "").strip()
+    player = (row["name"] or "").strip()
+    player_text = f"{pos} {player}".strip()
+    send_discord_message(
+        "BNSL_DISCORD_DRAFT_PICKS_WEBHOOK_URL",
+        f"{pick_label} [{abbr}]: {player_text}",
+        fallback_label="draft-picks",
+        legacy_env_vars=("DISCORD_WEBHOOK_URL",),
+    )
 
 
 def _require_authed_team() -> str:
@@ -762,8 +792,14 @@ def api_pick():
     # assign player + mark order
     c.execute("UPDATE rulev_players SET drafted_by=?, drafted_at=? WHERE id=?", (team, now, player_id))
     c.execute("UPDATE rulev_order SET player_id=?, drafted_at=? WHERE id=?", (player_id, now, cur["id"]))
+    rulev_order_id = int(cur["id"])
     conn.commit()
     conn.close()
+
+    try:
+        notify_discord_rulev_pick(rulev_order_id)
+    except Exception:
+        current_app.logger.exception("Failed to post Rule V draft-pick Discord notification")
 
     if losing_team and picking_team:
         try:

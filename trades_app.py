@@ -10,6 +10,7 @@ import sqlite3
 from flask import Blueprint, current_app, jsonify, render_template_string, request, session
 
 from bnsl_paths import db_path, input_path
+from discord_notifier import send_discord_message
 
 try:
     from ui_skin import BNSL_GAME_CSS
@@ -146,6 +147,48 @@ def money(value: Any) -> str:
         return f"${float(value):,.0f}"
     except Exception:
         return "$0"
+
+
+def notify_trade_accepted(proposal: dict[str, Any], items: list[dict[str, Any]], payments: list[dict[str, Any]]) -> None:
+    """Notify the trades channel with the accepted proposal details."""
+    proposal_id = proposal.get("id")
+    proposer = proposal.get("proposer_team_abbr") or "?"
+    target = proposal.get("target_team_abbr") or "?"
+    trade_date = proposal.get("trade_date") or _today_iso()
+
+    receive_groups: dict[str, list[str]] = {}
+    for item in items:
+        receiver = item.get("receiving_team_abbr") or "?"
+        text = item.get("display_text") or "asset"
+        receive_groups.setdefault(receiver, []).append(str(text))
+
+    lines = [
+        "**Trade accepted**",
+        f"Proposal #{proposal_id} — {proposer} ↔ {target} — {trade_date}",
+    ]
+    for team in sorted(receive_groups):
+        assets = "; ".join(receive_groups[team])
+        lines.append(f"{team} receives: {assets}")
+
+    if payments:
+        payment_bits = []
+        for p in payments:
+            payer = p.get("payer_team_abbr") or "?"
+            receiver = p.get("receiver_team_abbr") or "?"
+            amount = money(p.get("amount"))
+            reason = p.get("reason") or "payment"
+            payment_bits.append(f"{payer} pays {receiver} {amount} ({reason})")
+        lines.append("Payments: " + "; ".join(payment_bits))
+
+    notes = str(proposal.get("notes") or "").strip()
+    if notes:
+        lines.append(f"Notes: {notes}")
+
+    send_discord_message(
+        "BNSL_DISCORD_TRADES_WEBHOOK_URL",
+        "\n".join(lines),
+        fallback_label="trades",
+    )
 
 
 def prorated_salary_payment(full_salary: float, trade_date: str) -> float:
@@ -1839,6 +1882,7 @@ def api_accept_proposal(proposal_id: int):
         conn.close()
         return ("Proposal is not pending", 400)
 
+    proposal_dict = dict(proposal)
     cur = conn.cursor()
     cur.execute("SELECT * FROM trade_proposal_items WHERE proposal_id=?", (proposal_id,))
     items = [dict(r) for r in cur.fetchall()]
@@ -1859,7 +1903,8 @@ def api_accept_proposal(proposal_id: int):
     )
     cur.execute("UPDATE trade_proposal_payments SET status='posted' WHERE proposal_id=?", (proposal_id,))
     cur.execute("SELECT * FROM trade_proposal_payments WHERE proposal_id=?", (proposal_id,))
-    for p in cur.fetchall():
+    payments = [dict(r) for r in cur.fetchall()]
+    for p in payments:
         cur.execute(
             """
             INSERT OR IGNORE INTO finance_payments(
@@ -1884,6 +1929,10 @@ def api_accept_proposal(proposal_id: int):
 
     # Rebuild stock so accepted proposal pick transfers layer on top immediately.
     refresh_from_log()
+    try:
+        notify_trade_accepted(proposal_dict, items, payments)
+    except Exception:
+        current_app.logger.exception("Failed to post accepted-trade Discord notification")
     return jsonify({"id": proposal_id, "status": "accepted", "players_moved": moved_players})
 
 

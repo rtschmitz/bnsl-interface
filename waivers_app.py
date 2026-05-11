@@ -9,6 +9,7 @@ import unicodedata
 from flask import Blueprint, current_app, jsonify, render_template_string, request, session, abort
 
 from ui_skin import BNSL_GAME_CSS
+from discord_notifier import send_discord_message
 
 waivers_bp = Blueprint("waivers", __name__)
 
@@ -135,6 +136,58 @@ def format_et(value: str | None) -> str:
         return parse_iso(value).astimezone(EASTERN).strftime("%Y-%m-%d %I:%M %p ET")
     except Exception:
         return str(value)
+
+
+def notify_waiver_created(waiver_id: int) -> None:
+    """Notify #waivers that a player has been placed on waivers."""
+    conn = get_roster_conn()
+    cur = conn.cursor()
+    cur.execute("SELECT * FROM waiver_entries WHERE id=?", (int(waiver_id),))
+    row = cur.fetchone()
+    conn.close()
+    if not row:
+        return
+
+    player = row["player_name"] or "Unknown player"
+    team = canonical_team_abbr(row["waived_from_team"] or "")
+    removed_from = row["pre_waiver_status"] or "Unknown"
+    desired = row["desired_status"] or ""
+    reason = row["waiver_reason"] or ""
+    run_at = format_et(row["run_at"])
+    details = [
+        f"**Waivers:** {player} ({team})",
+        f"Removed from: {removed_from}",
+        f"Waivers run: {run_at}",
+    ]
+    if desired:
+        details.append(f"If unclaimed: {desired}")
+    if reason:
+        details.append(f"Reason: {reason}")
+    send_discord_message(
+        "BNSL_DISCORD_WAIVERS_WEBHOOK_URL",
+        "\n".join(details),
+        fallback_label="waivers",
+    )
+
+
+def notify_waiver_claimed(payload: dict[str, Any]) -> None:
+    """Notify #roster that a waiver claim has been awarded."""
+    player = payload.get("player_name") or "Unknown player"
+    claimed_by = canonical_team_abbr(payload.get("claimed_by_team") or "")
+    waived_from = canonical_team_abbr(payload.get("waived_from_team") or "")
+    restored = payload.get("pre_waiver_status") or "Reserve"
+    run_at = format_et(payload.get("run_at"))
+    content = (
+        f"**Waiver claim awarded:** {claimed_by} claimed {player} from {waived_from}.\n"
+        f"Roster status restored to: {restored}."
+    )
+    if run_at:
+        content += f"\nWaiver run: {run_at}."
+    send_discord_message(
+        "BNSL_DISCORD_ROSTER_WEBHOOK_URL",
+        content,
+        fallback_label="roster",
+    )
 
 
 def ensure_table_column(conn: sqlite3.Connection, table: str, column: str, ddl: str) -> None:
@@ -375,6 +428,7 @@ def process_due_waivers() -> dict[str, int]:
     """
     now = utcnow()
     payments_to_post: list[dict[str, Any]] = []
+    claimed_notifications: list[dict[str, Any]] = []
     processed = 0
     claimed = 0
     unclaimed = 0
@@ -446,6 +500,13 @@ def process_due_waivers() -> dict[str, int]:
                 "amount": WAIVER_CLAIM_FEE,
                 "description": f"Waiver claim fee for {waiver['player_name']}",
             })
+            claimed_notifications.append({
+                "player_name": waiver["player_name"],
+                "claimed_by_team": winner_team,
+                "waived_from_team": waiver["waived_from_team"],
+                "pre_waiver_status": waiver["pre_waiver_status"],
+                "run_at": waiver["run_at"],
+            })
             if winner_team in priority:
                 priority.remove(winner_team)
             priority.append(winner_team)
@@ -490,6 +551,12 @@ def process_due_waivers() -> dict[str, int]:
 
     if processed:
         sync_after_waiver_processing()
+
+    for payload in claimed_notifications:
+        try:
+            notify_waiver_claimed(payload)
+        except Exception:
+            current_app.logger.exception("Failed to post waiver-claim Discord notification")
 
     return {"processed": processed, "claimed": claimed, "unclaimed": unclaimed}
 

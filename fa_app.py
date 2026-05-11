@@ -62,6 +62,7 @@ import logging
 from flask import Blueprint, current_app, has_app_context
 
 from bnsl_paths import cache_path, db_path, generated_path, input_path
+from discord_notifier import send_discord_message
 
 APP_DIR = Path(__file__).resolve().parent
 
@@ -241,6 +242,18 @@ def compute_bid_value_1yr_equiv(aav_m: float, years: int, has_option: bool, hm_m
 
 def fmt_money_m(x: float) -> str:
     return f"${x:.2f}M"
+
+def notify_free_agent_signing(player_name: str, team: str, years: int, has_option: bool, aav_m: float) -> None:
+    """Notify the transactions channel when a bid expires into a signed FA contract."""
+    years = max(1, int(years or 1))
+    option_text = " + club option" if has_option else ""
+    contract_text = f"{years} year{'s' if years != 1 else ''}{option_text} at {fmt_money_m(float(aav_m or 0.0))} AAV"
+    send_discord_message(
+        "BNSL_DISCORD_TRANSACTIONS_WEBHOOK_URL",
+        f"**Free agent signing:** {team} signed {player_name} — {contract_text}.",
+        fallback_label="transactions",
+    )
+
 
 def clamp_int(x: Any, lo: int, hi: int, default: int) -> int:
     try:
@@ -1399,7 +1412,7 @@ def enforce_expirations():
         SELECT
           b.id AS bid_id, b.player_id, b.team, b.expires_at,
           b.years, b.has_option, b.aav_m,
-          p.roster_player_id
+          p.name AS player_name, p.roster_player_id
         FROM bids b
         JOIN free_agents p ON p.id=b.player_id
         WHERE b.status='ACTIVE'
@@ -1419,6 +1432,7 @@ def enforce_expirations():
                 "years": int(r["years"] or 1),
                 "has_option": bool(int(r["has_option"] or 0)),
                 "aav_m": float(r["aav_m"] or 0.0),
+                "player_name": str(r["player_name"] or "").strip(),
                 "roster_player_id": int(r["roster_player_id"] or 0) if r["roster_player_id"] else None,
             })
 
@@ -1440,6 +1454,18 @@ def enforce_expirations():
 
     conn.commit()
     conn.close()
+
+    for item in to_sign:
+        try:
+            notify_free_agent_signing(
+                item.get("player_name") or f"player #{item['player_id']}",
+                item["team"],
+                item["years"],
+                item["has_option"],
+                item["aav_m"],
+            )
+        except Exception:
+            current_app.logger.exception("Failed to post FA signing Discord notification")
 
 def get_current_leader(pid: int) -> Optional[sqlite3.Row]:
     conn = get_conn()
