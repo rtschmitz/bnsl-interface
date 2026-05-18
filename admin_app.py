@@ -46,6 +46,7 @@ admin_bp = Blueprint("admin", __name__)
 ADMIN_PASSWORD = os.environ.get("BNSL_ADMIN_PASSWORD", "bnsladminpass")
 ADMIN_SESSION_KEY = "bnsl_admin_authed"
 CUSTOM_WAIVER_META_KEY = "next_waiver_run_at"
+ROSTER_LOCK_META_KEY = "roster_locked"
 CONTRACT_TYPES = ["R", "A", "FA", "X"]
 ROSTER_STATUS_TYPES = ["Reserve", "40-man", "Active"]
 
@@ -243,6 +244,40 @@ def _ensure_roster_meta(conn: sqlite3.Connection) -> None:
     )
 
 
+def _get_roster_meta(key: str, default: str = "") -> str:
+    conn = get_roster_conn()
+    _ensure_roster_meta(conn)
+    cur = conn.cursor()
+    cur.execute("SELECT value FROM app_meta WHERE key=?", (key,))
+    row = cur.fetchone()
+    conn.close()
+    return str(row["value"] if row else default)
+
+
+def _set_roster_meta(key: str, value: Any) -> None:
+    conn = get_roster_conn()
+    _ensure_roster_meta(conn)
+    conn.execute(
+        """
+        INSERT INTO app_meta(key, value)
+        VALUES (?, ?)
+        ON CONFLICT(key) DO UPDATE SET value=excluded.value
+        """,
+        (key, str(value)),
+    )
+    conn.commit()
+    conn.close()
+
+
+def _is_roster_locked() -> bool:
+    return _get_roster_meta(ROSTER_LOCK_META_KEY, "0").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _set_roster_locked(locked: bool) -> bool:
+    _set_roster_meta(ROSTER_LOCK_META_KEY, "1" if locked else "0")
+    return locked
+
+
 def _set_custom_waiver_date(run_at_utc: datetime) -> dict[str, Any]:
     from waivers_app import ensure_waiver_schema, iso
 
@@ -285,6 +320,19 @@ def _parse_nonnegative_int(value: Any, *, field: str, default: int = 0) -> int:
 
 def _parse_nonnegative_money(value: Any, *, field: str = "Salary", default: float = 0.0) -> float:
     text = str(value if value is not None else "").strip().replace("$", "").replace(",", "")
+    if text == "":
+        return float(default)
+    try:
+        out = float(text)
+    except Exception:
+        raise ValueError(f"{field} must be numeric")
+    if out < 0:
+        raise ValueError(f"{field} cannot be negative")
+    return out
+
+
+def _parse_nonnegative_float(value: Any, *, field: str, default: float = 0.0) -> float:
+    text = str(value if value is not None else "").strip().replace(",", "")
     if text == "":
         return float(default)
     try:
@@ -410,6 +458,8 @@ def _update_player_fields(player_id: int, updates: dict[str, Any]) -> dict[str, 
         clean["contract_type"] = _normalize_contract_type(updates.get("contract_type"))
     if "salary" in updates:
         clean["salary"] = _parse_nonnegative_money(updates.get("salary"), default=float(row["salary"] or 0.0))
+    if "service_time" in updates:
+        clean["service_time"] = _parse_nonnegative_float(updates.get("service_time"), field="Service time", default=float(row["service_time"] or 0.0))
     if "options_remaining" in updates:
         clean["options_remaining"] = _parse_nonnegative_int(updates.get("options_remaining"), field="Player options", default=int(row["options_remaining"] or 0))
     if "contract_option" in updates:
@@ -487,7 +537,7 @@ def _search_roster_players(q: str, limit: int = 25) -> list[dict[str, Any]]:
         f"""
         SELECT
             id, name, position, franchise, roster_status, contract_type, salary,
-            options_remaining, contract_option, contract_expires, fa_class
+            service_time, options_remaining, contract_option, contract_expires, fa_class
         FROM roster_players
         {where}
         ORDER BY unaccent(name) COLLATE NOCASE ASC
@@ -578,6 +628,16 @@ ADMIN_HTML = """
           </form>
         </div>
 
+        <div class="card">
+          <h2>Roster Lock</h2>
+          <p class="muted">When locked, roster-page transactions are blocked: status moves, releases, options, and arbitration decisions. Admin edits still work here.</p>
+          <form method="post" action="toggle-roster-lock">
+            <input type="hidden" name="locked" value="{{ '0' if roster_locked else '1' }}">
+            <div class="pill" style="display:inline-block; margin-bottom:10px;">Status: <b>{{ 'LOCKED' if roster_locked else 'UNLOCKED' }}</b></div>
+            <div><button class="btn {{ '' if roster_locked else 'primary' }}" type="submit">{{ 'Unlock roster' if roster_locked else 'Lock roster' }}</button></div>
+          </form>
+        </div>
+
         <div class="card wide">
           <h2>Modify Player</h2>
           <p class="muted">Search by name, click “Use”, then change franchise and contract/roster fields. These changes write directly to roster.db and refresh Financials, Rosters, FA/Rule V syncs, and active waiver snapshots.</p>
@@ -613,7 +673,10 @@ ADMIN_HTML = """
                 <input id="player-expires" name="contract_expires" placeholder="2026">
               </label>
             </div>
-            <div class="row" style="margin-top:10px;">
+            <div class="row3" style="margin-top:10px;">
+              <label>Service time
+                <input id="player-service-time" name="service_time" inputmode="decimal" placeholder="0.00">
+              </label>
               <label style="display:flex; gap:8px; align-items:center; margin-top:22px;">
                 <input id="player-contract-option" name="contract_option" type="checkbox" value="1" style="width:auto; margin:0;"> Contract has option year
               </label>
@@ -667,6 +730,7 @@ const playerRosterStatus = document.getElementById('player-roster-status');
 const playerSalary = document.getElementById('player-salary');
 const playerOptions = document.getElementById('player-options');
 const playerExpires = document.getElementById('player-expires');
+const playerServiceTime = document.getElementById('player-service-time');
 const playerContractOption = document.getElementById('player-contract-option');
 function esc(s){ return String(s ?? '').replace(/[&<>\"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','\"':'&quot;',"'":'&#39;'}[c])); }
 function setSelectValue(select, value){
@@ -686,7 +750,7 @@ searchBox.addEventListener('input', () => {
     const data = await res.json();
     playersById = Object.fromEntries((data.players || []).map(p => [String(p.id), p]));
     if (!data.players.length) { results.textContent = 'No matching players.'; return; }
-    results.innerHTML = data.players.map(p => `<div><button class="btn" type="button" data-id="${p.id}">Use</button> <b>${esc(p.name)}</b> <span class="muted">#${p.id} • ${esc(p.position || '')} • ${esc(p.franchise || 'FA')} • ${esc(p.roster_status || '')} • ${esc(p.contract_type || '')} • $${Number(p.salary || 0).toLocaleString()}</span></div>`).join('');
+    results.innerHTML = data.players.map(p => `<div><button class="btn" type="button" data-id="${p.id}">Use</button> <b>${esc(p.name)}</b> <span class="muted">#${p.id} • ${esc(p.position || '')} • ${esc(p.franchise || 'FA')} • ${esc(p.roster_status || '')} • ${esc(p.contract_type || '')} • svc ${Number(p.service_time || 0).toFixed(2)} • $${Number(p.salary || 0).toLocaleString()}</span></div>`).join('');
     results.querySelectorAll('button[data-id]').forEach(btn => btn.onclick = () => {
       const p = playersById[String(btn.dataset.id)] || {};
       playerId.value = p.id || '';
@@ -696,6 +760,7 @@ searchBox.addEventListener('input', () => {
       playerSalary.value = p.salary ?? 0;
       playerOptions.value = p.options_remaining ?? 0;
       playerExpires.value = p.contract_expires || '';
+      playerServiceTime.value = Number(p.service_time || 0).toFixed(2);
       playerContractOption.checked = !!Number(p.contract_option || 0);
     });
   }, 200);
@@ -725,6 +790,7 @@ def index():
         contract_types=CONTRACT_TYPES,
         roster_statuses=ROSTER_STATUS_TYPES,
         today=today,
+        roster_locked=_is_roster_locked() if is_admin_authed() else False,
         logs=admin_logs() if is_admin_authed() else [],
         msg=request.args.get("msg", ""),
         err=request.args.get("err", ""),
@@ -819,6 +885,7 @@ def update_player():
             "franchise": request.form.get("team"),
             "contract_type": request.form.get("contract_type"),
             "salary": request.form.get("salary"),
+            "service_time": request.form.get("service_time"),
             "options_remaining": request.form.get("options_remaining"),
             "contract_option": request.form.get("contract_option"),
             "contract_expires": request.form.get("contract_expires"),
@@ -863,6 +930,26 @@ def change_player_franchise():
         return redirect_with(f"Moved {result['player_name']} to {result['new_team']}.", refresh=["roster", "financials", "fa", "rulev", "waivers"])
     except Exception as e:
         current_app.logger.exception("Admin player-franchise change failed")
+        return redirect_with(error=str(e))
+
+
+@admin_bp.post("/toggle-roster-lock")
+def toggle_roster_lock():
+    require_admin()
+    try:
+        locked = _bool_from_form(request.form.get("locked")) == 1
+        _set_roster_locked(locked)
+        log_action(
+            "roster_lock",
+            f"Roster transactions {'locked' if locked else 'unlocked'}",
+            {"locked": locked},
+        )
+        return redirect_with(
+            f"Roster transactions are now {'locked' if locked else 'unlocked'}.",
+            refresh=["roster"],
+        )
+    except Exception as e:
+        current_app.logger.exception("Admin roster-lock toggle failed")
         return redirect_with(error=str(e))
 
 

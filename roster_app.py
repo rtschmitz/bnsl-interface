@@ -36,6 +36,7 @@ CURRENT_FA_CLASS = str(CURRENT_SEASON + 1)
 DRAFT_YEAR = 2025
 DRAFT_ROOKIE_OPTIONS_REMAINING = 3
 ROOKIE_MINIMUM_SALARY = 673_000
+ROSTER_LOCK_META_KEY = "roster_locked"
 
 
 def as_int(val, default=None):
@@ -184,6 +185,35 @@ def get_conn():
     conn.create_function("unaccent", 1, _unaccent)
     return conn
 
+
+def ensure_roster_meta(conn: sqlite3.Connection) -> None:
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS app_meta (
+            key TEXT PRIMARY KEY,
+            value TEXT NOT NULL
+        )
+        """
+    )
+
+
+def is_roster_locked() -> bool:
+    try:
+        conn = get_conn()
+        ensure_roster_meta(conn)
+        cur = conn.cursor()
+        cur.execute("SELECT value FROM app_meta WHERE key=?", (ROSTER_LOCK_META_KEY,))
+        row = cur.fetchone()
+        conn.close()
+        return str(row["value"] if row else "0").strip().lower() in {"1", "true", "yes", "on"}
+    except Exception:
+        current_app.logger.exception("Could not read roster lock state")
+        return False
+
+
+def reject_if_roster_locked():
+    if is_roster_locked():
+        abort(423, "Roster transactions are currently locked by the commissioner")
 
 
 def roster_status_from_csv(
@@ -745,6 +775,7 @@ def sync_drafted_players_from_draft_db(conn: sqlite3.Connection | None = None) -
 def bootstrap_roster():
     conn = get_conn()
     cur = conn.cursor()
+    ensure_roster_meta(conn)
 
     cur.execute("""
         CREATE TABLE IF NOT EXISTS roster_players (
@@ -998,6 +1029,7 @@ def api_players():
     fa_class_filter = (request.args.get("fa_class") or "").strip()
     rulev_only = (request.args.get("rulev_only") == "1")
     contract_decisions_only = (request.args.get("contract_decisions_only") == "1")
+    roster_locked = is_roster_locked()
     forty_man_count = None
     active_count = None
     
@@ -1101,12 +1133,12 @@ def api_players():
             "contract_decision_pending": pending_option or pending_arb,
             "arbitration_decision": row_value(r, "arbitration_decision", "") or "",
             "option_decision": row_value(r, "option_decision", "") or "",
-            "can_edit_status": can_edit,
-            "can_release": can_edit and not (pending_option or pending_arb),
-            "can_exercise_option": can_edit and pending_option,
-            "can_decline_option": can_edit and pending_option,
-            "can_tender_arbitration": can_edit and pending_arb,
-            "can_decline_arbitration": can_edit and pending_arb,
+            "can_edit_status": can_edit and not roster_locked,
+            "can_release": can_edit and not roster_locked and not (pending_option or pending_arb),
+            "can_exercise_option": can_edit and not roster_locked and pending_option,
+            "can_decline_option": can_edit and not roster_locked and pending_option,
+            "can_tender_arbitration": can_edit and not roster_locked and pending_arb,
+            "can_decline_arbitration": can_edit and not roster_locked and pending_arb,
         })
 
     return jsonify({
@@ -1118,6 +1150,7 @@ def api_players():
         "fa_classes": FA_CLASSES,
         "forty_man_count": forty_man_count,
         "active_count": active_count,
+        "roster_locked": roster_locked,
 
     })
 
@@ -1144,6 +1177,7 @@ def api_status():
         "authed_team": canonical_team_abbr(session.get("roster_authed_team", "")),
         "authed_email": session.get("roster_authed_email", ""),
         "teams": TEAM_ABBRS,
+        "roster_locked": is_roster_locked(),
     })
 
 
@@ -1185,6 +1219,7 @@ def safe_notify_waiver_created(waiver_id: int | None) -> None:
 @roster_bp.post("/api/update_player")
 def api_update_player():
     team = require_roster_team()
+    reject_if_roster_locked()
     data = request.get_json(force=True, silent=True) or {}
 
     player_id = int(data.get("id") or 0)
@@ -1276,6 +1311,7 @@ def api_update_player():
 @roster_bp.post("/api/player_action")
 def api_player_action():
     team = require_roster_team()
+    reject_if_roster_locked()
     data = request.get_json(force=True, silent=True) or {}
     player_id = int(data.get("id") or 0)
     action = (data.get("action") or "").strip().lower()
@@ -1445,6 +1481,7 @@ ROSTER_HTML = """
       <input id="search" type="text" placeholder="Search players...">
       <button id="login-btn">Login</button>
       <span id="login-status">Not logged in</span>
+      <span id="roster-lock-status" class="pill" style="display:none;"></span>
       <span id="forty-man-count" style="display:none;"></span>
     </div>
 
@@ -1482,6 +1519,7 @@ const rulevOnly = document.getElementById("rulev-only");
 const contractDecisionsOnly = document.getElementById("contract-decisions-only");
 const loginBtn = document.getElementById("login-btn");
 const loginStatus = document.getElementById("login-status");
+const rosterLockStatus = document.getElementById("roster-lock-status");
 const fortyManCount = document.getElementById("forty-man-count");
 
 let state = {
@@ -1494,6 +1532,7 @@ let state = {
   faClass: "",
   rulevOnly: false,
   contractDecisionsOnly: false,
+  rosterLocked: false,
 };
 
 function esc(s) {
@@ -1513,6 +1552,9 @@ async function fetchStatus() {
   const res = await fetch("api/status");
   const data = await res.json();
   state.authedTeam = data.authed_team || "";
+  state.rosterLocked = !!data.roster_locked;
+  rosterLockStatus.textContent = state.rosterLocked ? "Roster locked" : "";
+  rosterLockStatus.style.display = state.rosterLocked ? "inline-block" : "none";
   loginStatus.textContent = state.authedTeam
     ? `Logged in for ${state.authedTeam}`
     : "Not logged in";
@@ -1525,6 +1567,9 @@ function actionButton(label, action, playerId, enabled, danger=false) {
 }
 
 function actionHtml(p) {
+  if (state.rosterLocked && (p.can_edit_status || p.can_release || p.can_exercise_option || p.can_decline_option || p.can_tender_arbitration || p.can_decline_arbitration)) {
+    return `<span class="muted">Locked</span>`;
+  }
   const bits = [];
   if (p.contract_decision_pending) {
     bits.push(`<span class="decision">Decision pending</span>`);
@@ -1534,6 +1579,9 @@ function actionHtml(p) {
   bits.push(actionButton("Decline option", "decline_option", p.id, p.can_decline_option, true));
   bits.push(actionButton("Tender arb", "tender_arbitration", p.id, p.can_tender_arbitration));
   bits.push(actionButton("Non-tender", "decline_arbitration", p.id, p.can_decline_arbitration, true));
+  if (state.rosterLocked && p.team && state.authedTeam && p.team === state.authedTeam) {
+    bits.push(`<span class="muted">Locked</span>`);
+  }
   return bits.filter(Boolean).join(" ") || `<span class="muted">—</span>`;
 }
 
@@ -1551,6 +1599,9 @@ async function fetchPlayers() {
 
   const res = await fetch("api/players?" + params.toString());
   const data = await res.json();
+  state.rosterLocked = !!data.roster_locked;
+  rosterLockStatus.textContent = state.rosterLocked ? "Roster locked" : "";
+  rosterLockStatus.style.display = state.rosterLocked ? "inline-block" : "none";
 
   makeOptions(teamFilter, data.teams || [], "All teams");
   makeOptions(contractFilter, data.contract_types || [], "All contracts");
