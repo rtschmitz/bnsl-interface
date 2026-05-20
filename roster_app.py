@@ -411,8 +411,27 @@ def normalize_roster_contract_types(conn: sqlite3.Connection) -> None:
 
 
 def pending_option_decision(row: sqlite3.Row) -> bool:
-    return bool(row_value(row, "franchise", "")) and bool(int(row_value(row, "contract_option", 0) or 0))
+    decision = str(row_value(row, "option_decision", "") or "").strip()
+    contract_type = str(row_value(row, "contract_type", "") or "").strip().upper()
+    row_fa_class = compute_fa_class(row)
+    try:
+        fa_year = int(row_fa_class)
+        option_decision_fa_year = int(CURRENT_FA_CLASS) + 1
+    except Exception:
+        return False
 
+    # After the 2025 season, CURRENT_FA_CLASS is 2026.
+    # FA class 2027 means the option year is 2026, so those FA-contract
+    # team-option decisions are due now.  FA class 2028+ options are future
+    # decisions and should not prompt.  Arbitration rows are intentionally
+    # excluded; they are handled by pending_arbitration_decision instead.
+    return (
+        bool(row_value(row, "franchise", ""))
+        and contract_type == "FA"
+        and bool(int(row_value(row, "contract_option", 0) or 0))
+        and fa_year == option_decision_fa_year
+        and decision == ""
+    )
 
 def pending_arbitration_decision(row: sqlite3.Row) -> bool:
     decision = str(row_value(row, "arbitration_decision", "") or "").strip()
