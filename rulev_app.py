@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import os
+import csv
+import io
 import logging
 import re
 import sqlite3
@@ -14,6 +16,200 @@ from flask import Blueprint, current_app, has_app_context, request, jsonify, ses
 # Reuse teams + emails from your main draft app
 from team_config import MLB_TEAMS, TEAM_EMAILS, team_abbr_for_name, emails_equal
 from ui_skin import BNSL_GAME_CSS
+
+SORTABLE_TABLES_ASSETS = r"""
+<style>
+  table[data-sortable="true"] th.bnsl-sortable-header {
+    cursor: pointer;
+    user-select: none;
+    white-space: nowrap;
+  }
+  table[data-sortable="true"] th.bnsl-sortable-header:hover {
+    filter: brightness(1.18);
+  }
+  table[data-sortable="true"] th.bnsl-sortable-header:focus {
+    outline: 2px solid rgba(140,170,255,.55);
+    outline-offset: -2px;
+  }
+  .bnsl-sort-arrow {
+    opacity: 0.78;
+    margin-left: 6px;
+    font-size: 11px;
+  }
+</style>
+<script>
+(function () {
+  const DISABLED_HEADER_NAMES = new Set(["action", "actions", "reorder", "controls"]);
+
+  function cellText(row, colIndex) {
+    const cell = row.cells[colIndex];
+    if (!cell) return "";
+    return (cell.getAttribute("data-sort") || cell.textContent || "").trim();
+  }
+
+  function valueForSort(text) {
+    const raw = String(text || "").trim();
+    if (!raw || raw === "—" || raw === "-") return { empty: true, type: "text", value: "" };
+
+    const maybeDate = raw.match(/^\d{4}-\d{2}-\d{2}/) ? Date.parse(raw) : NaN;
+    if (Number.isFinite(maybeDate)) return { empty: false, type: "number", value: maybeDate };
+
+    let compact = raw
+      .replace(/[,$£€]/g, "")
+      .replace(/\s+/g, "")
+      .trim();
+
+    let multiplier = 1;
+    if (/m$/i.test(compact)) {
+      multiplier = 1000000;
+      compact = compact.slice(0, -1);
+    } else if (/k$/i.test(compact)) {
+      multiplier = 1000;
+      compact = compact.slice(0, -1);
+    } else if (/%$/.test(compact)) {
+      compact = compact.slice(0, -1);
+    }
+
+    let neg = false;
+    const paren = compact.match(/^\((.*)\)$/);
+    if (paren) {
+      neg = true;
+      compact = paren[1];
+    }
+
+    if (/^[+-]?\d+(\.\d+)?$/.test(compact)) {
+      let num = Number(compact) * multiplier;
+      if (neg) num = -num;
+      if (Number.isFinite(num)) return { empty: false, type: "number", value: num };
+    }
+
+    return { empty: false, type: "text", value: raw.toLocaleLowerCase() };
+  }
+
+  function compareSortValues(a, b, dir) {
+    if (a.value.empty && !b.value.empty) return 1;
+    if (!a.value.empty && b.value.empty) return -1;
+    if (a.value.empty && b.value.empty) return a.index - b.index;
+
+    let cmp = 0;
+    if (a.value.type === "number" && b.value.type === "number") {
+      cmp = a.value.value - b.value.value;
+    } else {
+      cmp = String(a.value.value).localeCompare(String(b.value.value), undefined, {
+        numeric: true,
+        sensitivity: "base"
+      });
+    }
+
+    if (cmp === 0) return a.index - b.index;
+    return dir === "desc" ? -cmp : cmp;
+  }
+
+  function clearIndicators(table) {
+    table.querySelectorAll("th.bnsl-sortable-header").forEach(th => {
+      th.setAttribute("aria-sort", "none");
+      const arrow = th.querySelector(".bnsl-sort-arrow");
+      if (arrow) arrow.remove();
+    });
+  }
+
+  function markIndicator(table, th, dir) {
+    clearIndicators(table);
+    th.setAttribute("aria-sort", dir === "asc" ? "ascending" : "descending");
+    const arrow = document.createElement("span");
+    arrow.className = "bnsl-sort-arrow";
+    arrow.textContent = dir === "asc" ? "▲" : "▼";
+    th.appendChild(arrow);
+  }
+
+  function sortTable(table, colIndex, th, toggle) {
+    const tbody = table.tBodies && table.tBodies[0];
+    if (!tbody) return;
+
+    let dir = "asc";
+    if (toggle && table.dataset.sortCol === String(colIndex)) {
+      dir = table.dataset.sortDir === "asc" ? "desc" : "asc";
+    } else if (!toggle && table.dataset.sortDir) {
+      dir = table.dataset.sortDir;
+    }
+
+    table.dataset.bnslSorting = "1";
+    table.dataset.bnslIgnoreMutation = "1";
+    const rows = Array.from(tbody.rows).map((row, index) => ({
+      row,
+      index,
+      value: valueForSort(cellText(row, colIndex))
+    }));
+    rows.sort((a, b) => compareSortValues(a, b, dir));
+    rows.forEach(item => tbody.appendChild(item.row));
+    table.dataset.sortCol = String(colIndex);
+    table.dataset.sortDir = dir;
+    table.dataset.bnslSorting = "0";
+
+    if (th) markIndicator(table, th, dir);
+  }
+
+  function initSortableTable(table) {
+    if (!table || table.dataset.bnslSortInit === "1") return;
+    const headerRow = table.tHead && table.tHead.rows.length ? table.tHead.rows[0] : null;
+    if (!headerRow) return;
+
+    Array.from(headerRow.cells).forEach((th, colIndex) => {
+      const label = (th.textContent || "").trim().toLocaleLowerCase();
+      if (th.dataset.noSort === "true" || th.dataset.sortDisabled === "true" || DISABLED_HEADER_NAMES.has(label)) return;
+
+      th.classList.add("bnsl-sortable-header");
+      th.setAttribute("role", "button");
+      th.setAttribute("tabindex", "0");
+      th.setAttribute("aria-sort", "none");
+      th.addEventListener("click", () => sortTable(table, colIndex, th, true));
+      th.addEventListener("keydown", (ev) => {
+        if (ev.key === "Enter" || ev.key === " ") {
+          ev.preventDefault();
+          sortTable(table, colIndex, th, true);
+        }
+      });
+    });
+
+    const tbody = table.tBodies && table.tBodies[0];
+    if (tbody && "MutationObserver" in window) {
+      let queued = false;
+      const observer = new MutationObserver(() => {
+        if (table.dataset.bnslIgnoreMutation === "1") {
+          table.dataset.bnslIgnoreMutation = "0";
+          return;
+        }
+        if (table.dataset.bnslSorting === "1") return;
+        if (!table.dataset.sortCol) return;
+        if (queued) return;
+        queued = true;
+        window.requestAnimationFrame(() => {
+          queued = false;
+          const colIndex = Number(table.dataset.sortCol);
+          const th = headerRow.cells[colIndex];
+          if (th) sortTable(table, colIndex, th, false);
+        });
+      });
+      observer.observe(tbody, { childList: true });
+    }
+
+    table.dataset.bnslSortInit = "1";
+  }
+
+  function initAllSortableTables() {
+    document.querySelectorAll('table[data-sortable="true"]').forEach(initSortableTable);
+  }
+
+  if (document.readyState === "loading") {
+    document.addEventListener("DOMContentLoaded", initAllSortableTables);
+  } else {
+    initAllSortableTables();
+  }
+  window.BNSLSortableTables = { initAll: initAllSortableTables };
+})();
+</script>
+"""
+
 from bnsl_paths import db_path
 from discord_notifier import send_discord_message
 
@@ -118,6 +314,9 @@ def init_db():
     ensure_column(conn, "rulev_players", "rulev_eligible", "rulev_eligible INTEGER NOT NULL DEFAULT 1")
     ensure_column(conn, "rulev_players", "last_seen_roster_sync", "last_seen_roster_sync TEXT")
     ensure_column(conn, "rulev_players", "removed_from_roster_sync", "removed_from_roster_sync TEXT")
+    ensure_column(conn, "rulev_players", "ovr", "ovr INTEGER")
+    ensure_column(conn, "rulev_players", "pot", "pot INTEGER")
+    ensure_column(conn, "rulev_players", "def", "def INTEGER")
 
     cur.execute("""
       CREATE UNIQUE INDEX IF NOT EXISTS rulev_players_roster_player_id_uq
@@ -152,6 +351,25 @@ def get_roster_db_path() -> Path:
 def _safe_float(value: Any, default: float = 0.0) -> float:
     try:
         return float(value or 0.0)
+    except Exception:
+        return default
+
+
+def _safe_optional_int(value: Any) -> int | None:
+    if value is None:
+        return None
+    text = str(value).strip()
+    if not text:
+        return None
+    try:
+        return int(float(text))
+    except Exception:
+        return None
+
+
+def _row_value(row: sqlite3.Row, key: str, default: Any = None) -> Any:
+    try:
+        return row[key] if key in row.keys() else default
     except Exception:
         return default
 
@@ -401,6 +619,9 @@ def sync_rulev_from_roster_db() -> tuple[int, int, int]:
         dob = _normalize_roster_dob(r["date_of_birth"] if "date_of_birth" in r.keys() else "")
         contract_type = str(r["contract_type"] or "").strip().upper()
         roster_status = str(r["roster_status"] or "").strip()
+        ovr = _safe_optional_int(_row_value(r, "ovr", None))
+        pot = _safe_optional_int(_row_value(r, "pot", None))
+        def_rating = _safe_optional_int(_row_value(r, "def", None))
 
         cur.execute("SELECT id FROM rulev_players WHERE roster_player_id=?", (roster_player_id,))
         existing = cur.fetchone()
@@ -413,13 +634,16 @@ def sync_rulev_from_roster_db() -> tuple[int, int, int]:
                     dob=?,
                     contract_type=?,
                     roster_status=?,
+                    ovr=?,
+                    pot=?,
+                    def=?,
                     roster_source='roster_db',
                     rulev_eligible=1,
                     last_seen_roster_sync=?,
                     removed_from_roster_sync=NULL
                 WHERE id=?
             """, (
-                name, position, org, dob, contract_type, roster_status,
+                name, position, org, dob, contract_type, roster_status, ovr, pot, def_rating,
                 now, int(existing["id"]),
             ))
         else:
@@ -428,14 +652,14 @@ def sync_rulev_from_roster_db() -> tuple[int, int, int]:
                     name, position, org,
                     drafted_by, drafted_at,
                     roster_player_id, dob, contract_type, roster_status,
-                    roster_source, rulev_eligible,
+                    ovr, pot, def, roster_source, rulev_eligible,
                     last_seen_roster_sync, removed_from_roster_sync
-                ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)
+                ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
             """, (
                 name, position, org,
                 None, None,
                 roster_player_id, dob, contract_type, roster_status,
-                "roster_db", 1,
+                ovr, pot, def_rating, "roster_db", 1,
                 now, None,
             ))
         upserted += 1
@@ -546,6 +770,7 @@ __BNSL_GAME_CSS__
         <h1>RULE V DRAFT</h1>
       </div>
       <div class="right">
+        <a class="btn" href="/rulev/export.csv">Export CSV</a>
         <a class="btn primary" href="/rulev/order">Order & Times →</a>
       </div>
     </div>
@@ -586,13 +811,16 @@ __BNSL_GAME_CSS__
       <hr class="sep"/>
 
       <div class="table-wrap">
-        <table>
+        <table data-sortable="true">
           <thead>
             <tr>
               <th style="width:26%;">Name</th>
-              <th style="width:10%;">Pos</th>
-              <th style="width:12%;">Org</th>
-              <th style="width:26%;">Picked By</th>
+              <th style="width:8%;">Pos</th>
+              <th style="width:10%;">Org</th>
+              <th style="width:6%;">OVR</th>
+              <th style="width:6%;">POT</th>
+              <th style="width:6%;">DEF</th>
+              <th style="width:22%;">Picked By</th>
               <th style="width:16%;">Picked At</th>
               <th style="width:10%;">Action</th>
             </tr>
@@ -613,6 +841,7 @@ const search = document.getElementById('search');
 let state = { search:'', selectedTeam:'', authed:false, authedEmail:'', current:null, players:[] };
 
 function fmtIso(s){ if(!s) return ''; try { return new Date(s).toLocaleString(); } catch { return s; } }
+function rating(x){ return (x === null || x === undefined || x === '') ? '—' : String(x); }
 
 function setTeams(teams){
   teamSel.innerHTML = '<option value="">— Select Team —</option>' + teams.map(t => `<option value="${t}">${t}</option>`).join('');
@@ -693,6 +922,9 @@ function render(){
       <td><b>${p.name}</b></td>
       <td>${p.position || '—'}</td>
       <td>${p.org || '—'}</td>
+      <td>${rating(p.ovr)}</td>
+      <td>${rating(p.pot)}</td>
+      <td>${rating(p.def)}</td>
       <td>${p.drafted_by || ''}</td>
       <td>${fmtIso(p.drafted_at) || ''}</td>
     `;
@@ -734,7 +966,7 @@ loginBtn.addEventListener('click', async ()=>{
 </body>
 </html>
 """
-INDEX_HTML = INDEX_HTML.replace("__BNSL_GAME_CSS__", BNSL_GAME_CSS)
+INDEX_HTML = INDEX_HTML.replace("__BNSL_GAME_CSS__", BNSL_GAME_CSS + SORTABLE_TABLES_ASSETS)
 
 
 
@@ -750,6 +982,30 @@ def _ensure_schema_once():
         seed_default_order_if_empty()
         _schema_bootstrapped = True
 
+
+
+def _csv_response_for_table(conn: sqlite3.Connection, table: str, filename: str):
+    cur = conn.cursor()
+    cur.execute(f"PRAGMA table_info({table})")
+    columns = [row[1] for row in cur.fetchall()]
+    output = io.StringIO()
+    writer = csv.writer(output)
+    writer.writerow(columns)
+    order_clause = " ORDER BY id" if "id" in columns else ""
+    cur.execute(f"SELECT * FROM {table}{order_clause}")
+    for row in cur.fetchall():
+        writer.writerow([row[col] for col in columns])
+    conn.close()
+    return current_app.response_class(
+        output.getvalue(),
+        mimetype="text/csv",
+        headers={"Content-Disposition": f"attachment; filename={filename}"},
+    )
+
+
+@rulev_bp.get("/export.csv")
+def export_rulev_csv():
+    return _csv_response_for_table(get_conn(), "rulev_players", "rulev_players.csv")
 
 @rulev_bp.get("/")
 def index():
@@ -848,6 +1104,9 @@ def api_players():
             "dob": r["dob"] if "dob" in r.keys() else "",
             "roster_player_id": int(r["roster_player_id"] or 0) if "roster_player_id" in r.keys() else None,
             "rulev_eligible": bool(int(r["rulev_eligible"] or 0)) if "rulev_eligible" in r.keys() else True,
+            "ovr": _row_value(r, "ovr", None),
+            "pot": _row_value(r, "pot", None),
+            "def": _row_value(r, "def", None),
             "drafted_by": r["drafted_by"],
             "drafted_at": r["drafted_at"],
         })

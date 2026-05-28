@@ -25,6 +25,200 @@ except Exception:  # lets the parser/database builder run outside the full app t
     </style>
     """
 
+
+SORTABLE_TABLES_ASSETS = r"""
+<style>
+  table[data-sortable="true"] th.bnsl-sortable-header {
+    cursor: pointer;
+    user-select: none;
+    white-space: nowrap;
+  }
+  table[data-sortable="true"] th.bnsl-sortable-header:hover {
+    filter: brightness(1.18);
+  }
+  table[data-sortable="true"] th.bnsl-sortable-header:focus {
+    outline: 2px solid rgba(140,170,255,.55);
+    outline-offset: -2px;
+  }
+  .bnsl-sort-arrow {
+    opacity: 0.78;
+    margin-left: 6px;
+    font-size: 11px;
+  }
+</style>
+<script>
+(function () {
+  const DISABLED_HEADER_NAMES = new Set(["action", "actions", "reorder", "controls"]);
+
+  function cellText(row, colIndex) {
+    const cell = row.cells[colIndex];
+    if (!cell) return "";
+    return (cell.getAttribute("data-sort") || cell.textContent || "").trim();
+  }
+
+  function valueForSort(text) {
+    const raw = String(text || "").trim();
+    if (!raw || raw === "—" || raw === "-") return { empty: true, type: "text", value: "" };
+
+    const maybeDate = raw.match(/^\d{4}-\d{2}-\d{2}/) ? Date.parse(raw) : NaN;
+    if (Number.isFinite(maybeDate)) return { empty: false, type: "number", value: maybeDate };
+
+    let compact = raw
+      .replace(/[,$£€]/g, "")
+      .replace(/\s+/g, "")
+      .trim();
+
+    let multiplier = 1;
+    if (/m$/i.test(compact)) {
+      multiplier = 1000000;
+      compact = compact.slice(0, -1);
+    } else if (/k$/i.test(compact)) {
+      multiplier = 1000;
+      compact = compact.slice(0, -1);
+    } else if (/%$/.test(compact)) {
+      compact = compact.slice(0, -1);
+    }
+
+    let neg = false;
+    const paren = compact.match(/^\((.*)\)$/);
+    if (paren) {
+      neg = true;
+      compact = paren[1];
+    }
+
+    if (/^[+-]?\d+(\.\d+)?$/.test(compact)) {
+      let num = Number(compact) * multiplier;
+      if (neg) num = -num;
+      if (Number.isFinite(num)) return { empty: false, type: "number", value: num };
+    }
+
+    return { empty: false, type: "text", value: raw.toLocaleLowerCase() };
+  }
+
+  function compareSortValues(a, b, dir) {
+    if (a.value.empty && !b.value.empty) return 1;
+    if (!a.value.empty && b.value.empty) return -1;
+    if (a.value.empty && b.value.empty) return a.index - b.index;
+
+    let cmp = 0;
+    if (a.value.type === "number" && b.value.type === "number") {
+      cmp = a.value.value - b.value.value;
+    } else {
+      cmp = String(a.value.value).localeCompare(String(b.value.value), undefined, {
+        numeric: true,
+        sensitivity: "base"
+      });
+    }
+
+    if (cmp === 0) return a.index - b.index;
+    return dir === "desc" ? -cmp : cmp;
+  }
+
+  function clearIndicators(table) {
+    table.querySelectorAll("th.bnsl-sortable-header").forEach(th => {
+      th.setAttribute("aria-sort", "none");
+      const arrow = th.querySelector(".bnsl-sort-arrow");
+      if (arrow) arrow.remove();
+    });
+  }
+
+  function markIndicator(table, th, dir) {
+    clearIndicators(table);
+    th.setAttribute("aria-sort", dir === "asc" ? "ascending" : "descending");
+    const arrow = document.createElement("span");
+    arrow.className = "bnsl-sort-arrow";
+    arrow.textContent = dir === "asc" ? "▲" : "▼";
+    th.appendChild(arrow);
+  }
+
+  function sortTable(table, colIndex, th, toggle) {
+    const tbody = table.tBodies && table.tBodies[0];
+    if (!tbody) return;
+
+    let dir = "asc";
+    if (toggle && table.dataset.sortCol === String(colIndex)) {
+      dir = table.dataset.sortDir === "asc" ? "desc" : "asc";
+    } else if (!toggle && table.dataset.sortDir) {
+      dir = table.dataset.sortDir;
+    }
+
+    table.dataset.bnslSorting = "1";
+    table.dataset.bnslIgnoreMutation = "1";
+    const rows = Array.from(tbody.rows).map((row, index) => ({
+      row,
+      index,
+      value: valueForSort(cellText(row, colIndex))
+    }));
+    rows.sort((a, b) => compareSortValues(a, b, dir));
+    rows.forEach(item => tbody.appendChild(item.row));
+    table.dataset.sortCol = String(colIndex);
+    table.dataset.sortDir = dir;
+    table.dataset.bnslSorting = "0";
+
+    if (th) markIndicator(table, th, dir);
+  }
+
+  function initSortableTable(table) {
+    if (!table || table.dataset.bnslSortInit === "1") return;
+    const headerRow = table.tHead && table.tHead.rows.length ? table.tHead.rows[0] : null;
+    if (!headerRow) return;
+
+    Array.from(headerRow.cells).forEach((th, colIndex) => {
+      const label = (th.textContent || "").trim().toLocaleLowerCase();
+      if (th.dataset.noSort === "true" || th.dataset.sortDisabled === "true" || DISABLED_HEADER_NAMES.has(label)) return;
+
+      th.classList.add("bnsl-sortable-header");
+      th.setAttribute("role", "button");
+      th.setAttribute("tabindex", "0");
+      th.setAttribute("aria-sort", "none");
+      th.addEventListener("click", () => sortTable(table, colIndex, th, true));
+      th.addEventListener("keydown", (ev) => {
+        if (ev.key === "Enter" || ev.key === " ") {
+          ev.preventDefault();
+          sortTable(table, colIndex, th, true);
+        }
+      });
+    });
+
+    const tbody = table.tBodies && table.tBodies[0];
+    if (tbody && "MutationObserver" in window) {
+      let queued = false;
+      const observer = new MutationObserver(() => {
+        if (table.dataset.bnslIgnoreMutation === "1") {
+          table.dataset.bnslIgnoreMutation = "0";
+          return;
+        }
+        if (table.dataset.bnslSorting === "1") return;
+        if (!table.dataset.sortCol) return;
+        if (queued) return;
+        queued = true;
+        window.requestAnimationFrame(() => {
+          queued = false;
+          const colIndex = Number(table.dataset.sortCol);
+          const th = headerRow.cells[colIndex];
+          if (th) sortTable(table, colIndex, th, false);
+        });
+      });
+      observer.observe(tbody, { childList: true });
+    }
+
+    table.dataset.bnslSortInit = "1";
+  }
+
+  function initAllSortableTables() {
+    document.querySelectorAll('table[data-sortable="true"]').forEach(initSortableTable);
+  }
+
+  if (document.readyState === "loading") {
+    document.addEventListener("DOMContentLoaded", initAllSortableTables);
+  } else {
+    initAllSortableTables();
+  }
+  window.BNSLSortableTables = { initAll: initAllSortableTables };
+})();
+</script>
+"""
+
 from team_config import (
     TEAM_EMAILS_BY_ABBR as TEAM_EMAILS,
     TEAM_ABBRS,
@@ -1394,7 +1588,7 @@ TRADES_HTML = r"""
         </div>
 
         <div class="table-wrap">
-          <table>
+          <table data-sortable="true">
             <thead><tr><th style="width:11%;">Date</th><th style="width:29%;">Trade</th><th>Assets</th></tr></thead>
             <tbody>
               {% for row in trade_rows %}
@@ -1473,7 +1667,7 @@ TRADES_HTML = r"""
           </div>
         </div>
         <div class="table-wrap">
-          <table>
+          <table data-sortable="true">
             <thead><tr><th style="width:10%;">Year</th><th style="width:10%;">Round</th><th style="width:22%;">Original Pick</th><th style="width:22%;">Current Owner</th><th>Last Movement</th></tr></thead>
             <tbody>
               {% for row in stock_rows %}
@@ -1676,7 +1870,7 @@ loadAuth();
 </script>
 </body>
 </html>
-""".replace("__BNSL_GAME_CSS__", BNSL_GAME_CSS)
+""".replace("__BNSL_GAME_CSS__", BNSL_GAME_CSS + SORTABLE_TABLES_ASSETS)
 
 
 @trades_bp.route("/")

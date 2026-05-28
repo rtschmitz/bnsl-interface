@@ -41,6 +41,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 import csv
+import io
 import math
 import os
 import sqlite3
@@ -298,6 +299,9 @@ def init_db():
     ensure_column(conn, "free_agents", "fg_url", "fg_url TEXT")
     ensure_column(conn, "free_agents", "franchise_abbr", "franchise_abbr TEXT")
     ensure_column(conn, "free_agents", "htd", "htd INTEGER")  # mirror of HTD (0/1/2)
+    ensure_column(conn, "free_agents", "ovr", "ovr INTEGER")
+    ensure_column(conn, "free_agents", "pot", "pot INTEGER")
+    ensure_column(conn, "free_agents", "def", "def INTEGER")
 
     # --- roster-sync columns: free_agents is now populated from the roster tab/CSV ---
     ensure_column(conn, "free_agents", "roster_player_id", "roster_player_id INTEGER")
@@ -620,6 +624,9 @@ def ensure_roster_fa_import_columns(conn: sqlite3.Connection) -> None:
     ensure_roster_column(conn, "bbref_id", "bbref_id TEXT")
     ensure_roster_column(conn, "bbrefminors_id", "bbrefminors_id TEXT")
     ensure_roster_column(conn, "ootp_id", "ootp_id INTEGER")
+    ensure_roster_column(conn, "ovr", "ovr INTEGER")
+    ensure_roster_column(conn, "pot", "pot INTEGER")
+    ensure_roster_column(conn, "def", "def INTEGER")
     ensure_roster_column(conn, "ootp_fa_imported_at", "ootp_fa_imported_at TEXT")
     ensure_roster_column(conn, "ootp_fa_last_seen", "ootp_fa_last_seen TEXT")
 
@@ -652,6 +659,18 @@ def _safe_int(value: Any, default: int = 0) -> int:
         return int(float(str(value or "").strip()))
     except Exception:
         return default
+
+
+def _optional_int(value: Any) -> int | None:
+    if value is None:
+        return None
+    text = str(value).strip()
+    if not text:
+        return None
+    try:
+        return int(float(text))
+    except Exception:
+        return None
 
 
 def _safe_float(value: Any, default: float = 0.0) -> float:
@@ -1213,6 +1232,9 @@ def sync_free_agents_from_roster_db() -> tuple[int, int]:
             continue
         pos = str(r["position"] or "").strip()
         last_team = roster_code_to_team(r["franchise"] if "franchise" in r.keys() else "")
+        ovr = _optional_int(r["ovr"] if "ovr" in r.keys() else None)
+        pot = _optional_int(r["pot"] if "pot" in r.keys() else None)
+        def_rating = _optional_int(r["def"] if "def" in r.keys() else None)
 
         existing_id = _find_existing_free_agent_id(cur, roster_id, mlbam_id, fg_id, name)
 
@@ -1221,15 +1243,15 @@ def sync_free_agents_from_roster_db() -> tuple[int, int]:
                 INSERT INTO free_agents(
                     name, position, last_team,
                     hometown_team, hometown_seasons, seed_qo,
-                    mlbam_id, fangraphs_id,
+                    mlbam_id, fangraphs_id, ovr, pot, def,
                     roster_player_id, roster_source, is_roster_unrostered,
                     last_seen_roster_sync, removed_from_roster_sync
                 )
-                VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)
+                VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
             """, (
                 name, pos, last_team,
                 "", 0, 0,
-                mlbam_id, fg_id,
+                mlbam_id, fg_id, ovr, pot, def_rating,
                 roster_id, "roster_db", 1,
                 now_text, None,
             ))
@@ -1241,6 +1263,9 @@ def sync_free_agents_from_roster_db() -> tuple[int, int]:
                     last_team=COALESCE(NULLIF(?, ''), last_team),
                     mlbam_id=COALESCE(?, mlbam_id),
                     fangraphs_id=COALESCE(?, fangraphs_id),
+                    ovr=?,
+                    pot=?,
+                    def=?,
                     roster_player_id=?,
                     roster_source='roster_db',
                     is_roster_unrostered=1,
@@ -1248,7 +1273,7 @@ def sync_free_agents_from_roster_db() -> tuple[int, int]:
                     removed_from_roster_sync=NULL
                 WHERE id=?
             """, (
-                name, pos, last_team, mlbam_id, fg_id,
+                name, pos, last_team, mlbam_id, fg_id, ovr, pot, def_rating,
                 roster_id, now_text, existing_id,
             ))
         upserted += 1
@@ -1494,6 +1519,9 @@ def player_snapshot_row(p: sqlite3.Row) -> Dict[str, Any]:
 
         "name": p["name"],
         "position": p["position"],
+        "ovr": p["ovr"] if "ovr" in p.keys() else None,
+        "pot": p["pot"] if "pot" in p.keys() else None,
+        "def": p["def"] if "def" in p.keys() else None,
         "last_team": p["last_team"],
         "hometown_team": p["hometown_team"],
         "hometown_seasons": int(p["hometown_seasons"] or 0),
@@ -1697,6 +1725,200 @@ def bootstrap_fa():
     seed_qualifying_offers(qo_aav_m=21.2)
 
 # ---------- UI (templates) ----------
+
+SORTABLE_TABLES_ASSETS = r"""
+<style>
+  table[data-sortable="true"] th.bnsl-sortable-header {
+    cursor: pointer;
+    user-select: none;
+    white-space: nowrap;
+  }
+  table[data-sortable="true"] th.bnsl-sortable-header:hover {
+    filter: brightness(1.18);
+  }
+  table[data-sortable="true"] th.bnsl-sortable-header:focus {
+    outline: 2px solid rgba(140,170,255,.55);
+    outline-offset: -2px;
+  }
+  .bnsl-sort-arrow {
+    opacity: 0.78;
+    margin-left: 6px;
+    font-size: 11px;
+  }
+</style>
+<script>
+(function () {
+  const DISABLED_HEADER_NAMES = new Set(["action", "actions", "reorder", "controls"]);
+
+  function cellText(row, colIndex) {
+    const cell = row.cells[colIndex];
+    if (!cell) return "";
+    return (cell.getAttribute("data-sort") || cell.textContent || "").trim();
+  }
+
+  function valueForSort(text) {
+    const raw = String(text || "").trim();
+    if (!raw || raw === "—" || raw === "-") return { empty: true, type: "text", value: "" };
+
+    const maybeDate = raw.match(/^\d{4}-\d{2}-\d{2}/) ? Date.parse(raw) : NaN;
+    if (Number.isFinite(maybeDate)) return { empty: false, type: "number", value: maybeDate };
+
+    let compact = raw
+      .replace(/[,$£€]/g, "")
+      .replace(/\s+/g, "")
+      .trim();
+
+    let multiplier = 1;
+    if (/m$/i.test(compact)) {
+      multiplier = 1000000;
+      compact = compact.slice(0, -1);
+    } else if (/k$/i.test(compact)) {
+      multiplier = 1000;
+      compact = compact.slice(0, -1);
+    } else if (/%$/.test(compact)) {
+      compact = compact.slice(0, -1);
+    }
+
+    let neg = false;
+    const paren = compact.match(/^\((.*)\)$/);
+    if (paren) {
+      neg = true;
+      compact = paren[1];
+    }
+
+    if (/^[+-]?\d+(\.\d+)?$/.test(compact)) {
+      let num = Number(compact) * multiplier;
+      if (neg) num = -num;
+      if (Number.isFinite(num)) return { empty: false, type: "number", value: num };
+    }
+
+    return { empty: false, type: "text", value: raw.toLocaleLowerCase() };
+  }
+
+  function compareSortValues(a, b, dir) {
+    if (a.value.empty && !b.value.empty) return 1;
+    if (!a.value.empty && b.value.empty) return -1;
+    if (a.value.empty && b.value.empty) return a.index - b.index;
+
+    let cmp = 0;
+    if (a.value.type === "number" && b.value.type === "number") {
+      cmp = a.value.value - b.value.value;
+    } else {
+      cmp = String(a.value.value).localeCompare(String(b.value.value), undefined, {
+        numeric: true,
+        sensitivity: "base"
+      });
+    }
+
+    if (cmp === 0) return a.index - b.index;
+    return dir === "desc" ? -cmp : cmp;
+  }
+
+  function clearIndicators(table) {
+    table.querySelectorAll("th.bnsl-sortable-header").forEach(th => {
+      th.setAttribute("aria-sort", "none");
+      const arrow = th.querySelector(".bnsl-sort-arrow");
+      if (arrow) arrow.remove();
+    });
+  }
+
+  function markIndicator(table, th, dir) {
+    clearIndicators(table);
+    th.setAttribute("aria-sort", dir === "asc" ? "ascending" : "descending");
+    const arrow = document.createElement("span");
+    arrow.className = "bnsl-sort-arrow";
+    arrow.textContent = dir === "asc" ? "▲" : "▼";
+    th.appendChild(arrow);
+  }
+
+  function sortTable(table, colIndex, th, toggle) {
+    const tbody = table.tBodies && table.tBodies[0];
+    if (!tbody) return;
+
+    let dir = "asc";
+    if (toggle && table.dataset.sortCol === String(colIndex)) {
+      dir = table.dataset.sortDir === "asc" ? "desc" : "asc";
+    } else if (!toggle && table.dataset.sortDir) {
+      dir = table.dataset.sortDir;
+    }
+
+    table.dataset.bnslSorting = "1";
+    table.dataset.bnslIgnoreMutation = "1";
+    const rows = Array.from(tbody.rows).map((row, index) => ({
+      row,
+      index,
+      value: valueForSort(cellText(row, colIndex))
+    }));
+    rows.sort((a, b) => compareSortValues(a, b, dir));
+    rows.forEach(item => tbody.appendChild(item.row));
+    table.dataset.sortCol = String(colIndex);
+    table.dataset.sortDir = dir;
+    table.dataset.bnslSorting = "0";
+
+    if (th) markIndicator(table, th, dir);
+  }
+
+  function initSortableTable(table) {
+    if (!table || table.dataset.bnslSortInit === "1") return;
+    const headerRow = table.tHead && table.tHead.rows.length ? table.tHead.rows[0] : null;
+    if (!headerRow) return;
+
+    Array.from(headerRow.cells).forEach((th, colIndex) => {
+      const label = (th.textContent || "").trim().toLocaleLowerCase();
+      if (th.dataset.noSort === "true" || th.dataset.sortDisabled === "true" || DISABLED_HEADER_NAMES.has(label)) return;
+
+      th.classList.add("bnsl-sortable-header");
+      th.setAttribute("role", "button");
+      th.setAttribute("tabindex", "0");
+      th.setAttribute("aria-sort", "none");
+      th.addEventListener("click", () => sortTable(table, colIndex, th, true));
+      th.addEventListener("keydown", (ev) => {
+        if (ev.key === "Enter" || ev.key === " ") {
+          ev.preventDefault();
+          sortTable(table, colIndex, th, true);
+        }
+      });
+    });
+
+    const tbody = table.tBodies && table.tBodies[0];
+    if (tbody && "MutationObserver" in window) {
+      let queued = false;
+      const observer = new MutationObserver(() => {
+        if (table.dataset.bnslIgnoreMutation === "1") {
+          table.dataset.bnslIgnoreMutation = "0";
+          return;
+        }
+        if (table.dataset.bnslSorting === "1") return;
+        if (!table.dataset.sortCol) return;
+        if (queued) return;
+        queued = true;
+        window.requestAnimationFrame(() => {
+          queued = false;
+          const colIndex = Number(table.dataset.sortCol);
+          const th = headerRow.cells[colIndex];
+          if (th) sortTable(table, colIndex, th, false);
+        });
+      });
+      observer.observe(tbody, { childList: true });
+    }
+
+    table.dataset.bnslSortInit = "1";
+  }
+
+  function initAllSortableTables() {
+    document.querySelectorAll('table[data-sortable="true"]').forEach(initSortableTable);
+  }
+
+  if (document.readyState === "loading") {
+    document.addEventListener("DOMContentLoaded", initAllSortableTables);
+  } else {
+    initAllSortableTables();
+  }
+  window.BNSLSortableTables = { initAll: initAllSortableTables };
+})();
+</script>
+"""
+
 BASE_STYLE = r"""
 <style>
 /* -----------------------------
@@ -2076,6 +2298,7 @@ INDEX_HTML = f"""
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Free Agency</title>
   {BASE_STYLE}
+  {SORTABLE_TABLES_ASSETS}
 </head>
 <body>
   <div class="page">
@@ -2097,6 +2320,7 @@ INDEX_HTML = f"""
 
     <a class="btn" id="watchlist-link" href="watchlist" style="display:none;">Watchlist</a>
     <a class="btn" href="history">Bid History</a>
+    <a class="btn" href="export.csv">Export CSV</a>
 
     <label class="pill">
       <input type="checkbox" id="hide-signed" /> Hide signed
@@ -2115,12 +2339,15 @@ INDEX_HTML = f"""
 
   <hr class="sep" />
   <div class="table-wrap">
-    <table>
+    <table data-sortable="true">
     <thead>
       <tr>
         <th style="width:22%;">Player</th>
         <th style="width:7%;">Pos</th>
-        <th style="width:16%;">Leader</th>
+        <th style="width:6%;">OVR</th>
+        <th style="width:6%;">POT</th>
+        <th style="width:6%;">DEF</th>
+        <th style="width:14%;">Leader</th>
         <th style="width:14%;">1-yr equiv value</th>
         <th style="width:20%;">Bid expires / signs</th>
         <th style="width:10%;">Status</th>
@@ -2222,6 +2449,7 @@ function fmtIso(isoStr) {{
     return isoStr;
   }}
 }}
+function rating(x) {{ return (x === null || x === undefined || x === '') ? '—' : String(x); }}
 
 function setTeams(teams) {{
   teamSelect.innerHTML = '<option value="">— Select Team —</option>' +
@@ -2319,6 +2547,9 @@ tr.innerHTML = `
     <div class="muted" style="font-size:12px;">Hometown Discount: ${{p.hometown_team || '—'}}</div>
   </td>
   <td>${{p.position || '—'}}</td>
+  <td>${{rating(p.ovr)}}</td>
+  <td>${{rating(p.pot)}}</td>
+  <td>${{rating(p.def)}}</td>
   <td>${{leader}}</td>
   <td>${{val}}</td>
   <td>${{exp}}</td>
@@ -2520,6 +2751,7 @@ WATCHLIST_HTML = f"""
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Watchlist</title>
   {BASE_STYLE}
+  {SORTABLE_TABLES_ASSETS}
 </head>
 <div class="page">
   <div class="brand">
@@ -2543,12 +2775,15 @@ WATCHLIST_HTML = f"""
     <span id="login-status">Loading…</span>
   </div>
 
-  <table>
+  <table data-sortable="true">
     <thead>
       <tr>
         <th style="width:22%;">Player</th>
         <th style="width:7%;">Pos</th>
-        <th style="width:16%;">Leader</th>
+        <th style="width:6%;">OVR</th>
+        <th style="width:6%;">POT</th>
+        <th style="width:6%;">DEF</th>
+        <th style="width:14%;">Leader</th>
         <th style="width:14%;">1-yr equiv value</th>
         <th style="width:20%;">Bid expires / signs</th>
         <th style="width:10%;">Status</th>
@@ -2601,6 +2836,7 @@ function fmtIso(isoStr) {{
   if (!isoStr) return "—";
   try {{ return new Date(isoStr).toLocaleString(); }} catch {{ return isoStr; }}
 }}
+function rating(x) {{ return (x === null || x === undefined || x === '') ? '—' : String(x); }}
 
 async function fetchStatus() {{
   const res = await fetch('/fa/api/fa_status');
@@ -2618,7 +2854,7 @@ async function fetchStatus() {{
 async function fetchWatchlist() {{
   const res = await fetch('/fa/api/watchlist');
   if (!res.ok) {{
-    wlBody.innerHTML = '<tr><td colspan="7" class="danger">Not logged in.</td></tr>';
+    wlBody.innerHTML = '<tr><td colspan="10" class="danger">Not logged in.</td></tr>';
     return;
   }}
   const data = await res.json();
@@ -2629,7 +2865,7 @@ async function fetchWatchlist() {{
 function render() {{
   wlBody.innerHTML = '';
   if (!state.players.length) {{
-    wlBody.innerHTML = '<tr><td colspan="7" class="muted">No players in your watchlist yet.</td></tr>';
+    wlBody.innerHTML = '<tr><td colspan="10" class="muted">No players in your watchlist yet.</td></tr>';
     return;
   }}
 
@@ -2682,6 +2918,9 @@ tr.innerHTML = `
     <div class="muted" style="font-size:12px;">Hometown Discount: ${{p.hometown_team || '—'}}</div>
   </td>
   <td>${{p.position || '—'}}</td>
+  <td>${{rating(p.ovr)}}</td>
+  <td>${{rating(p.pot)}}</td>
+  <td>${{rating(p.def)}}</td>
   <td>${{leader}}</td>
   <td>${{val}}</td>
   <td>${{exp}}</td>
@@ -2820,6 +3059,7 @@ HISTORY_HTML = f"""
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Bid History</title>
   {BASE_STYLE}
+  {SORTABLE_TABLES_ASSETS}
 </head>
 <div class="page">
   <div class="brand">
@@ -2848,7 +3088,7 @@ HISTORY_HTML = f"""
     <span class="muted" id="htd-status"></span>
   </div>
 
-  <table>
+  <table data-sortable="true">
     <thead>
       <tr>
         <th style="width:16%;">Time</th>
@@ -2958,6 +3198,30 @@ load();
 
 
 # ---------- Pages ----------
+
+def _csv_response_for_table(conn: sqlite3.Connection, table: str, filename: str):
+    cur = conn.cursor()
+    cur.execute(f"PRAGMA table_info({table})")
+    columns = [row[1] for row in cur.fetchall()]
+    output = io.StringIO()
+    writer = csv.writer(output)
+    writer.writerow(columns)
+    order_clause = " ORDER BY id" if "id" in columns else ""
+    cur.execute(f"SELECT * FROM {table}{order_clause}")
+    for row in cur.fetchall():
+        writer.writerow([row[col] for col in columns])
+    conn.close()
+    return current_app.response_class(
+        output.getvalue(),
+        mimetype="text/csv",
+        headers={"Content-Disposition": f"attachment; filename={filename}"},
+    )
+
+
+@fa_bp.get("/export.csv")
+def export_free_agents_csv():
+    return _csv_response_for_table(get_conn(), "free_agents", "free_agents.csv")
+
 @fa_bp.route("/")
 def index():
     return render_template_string(INDEX_HTML)

@@ -3,6 +3,7 @@ from pathlib import Path
 from datetime import datetime
 from typing import Any, Dict, List
 import csv
+import io
 import os
 import logging
 import sqlite3
@@ -15,6 +16,200 @@ from flask import (
 )
 
 from ui_skin import BNSL_GAME_CSS
+
+SORTABLE_TABLES_ASSETS = r"""
+<style>
+  table[data-sortable="true"] th.bnsl-sortable-header {
+    cursor: pointer;
+    user-select: none;
+    white-space: nowrap;
+  }
+  table[data-sortable="true"] th.bnsl-sortable-header:hover {
+    filter: brightness(1.18);
+  }
+  table[data-sortable="true"] th.bnsl-sortable-header:focus {
+    outline: 2px solid rgba(140,170,255,.55);
+    outline-offset: -2px;
+  }
+  .bnsl-sort-arrow {
+    opacity: 0.78;
+    margin-left: 6px;
+    font-size: 11px;
+  }
+</style>
+<script>
+(function () {
+  const DISABLED_HEADER_NAMES = new Set(["action", "actions", "reorder", "controls"]);
+
+  function cellText(row, colIndex) {
+    const cell = row.cells[colIndex];
+    if (!cell) return "";
+    return (cell.getAttribute("data-sort") || cell.textContent || "").trim();
+  }
+
+  function valueForSort(text) {
+    const raw = String(text || "").trim();
+    if (!raw || raw === "—" || raw === "-") return { empty: true, type: "text", value: "" };
+
+    const maybeDate = raw.match(/^\d{4}-\d{2}-\d{2}/) ? Date.parse(raw) : NaN;
+    if (Number.isFinite(maybeDate)) return { empty: false, type: "number", value: maybeDate };
+
+    let compact = raw
+      .replace(/[,$£€]/g, "")
+      .replace(/\s+/g, "")
+      .trim();
+
+    let multiplier = 1;
+    if (/m$/i.test(compact)) {
+      multiplier = 1000000;
+      compact = compact.slice(0, -1);
+    } else if (/k$/i.test(compact)) {
+      multiplier = 1000;
+      compact = compact.slice(0, -1);
+    } else if (/%$/.test(compact)) {
+      compact = compact.slice(0, -1);
+    }
+
+    let neg = false;
+    const paren = compact.match(/^\((.*)\)$/);
+    if (paren) {
+      neg = true;
+      compact = paren[1];
+    }
+
+    if (/^[+-]?\d+(\.\d+)?$/.test(compact)) {
+      let num = Number(compact) * multiplier;
+      if (neg) num = -num;
+      if (Number.isFinite(num)) return { empty: false, type: "number", value: num };
+    }
+
+    return { empty: false, type: "text", value: raw.toLocaleLowerCase() };
+  }
+
+  function compareSortValues(a, b, dir) {
+    if (a.value.empty && !b.value.empty) return 1;
+    if (!a.value.empty && b.value.empty) return -1;
+    if (a.value.empty && b.value.empty) return a.index - b.index;
+
+    let cmp = 0;
+    if (a.value.type === "number" && b.value.type === "number") {
+      cmp = a.value.value - b.value.value;
+    } else {
+      cmp = String(a.value.value).localeCompare(String(b.value.value), undefined, {
+        numeric: true,
+        sensitivity: "base"
+      });
+    }
+
+    if (cmp === 0) return a.index - b.index;
+    return dir === "desc" ? -cmp : cmp;
+  }
+
+  function clearIndicators(table) {
+    table.querySelectorAll("th.bnsl-sortable-header").forEach(th => {
+      th.setAttribute("aria-sort", "none");
+      const arrow = th.querySelector(".bnsl-sort-arrow");
+      if (arrow) arrow.remove();
+    });
+  }
+
+  function markIndicator(table, th, dir) {
+    clearIndicators(table);
+    th.setAttribute("aria-sort", dir === "asc" ? "ascending" : "descending");
+    const arrow = document.createElement("span");
+    arrow.className = "bnsl-sort-arrow";
+    arrow.textContent = dir === "asc" ? "▲" : "▼";
+    th.appendChild(arrow);
+  }
+
+  function sortTable(table, colIndex, th, toggle) {
+    const tbody = table.tBodies && table.tBodies[0];
+    if (!tbody) return;
+
+    let dir = "asc";
+    if (toggle && table.dataset.sortCol === String(colIndex)) {
+      dir = table.dataset.sortDir === "asc" ? "desc" : "asc";
+    } else if (!toggle && table.dataset.sortDir) {
+      dir = table.dataset.sortDir;
+    }
+
+    table.dataset.bnslSorting = "1";
+    table.dataset.bnslIgnoreMutation = "1";
+    const rows = Array.from(tbody.rows).map((row, index) => ({
+      row,
+      index,
+      value: valueForSort(cellText(row, colIndex))
+    }));
+    rows.sort((a, b) => compareSortValues(a, b, dir));
+    rows.forEach(item => tbody.appendChild(item.row));
+    table.dataset.sortCol = String(colIndex);
+    table.dataset.sortDir = dir;
+    table.dataset.bnslSorting = "0";
+
+    if (th) markIndicator(table, th, dir);
+  }
+
+  function initSortableTable(table) {
+    if (!table || table.dataset.bnslSortInit === "1") return;
+    const headerRow = table.tHead && table.tHead.rows.length ? table.tHead.rows[0] : null;
+    if (!headerRow) return;
+
+    Array.from(headerRow.cells).forEach((th, colIndex) => {
+      const label = (th.textContent || "").trim().toLocaleLowerCase();
+      if (th.dataset.noSort === "true" || th.dataset.sortDisabled === "true" || DISABLED_HEADER_NAMES.has(label)) return;
+
+      th.classList.add("bnsl-sortable-header");
+      th.setAttribute("role", "button");
+      th.setAttribute("tabindex", "0");
+      th.setAttribute("aria-sort", "none");
+      th.addEventListener("click", () => sortTable(table, colIndex, th, true));
+      th.addEventListener("keydown", (ev) => {
+        if (ev.key === "Enter" || ev.key === " ") {
+          ev.preventDefault();
+          sortTable(table, colIndex, th, true);
+        }
+      });
+    });
+
+    const tbody = table.tBodies && table.tBodies[0];
+    if (tbody && "MutationObserver" in window) {
+      let queued = false;
+      const observer = new MutationObserver(() => {
+        if (table.dataset.bnslIgnoreMutation === "1") {
+          table.dataset.bnslIgnoreMutation = "0";
+          return;
+        }
+        if (table.dataset.bnslSorting === "1") return;
+        if (!table.dataset.sortCol) return;
+        if (queued) return;
+        queued = true;
+        window.requestAnimationFrame(() => {
+          queued = false;
+          const colIndex = Number(table.dataset.sortCol);
+          const th = headerRow.cells[colIndex];
+          if (th) sortTable(table, colIndex, th, false);
+        });
+      });
+      observer.observe(tbody, { childList: true });
+    }
+
+    table.dataset.bnslSortInit = "1";
+  }
+
+  function initAllSortableTables() {
+    document.querySelectorAll('table[data-sortable="true"]').forEach(initSortableTable);
+  }
+
+  if (document.readyState === "loading") {
+    document.addEventListener("DOMContentLoaded", initAllSortableTables);
+  } else {
+    initAllSortableTables();
+  }
+  window.BNSLSortableTables = { initAll: initAllSortableTables };
+})();
+</script>
+"""
+
 from discord_notifier import send_discord_message
 from team_config import (
     TEAM_EMAILS_BY_ABBR as TEAM_EMAILS,
@@ -824,6 +1019,9 @@ def bootstrap_roster():
             active_roster INTEGER DEFAULT 0,
             options_remaining INTEGER,
             fa_class TEXT,
+            ovr INTEGER,
+            pot INTEGER,
+            def INTEGER,
             fangraphs_id TEXT,
             mlbam_id INTEGER
         )
@@ -840,6 +1038,12 @@ def bootstrap_roster():
 
     if "fa_class" not in existing_cols:
         cur.execute("ALTER TABLE roster_players ADD COLUMN fa_class TEXT")
+    if "ovr" not in existing_cols:
+        cur.execute("ALTER TABLE roster_players ADD COLUMN ovr INTEGER")
+    if "pot" not in existing_cols:
+        cur.execute("ALTER TABLE roster_players ADD COLUMN pot INTEGER")
+    if "def" not in existing_cols:
+        cur.execute("ALTER TABLE roster_players ADD COLUMN def INTEGER")
 
     ensure_roster_decision_columns(conn)
     ensure_roster_draft_columns(conn)
@@ -909,8 +1113,8 @@ def bootstrap_roster():
                             contract_length, contract_option, contract_expires,
                             service_time, previous_service_time, service_time_2025,
                             franchise, affiliate_team, roster_status, active_roster,
-                            options_remaining, fa_class, fangraphs_id, mlbam_id
-                        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                            options_remaining, fa_class, ovr, pot, def, fangraphs_id, mlbam_id
+                        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                     """, (
                         player_id,
                         raw_name,
@@ -938,6 +1142,9 @@ def bootstrap_roster():
                         0 if is_2026_fa else (1 if as_bool(r.get("active_roster")) else 0),
                         stored_options_remaining,
                         stored_fa_class,
+                        as_int(r.get("ovr") or r.get("OVR"), None),
+                        as_int(r.get("pot") or r.get("POT"), None),
+                        as_int(r.get("def") or r.get("DEF"), None),
                         (r.get("fangraphs_id") or "").strip(),
                         as_int(r.get("mlbam_id")),
                     ))
@@ -1146,6 +1353,9 @@ def api_players():
             "team_opt": False if is_current_fa else bool(int(r["contract_option"] or 0)),
             "fa_class": row_fa_class,
             "options_remaining": int(r["options_remaining"] or 0),
+            "ovr": row_value(r, "ovr", None),
+            "pot": row_value(r, "pot", None),
+            "def": row_value(r, "def", None),
             "rulev_eligible": row_rulev,
             "pending_option_decision": pending_option,
             "pending_arbitration_decision": pending_arb,
@@ -1499,12 +1709,13 @@ ROSTER_HTML = """
       <label><input type="checkbox" id="contract-decisions-only"> Contract Decisions</label>
       <input id="search" type="text" placeholder="Search players...">
       <button id="login-btn">Login</button>
+      <a class="btn" href="export.csv">Export CSV</a>
       <span id="login-status">Not logged in</span>
       <span id="roster-lock-status" class="pill" style="display:none;"></span>
       <span id="forty-man-count" style="display:none;"></span>
     </div>
 
-    <table>
+    <table data-sortable="true">
       <thead>
         <tr>
           <th>Pos</th>
@@ -1519,6 +1730,9 @@ ROSTER_HTML = """
           <th>Team Opt?</th>
           <th>FA Class</th>
           <th>Options</th>
+          <th>OVR</th>
+          <th>POT</th>
+          <th>DEF</th>
           <th>Actions</th>
         </tr>
       </thead>
@@ -1560,6 +1774,10 @@ function esc(s) {
 
 function moneyM(x) {
   return `$${Number(x).toFixed(3)}M`;
+}
+
+function rating(x) {
+  return (x === null || x === undefined || x === "") ? "—" : String(x);
 }
 
 function makeOptions(el, values, label) {
@@ -1676,6 +1894,9 @@ async function fetchPlayers() {
       <td>${p.team_opt ? "✓" : ""}</td>
       <td>${esc(p.fa_class || "")}</td>
       <td>${p.options_remaining}</td>
+      <td>${rating(p.ovr)}</td>
+      <td>${rating(p.pot)}</td>
+      <td>${rating(p.def)}</td>
       <td><div class="actions">${actionHtml(p)}</div></td>
     `;
     body.appendChild(tr);
@@ -1791,7 +2012,31 @@ loginBtn.onclick = async () => {
 </script>
 </body>
 </html>
-""".replace("__BNSL_GAME_CSS__", BNSL_GAME_CSS)
+""".replace("__BNSL_GAME_CSS__", BNSL_GAME_CSS + SORTABLE_TABLES_ASSETS)
+
+
+def _csv_response_for_table(conn: sqlite3.Connection, table: str, filename: str):
+    cur = conn.cursor()
+    cur.execute(f"PRAGMA table_info({table})")
+    columns = [row[1] for row in cur.fetchall()]
+    output = io.StringIO()
+    writer = csv.writer(output)
+    writer.writerow(columns)
+    order_clause = " ORDER BY id" if "id" in columns else ""
+    cur.execute(f"SELECT * FROM {table}{order_clause}")
+    for row in cur.fetchall():
+        writer.writerow([row[col] for col in columns])
+    conn.close()
+    return current_app.response_class(
+        output.getvalue(),
+        mimetype="text/csv",
+        headers={"Content-Disposition": f"attachment; filename={filename}"},
+    )
+
+
+@roster_bp.get("/export.csv")
+def export_roster_csv():
+    return _csv_response_for_table(get_conn(), "roster_players", "roster_players.csv")
 
 @roster_bp.get("/")
 def roster_index():
