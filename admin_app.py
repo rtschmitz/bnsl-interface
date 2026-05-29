@@ -197,6 +197,91 @@ def get_draft_conn() -> sqlite3.Connection:
     return conn
 
 
+def get_rulev_conn() -> sqlite3.Connection:
+    conn = sqlite3.connect(current_app.config["RULEV_DB_PATH"])
+    conn.row_factory = sqlite3.Row
+    return conn
+
+
+def _parse_admin_draft_datetime(date_text: str, time_text: str) -> datetime:
+    from draft_order_page import EASTERN, validate_regular_pick_time
+    try:
+        d = datetime.strptime((date_text or "").strip(), "%Y-%m-%d").date()
+    except Exception:
+        raise ValueError("Draft pick date must use YYYY-MM-DD")
+    try:
+        t = datetime.strptime((time_text or "09:00").strip(), "%H:%M").time()
+    except Exception:
+        raise ValueError("Draft pick time must use HH:MM")
+    return validate_regular_pick_time(datetime.combine(d, t, tzinfo=EASTERN))
+
+
+def _pick_label(row: sqlite3.Row, *, rulev: bool = False) -> str:
+    if not rulev:
+        label = str(row["label"] or "").strip() if "label" in row.keys() else ""
+        if label:
+            return label
+    return f"{int(row['round'])}.{int(row['pick']):02d}"
+
+
+def _draft_pick_choices() -> dict[str, list[dict[str, str]]]:
+    choices: dict[str, list[dict[str, str]]] = {"draft": [], "rulev": []}
+
+    try:
+        conn = get_draft_conn()
+        cur = conn.cursor()
+        cur.execute("""
+            SELECT id, round, pick, team, player_id, drafted_at, label
+            FROM draft_order
+            ORDER BY round ASC, pick ASC
+        """)
+        for row in cur.fetchall():
+            status = "selected" if row["player_id"] else "open"
+            label = _pick_label(row)
+            choices["draft"].append({
+                "value": f"{int(row['round'])}|{int(row['pick'])}",
+                "label": f"{label} — {row['team']} ({status})",
+            })
+        conn.close()
+    except Exception:
+        current_app.logger.exception("Unable to load amateur draft pick choices for admin panel")
+
+    try:
+        conn = get_rulev_conn()
+        cur = conn.cursor()
+        cur.execute("""
+            SELECT id, round, pick, team, player_id, drafted_at
+            FROM rulev_order
+            ORDER BY round ASC, pick ASC
+        """)
+        for row in cur.fetchall():
+            status = "selected" if row["player_id"] else "open"
+            label = _pick_label(row, rulev=True)
+            choices["rulev"].append({
+                "value": f"{int(row['round'])}|{int(row['pick'])}",
+                "label": f"{label} — {row['team']} ({status})",
+            })
+        conn.close()
+    except Exception:
+        current_app.logger.exception("Unable to load Rule V pick choices for admin panel")
+
+    return choices
+
+
+def _parse_pick_key(value: Any) -> tuple[int, int]:
+    parts = str(value or "").split("|", 1)
+    if len(parts) != 2:
+        raise ValueError("Select a valid draft pick")
+    try:
+        round_num = int(parts[0])
+        pick_num = int(parts[1])
+    except Exception:
+        raise ValueError("Select a valid draft pick")
+    if round_num <= 0 or pick_num <= 0:
+        raise ValueError("Select a valid draft pick")
+    return round_num, pick_num
+
+
 
 def _parse_money(value: Any) -> float:
     text = str(value or "").strip().replace("$", "").replace(",", "")
@@ -704,6 +789,33 @@ ADMIN_HTML = """
           </form>
         </div>
 
+        <div class="card">
+          <h2>Set Draft Pick Time</h2>
+          <p class="muted">Choose Amateur Draft or Rule V, choose a round/pick, then set the new ET start time. That pick and every later pick are regenerated hourly from 9 AM–6 PM ET, skipping Sundays. Rule V missed picks are skipped, not moved to an evening queue.</p>
+          <form method="post" action="set-draft-time">
+            <div class="row">
+              <label>Draft
+                <select id="draft-time-kind" name="draft_kind">
+                  <option value="draft">Amateur Draft</option>
+                  <option value="rulev">Rule V Draft</option>
+                </select>
+              </label>
+              <label>Pick
+                <select id="draft-time-pick" name="pick_key"></select>
+              </label>
+            </div>
+            <div class="row" style="margin-top:10px;">
+              <label>Date
+                <input name="pick_date" type="date" value="{{ today }}">
+              </label>
+              <label>Time ET
+                <input name="pick_time" type="time" value="09:00" step="3600">
+              </label>
+            </div>
+            <div style="margin-top:12px;"><button class="btn primary" type="submit">Set draft time</button></div>
+          </form>
+        </div>
+
         <div class="card wide">
           <h2>Admin Log</h2>
           <div class="table-wrap">
@@ -766,6 +878,32 @@ searchBox.addEventListener('input', () => {
   }, 200);
 });
 
+const draftTimeChoices = {{ draft_time_choices|tojson }};
+const draftTimeKind = document.getElementById('draft-time-kind');
+const draftTimePick = document.getElementById('draft-time-pick');
+function refreshDraftTimePickOptions(){
+  if (!draftTimeKind || !draftTimePick) return;
+  const rows = draftTimeChoices[draftTimeKind.value] || [];
+  draftTimePick.innerHTML = '';
+  if (!rows.length) {
+    const opt = document.createElement('option');
+    opt.value = '';
+    opt.textContent = 'No picks found';
+    draftTimePick.appendChild(opt);
+    return;
+  }
+  for (const row of rows) {
+    const opt = document.createElement('option');
+    opt.value = row.value;
+    opt.textContent = row.label;
+    draftTimePick.appendChild(opt);
+  }
+}
+if (draftTimeKind) {
+  draftTimeKind.addEventListener('change', refreshDraftTimePickOptions);
+  refreshDraftTimePickOptions();
+}
+
 const adminRefreshTargets = {{ refresh_targets|tojson }};
 if (adminRefreshTargets && window.parent && window.parent !== window) {
   const targets = String(adminRefreshTargets).split(',').map(s => s.trim()).filter(Boolean);
@@ -791,6 +929,7 @@ def index():
         roster_statuses=ROSTER_STATUS_TYPES,
         today=today,
         roster_locked=_is_roster_locked() if is_admin_authed() else False,
+        draft_time_choices=_draft_pick_choices() if is_admin_authed() else {"draft": [], "rulev": []},
         logs=admin_logs() if is_admin_authed() else [],
         msg=request.args.get("msg", ""),
         err=request.args.get("err", ""),
@@ -950,6 +1089,43 @@ def toggle_roster_lock():
         )
     except Exception as e:
         current_app.logger.exception("Admin roster-lock toggle failed")
+        return redirect_with(error=str(e))
+
+
+@admin_bp.post("/set-draft-time")
+def set_draft_time():
+    require_admin()
+    try:
+        draft_kind = (request.form.get("draft_kind") or "").strip().lower()
+        round_num, pick_num = _parse_pick_key(request.form.get("pick_key"))
+        start_dt = _parse_admin_draft_datetime(
+            request.form.get("pick_date", ""),
+            request.form.get("pick_time", "09:00"),
+        )
+
+        if draft_kind == "draft":
+            from draft_order_page import set_pick_and_following_times, fmt_est
+            result = set_pick_and_following_times(round_num, pick_num, start_dt)
+            refresh = ["draft"]
+        elif draft_kind == "rulev":
+            from rulev_order_page import set_pick_and_following_times, fmt_est
+            result = set_pick_and_following_times(round_num, pick_num, start_dt)
+            refresh = ["rulev"]
+        else:
+            raise ValueError("Choose either Amateur Draft or Rule V Draft")
+
+        when = fmt_est(start_dt)
+        log_action(
+            "set_draft_pick_time",
+            f"Set {result['draft_name']} {result['pick_label']} ({result['team']}) to {when}; regenerated {result['updated_count']} pick time(s)",
+            result,
+        )
+        return redirect_with(
+            f"Set {result['draft_name']} {result['pick_label']} to {when}.",
+            refresh=refresh,
+        )
+    except Exception as e:
+        current_app.logger.exception("Admin set-draft-time failed")
         return redirect_with(error=str(e))
 
 

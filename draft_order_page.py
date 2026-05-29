@@ -153,6 +153,62 @@ def bump_if_sunday(dt: datetime) -> datetime:
     return nd
 
 
+def _ensure_pick_overrides_table(conn: sqlite3.Connection) -> None:
+    """Create/upgrade the live-draft override table used by the scheduler."""
+    cur = conn.cursor()
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS pick_overrides (
+            draft_order_id INTEGER PRIMARY KEY,
+            scheduled_time TEXT NOT NULL,
+            missed INTEGER DEFAULT 0
+        )
+    """)
+    cur.execute("PRAGMA table_info(pick_overrides)")
+    cols = {r[1] for r in cur.fetchall()}
+    if "missed" not in cols:
+        cur.execute("ALTER TABLE pick_overrides ADD COLUMN missed INTEGER DEFAULT 0")
+    conn.commit()
+
+
+def validate_regular_pick_time(dt: datetime) -> datetime:
+    """Return an Eastern, minute-clean time inside the normal 9 AM-6 PM Mon-Sat draft window."""
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=EASTERN)
+    else:
+        dt = dt.astimezone(EASTERN)
+    dt = dt.replace(second=0, microsecond=0)
+    if dt.weekday() == 6:
+        raise ValueError("Draft pick times cannot be scheduled on Sunday")
+    if dt.minute != 0:
+        raise ValueError("Draft pick times must be on the hour")
+    if dt.hour < DAY_FIRST_HOUR or dt.hour > DAY_LAST_HOUR:
+        raise ValueError("Draft pick times must be between 9:00 AM and 6:00 PM ET")
+    return dt
+
+
+def next_regular_pick_slot(dt: datetime) -> datetime:
+    """One hour later, rolling from after 6 PM to the next non-Sunday day at 9 AM ET."""
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=EASTERN)
+    else:
+        dt = dt.astimezone(EASTERN)
+    candidate = dt + timedelta(hours=1)
+    if candidate.weekday() == 6 or candidate.hour > DAY_LAST_HOUR:
+        nd = next_non_sunday_date(dt.date() + timedelta(days=1))
+        return datetime(nd.year, nd.month, nd.day, DAY_FIRST_HOUR, 0, 0, tzinfo=EASTERN)
+    return candidate.replace(second=0, microsecond=0)
+
+
+def regular_pick_slots_from(start_dt: datetime, count: int) -> list[datetime]:
+    """Generate count normal draft slots from an admin-selected starting time."""
+    slots: list[datetime] = []
+    cur = validate_regular_pick_time(start_dt)
+    for _ in range(max(0, int(count))):
+        slots.append(cur)
+        cur = next_regular_pick_slot(cur)
+    return slots
+
+
 def evening_miss_slot(start_day: date, offset: int) -> datetime:
     """Return the offset-th evening miss slot, capped to valid clock hours.
 
@@ -405,13 +461,7 @@ def _load_picks_overrides_and_designated():
     picks = cur.fetchall()
 
     # load overrides
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS pick_overrides (
-            draft_order_id INTEGER PRIMARY KEY,
-            scheduled_time TEXT NOT NULL
-        )
-    """)
-    conn.commit()
+    _ensure_pick_overrides_table(conn)
     cur.execute("SELECT draft_order_id, scheduled_time FROM pick_overrides")
     overrides_raw = cur.fetchall()
     conn.close()
@@ -529,6 +579,54 @@ def _compute_scheduled_times(now: datetime) -> Dict[int, datetime]:
             scheduled_time[idx] = evening_miss_slot(nd, j)
 
     return scheduled_time
+
+
+def set_pick_and_following_times(round_num: int, pick_num: int, start_dt: datetime) -> Dict[str, Any]:
+    """Admin helper: set one pick's time and regenerate every later current-year draft pick slot."""
+    start_dt = validate_regular_pick_time(start_dt)
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("""
+      SELECT id, round, pick, team, player_id, drafted_at, label
+      FROM draft_order
+      ORDER BY round ASC, pick ASC
+    """)
+    picks = cur.fetchall()
+    target_idx = None
+    for idx, rec in enumerate(picks):
+        if int(rec["round"]) == int(round_num) and int(rec["pick"]) == int(pick_num):
+            target_idx = idx
+            break
+    if target_idx is None:
+        conn.close()
+        raise ValueError(f"No amateur draft pick found for round {round_num}, pick {pick_num}")
+
+    _ensure_pick_overrides_table(conn)
+    following = picks[target_idx:]
+    slots = regular_pick_slots_from(start_dt, len(following))
+    cur.executemany(
+        """
+        INSERT INTO pick_overrides(draft_order_id, scheduled_time, missed)
+        VALUES (?, ?, 0)
+        ON CONFLICT(draft_order_id) DO UPDATE SET
+            scheduled_time=excluded.scheduled_time,
+            missed=0
+        """,
+        [(int(rec["id"]), slot.isoformat(timespec="minutes")) for rec, slot in zip(following, slots)],
+    )
+    conn.commit()
+    target = picks[target_idx]
+    conn.close()
+    return {
+        "draft_kind": "draft",
+        "draft_name": "Amateur Draft",
+        "round": int(round_num),
+        "pick": int(pick_num),
+        "pick_label": target["label"] or f"{int(round_num)}.{int(pick_num):02d}",
+        "team": target["team"],
+        "start_time": start_dt.isoformat(timespec="minutes"),
+        "updated_count": len(following),
+    }
 
 
 # --------- Routes ----------

@@ -684,34 +684,30 @@ def bootstrap_rulev(sync_roster: bool = True) -> None:
         sync_rulev_from_roster_db()
 
 def current_pick() -> Dict[str, Any] | None:
-    conn = get_conn()
-    cur = conn.cursor()
-    cur.execute("""
-      SELECT id, round, pick, team
-      FROM rulev_order
-      WHERE player_id IS NULL
-      ORDER BY round ASC, pick ASC
-      LIMIT 1
-    """)
-    row = cur.fetchone()
-    if not row:
-        conn.close()
+    """Time-aware Rule V current pick.
+
+    Rule V missed picks do not roll to the end of the day; once their window
+    expires, the draft simply advances to the next scheduled undrafted pick.
+    """
+    from rulev_order_page import get_current_on_clock_pick
+
+    cur_pick = get_current_on_clock_pick()
+    if cur_pick is None:
         return None
 
+    conn = get_conn()
+    cur = conn.cursor()
     cur.execute("SELECT COUNT(*) FROM rulev_order")
     total = int(cur.fetchone()[0] or 0)
     cur.execute("SELECT COUNT(*) FROM rulev_order WHERE player_id IS NOT NULL")
     made = int(cur.fetchone()[0] or 0)
     conn.close()
 
-    return {
-        "id": int(row["id"]),
-        "round": int(row["round"]),
-        "pick": int(row["pick"]),
-        "team": row["team"],
+    cur_pick.update({
         "picks_made": made,
         "total_picks": total,
-    }
+    })
+    return cur_pick
 
 
 def notify_discord_rulev_pick(rulev_order_id: int) -> None:
