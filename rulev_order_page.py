@@ -2,7 +2,7 @@
 from __future__ import annotations
 import math
 import sqlite3
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from typing import List, Dict, Any, Optional
 from ui_skin import BNSL_GAME_CSS
 from flask import Blueprint, current_app, request, jsonify, render_template_string
@@ -12,9 +12,12 @@ EASTERN = ZoneInfo("America/New_York")
 
 # Rule V: fixed start time + normal hourly draft slots.
 # Pick times are 9 AM through 6 PM ET, Sundays are skipped.
+# Missed normal-window picks get one end-of-day chance; if that is missed too,
+# the pick is skipped instead of rolling to another day.
 RULEV_START = datetime(2026, 3, 5, 9, 0, 0, tzinfo=EASTERN)
 DAY_FIRST_HOUR = 9
 DAY_LAST_HOUR = 18
+END_OF_DAY_MISS_HOUR = 19
 SLOT_MINUTES = 60
 PICKS_PER_DAY = DAY_LAST_HOUR - DAY_FIRST_HOUR + 1
 
@@ -40,7 +43,7 @@ __BNSL_GAME_CSS__
     <div class="brand">
       <div>
         <h1>RULE V ORDER</h1>
-        <div class="sub">Times shown in ET • Rule V missed picks are skipped; the draft simply moves on to the next scheduled pick.</div>
+        <div class="sub">Times shown in ET • Missed picks roll once to the end of the day. If that rescheduled pick is missed, it is skipped.</div>
       </div>
       <div class="right">
         <a class="btn" href="/rulev/">← Back</a>
@@ -113,7 +116,6 @@ __BNSL_GAME_CSS__
 ORDER_HTML = ORDER_HTML.replace("__BNSL_GAME_CSS__", BNSL_GAME_CSS)
 
 
-
 def get_conn() -> sqlite3.Connection:
     # Rule V DB key
     conn = sqlite3.connect(current_app.config["RULEV_DB_PATH"])
@@ -136,7 +138,29 @@ def fmt_est(dt: datetime) -> str:
     return s.replace(" 0", " ")  # cosmetic: strip leading zeros
 
 
-def next_non_sunday_date(d):
+def _coerce_eastern(dt: datetime) -> datetime:
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=EASTERN).replace(second=0, microsecond=0)
+    return dt.astimezone(EASTERN).replace(second=0, microsecond=0)
+
+
+def _parse_eastern(value: Any) -> Optional[datetime]:
+    if value is None:
+        return None
+    text = str(value or "").strip()
+    if not text:
+        return None
+    try:
+        return _coerce_eastern(datetime.fromisoformat(text))
+    except Exception:
+        return None
+
+
+def _iso(dt: datetime) -> str:
+    return _coerce_eastern(dt).isoformat(timespec="minutes")
+
+
+def next_non_sunday_date(d: date) -> date:
     while d.weekday() == 6:
         d = d + timedelta(days=1)
     return d
@@ -144,11 +168,7 @@ def next_non_sunday_date(d):
 
 def validate_regular_pick_time(dt: datetime) -> datetime:
     """Return an Eastern, minute-clean time inside the normal 9 AM-6 PM Mon-Sat draft window."""
-    if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=EASTERN)
-    else:
-        dt = dt.astimezone(EASTERN)
-    dt = dt.replace(second=0, microsecond=0)
+    dt = _coerce_eastern(dt)
     if dt.weekday() == 6:
         raise ValueError("Rule V pick times cannot be scheduled on Sunday")
     if dt.minute != 0:
@@ -160,10 +180,7 @@ def validate_regular_pick_time(dt: datetime) -> datetime:
 
 def next_regular_pick_slot(dt: datetime) -> datetime:
     """One hour later, rolling from after 6 PM to the next non-Sunday day at 9 AM ET."""
-    if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=EASTERN)
-    else:
-        dt = dt.astimezone(EASTERN)
+    dt = _coerce_eastern(dt)
     candidate = dt + timedelta(minutes=SLOT_MINUTES)
     if candidate.weekday() == 6 or candidate.hour > DAY_LAST_HOUR:
         nd = next_non_sunday_date(dt.date() + timedelta(days=1))
@@ -178,6 +195,23 @@ def regular_pick_slots_from(start_dt: datetime, count: int) -> list[datetime]:
         slots.append(cur)
         cur = next_regular_pick_slot(cur)
     return slots
+
+
+def evening_miss_slot(start_day: date, offset: int) -> datetime:
+    """Return the offset-th end-of-day miss slot, starting at 7 PM ET.
+
+    If more picks are rescheduled than fit between 7 PM and 11 PM, overflow is
+    placed at 7 PM+ on the next non-Sunday evening. That overflow is scheduling
+    capacity, not a second-chance rollover after a missed evening slot.
+    """
+    slots_per_evening = max(1, 24 - END_OF_DAY_MISS_HOUR)
+    extra_days, slot_in_day = divmod(max(0, int(offset)), slots_per_evening)
+    day = next_non_sunday_date(start_day)
+    advanced = 0
+    while advanced < extra_days:
+        day = next_non_sunday_date(day + timedelta(days=1))
+        advanced += 1
+    return datetime(day.year, day.month, day.day, END_OF_DAY_MISS_HOUR + slot_in_day, 0, 0, tzinfo=EASTERN)
 
 
 def base_slot_for_index(idx: int) -> datetime:
@@ -199,6 +233,79 @@ def _ensure_pick_overrides_table(conn: sqlite3.Connection) -> None:
     conn.commit()
 
 
+def _ensure_pick_miss_state_table(conn: sqlite3.Connection) -> None:
+    cur = conn.cursor()
+    cur.execute("""
+      CREATE TABLE IF NOT EXISTS rulev_pick_miss_state (
+        rulev_order_id INTEGER PRIMARY KEY,
+        first_missed_at TEXT,
+        rescheduled_time TEXT,
+        skipped_at TEXT
+      )
+    """)
+    conn.commit()
+
+
+def _load_pick_miss_state() -> Dict[int, Dict[str, Optional[datetime]]]:
+    conn = get_conn()
+    cur = conn.cursor()
+    _ensure_pick_miss_state_table(conn)
+    cur.execute("SELECT rulev_order_id, first_missed_at, rescheduled_time, skipped_at FROM rulev_pick_miss_state")
+    rows = cur.fetchall()
+    conn.close()
+    return {
+        int(r["rulev_order_id"]): {
+            "first_missed_at": _parse_eastern(r["first_missed_at"]),
+            "rescheduled_time": _parse_eastern(r["rescheduled_time"]),
+            "skipped_at": _parse_eastern(r["skipped_at"]),
+        }
+        for r in rows
+    }
+
+
+def mark_rulev_pick_first_missed(rulev_order_id: int, rescheduled_time: datetime, when: Optional[datetime] = None) -> None:
+    """Persist that a Rule V pick missed its normal window and moved to the evening tail."""
+    when = _coerce_eastern(when or datetime.now(tz=EASTERN))
+    rescheduled_time = _coerce_eastern(rescheduled_time)
+    conn = get_conn()
+    cur = conn.cursor()
+    _ensure_pick_miss_state_table(conn)
+    cur.execute("""
+      INSERT INTO rulev_pick_miss_state(rulev_order_id, first_missed_at, rescheduled_time, skipped_at)
+      VALUES (?, ?, ?, NULL)
+      ON CONFLICT(rulev_order_id) DO UPDATE SET
+        first_missed_at=COALESCE(rulev_pick_miss_state.first_missed_at, excluded.first_missed_at),
+        rescheduled_time=COALESCE(rulev_pick_miss_state.rescheduled_time, excluded.rescheduled_time)
+    """, (int(rulev_order_id), _iso(when), _iso(rescheduled_time)))
+    conn.commit()
+    conn.close()
+
+
+def mark_rulev_pick_skipped(rulev_order_id: int, when: Optional[datetime] = None) -> None:
+    """Persist that a Rule V pick missed its evening slot and is now skipped."""
+    when = _coerce_eastern(when or datetime.now(tz=EASTERN))
+    conn = get_conn()
+    cur = conn.cursor()
+    _ensure_pick_miss_state_table(conn)
+    cur.execute("""
+      INSERT INTO rulev_pick_miss_state(rulev_order_id, first_missed_at, rescheduled_time, skipped_at)
+      VALUES (?, NULL, NULL, ?)
+      ON CONFLICT(rulev_order_id) DO UPDATE SET skipped_at=excluded.skipped_at
+    """, (int(rulev_order_id), _iso(when)))
+    conn.commit()
+    conn.close()
+
+
+def clear_rulev_pick_miss_state(rulev_order_id: int) -> None:
+    """Clear missed/skipped state, useful when an admin resets times or the pick is filled."""
+    conn = get_conn()
+    cur = conn.cursor()
+    _ensure_pick_miss_state_table(conn)
+    cur.execute("DELETE FROM rulev_pick_miss_state WHERE rulev_order_id=?", (int(rulev_order_id),))
+    conn.commit()
+    conn.close()
+
+
 def _load_picks_overrides_and_designated():
     conn = get_conn()
     cur = conn.cursor()
@@ -209,6 +316,7 @@ def _load_picks_overrides_and_designated():
     """)
     picks = cur.fetchall()
     _ensure_pick_overrides_table(conn)
+    _ensure_pick_miss_state_table(conn)
     cur.execute("SELECT rulev_order_id, scheduled_time FROM rulev_pick_overrides")
     overrides_raw = cur.fetchall()
     conn.close()
@@ -216,13 +324,9 @@ def _load_picks_overrides_and_designated():
     overrides: Dict[int, datetime] = {}
     for r in overrides_raw:
         try:
-            dt = datetime.fromisoformat(r["scheduled_time"])
-            if dt.tzinfo is None:
-                dt = dt.replace(tzinfo=EASTERN)
-            else:
-                dt = dt.astimezone(EASTERN)
+            dt = _coerce_eastern(datetime.fromisoformat(r["scheduled_time"]))
             if dt.weekday() != 6:
-                overrides[int(r["rulev_order_id"])] = dt.replace(second=0, microsecond=0)
+                overrides[int(r["rulev_order_id"])] = dt
         except Exception:
             pass
 
@@ -233,36 +337,154 @@ def _load_picks_overrides_and_designated():
 
 
 def _deadline_for_index(designated: list[datetime], idx: int) -> datetime:
+    """Return the normal-window deadline for pick idx.
+
+    Most picks expire when the next designated pick starts. For the last pick of
+    a day, this also enforces the one-hour window and allows a 6 PM missed pick
+    to move to the 7 PM evening slot rather than staying live overnight.
+    """
+    one_hour = designated[idx] + timedelta(minutes=SLOT_MINUTES)
     if idx + 1 < len(designated):
-        return designated[idx + 1]
-    return designated[idx] + timedelta(minutes=SLOT_MINUTES)
+        return min(designated[idx + 1], one_hour)
+    return one_hour
 
 
-def get_current_on_clock_pick(now: Optional[datetime] = None) -> Optional[Dict[str, Any]]:
-    """Return the first undrafted Rule V pick whose window has not expired; missed picks are skipped."""
-    if now is None:
-        now = datetime.now(tz=EASTERN)
-    elif now.tzinfo is None:
-        now = now.replace(tzinfo=EASTERN)
-    else:
-        now = now.astimezone(EASTERN)
+def _next_deadlines_from_designated(designated: list[datetime]) -> list[datetime]:
+    return [_deadline_for_index(designated, i) for i in range(len(designated))]
 
-    picks, designated = _load_picks_overrides_and_designated()
+
+def _is_evening_reschedule(idx: int, scheduled_time: datetime, designated: list[datetime]) -> bool:
+    return _coerce_eastern(scheduled_time) != _coerce_eastern(designated[idx])
+
+
+def _deadline_for_scheduled_index(idx: int, scheduled_time: datetime, designated: list[datetime]) -> datetime:
+    scheduled_time = _coerce_eastern(scheduled_time)
+    if _is_evening_reschedule(idx, scheduled_time, designated):
+        return scheduled_time + timedelta(minutes=SLOT_MINUTES)
+    return _deadline_for_index(designated, idx)
+
+
+def _evening_slots_for_unpersisted_misses(
+    now: datetime,
+    picks: list[Any],
+    designated: list[datetime],
+    miss_state: Dict[int, Dict[str, Optional[datetime]]],
+) -> Dict[int, datetime]:
+    """Compute evening slots for normal-window misses that have not yet been persisted."""
+    now = _coerce_eastern(now)
+    first_misses_by_day: Dict[tuple[int, int, int], List[int]] = {}
+    next_deadlines = _next_deadlines_from_designated(designated)
+
     for idx, rec in enumerate(picks):
         if rec["player_id"]:
             continue
-        deadline = _deadline_for_index(designated, idx)
-        if now < deadline:
-            scheduled = designated[idx].astimezone(EASTERN)
-            return {
-                "id": int(rec["id"]),
-                "round": int(rec["round"]),
-                "pick": int(rec["pick"]),
-                "team": rec["team"],
-                "scheduled_time_iso": scheduled.isoformat(timespec="minutes"),
-                "deadline_time_iso": deadline.astimezone(EASTERN).isoformat(timespec="minutes"),
-            }
-    return None
+        order_id = int(rec["id"])
+        state = miss_state.get(order_id, {})
+        if state.get("skipped_at") or state.get("rescheduled_time"):
+            continue
+        if now >= next_deadlines[idx]:
+            d = designated[idx].astimezone(EASTERN).date()
+            first_misses_by_day.setdefault((d.year, d.month, d.day), []).append(idx)
+
+    slots: Dict[int, datetime] = {}
+    for ymd in sorted(first_misses_by_day):
+        y, m, d = ymd
+        day = next_non_sunday_date(date(y, m, d))
+        indices = sorted(first_misses_by_day[ymd], key=lambda i: (designated[i], i))
+        for offset, idx in enumerate(indices):
+            slots[idx] = evening_miss_slot(day, offset)
+    return slots
+
+
+def _compute_scheduled_times(now: datetime, include_expired_evening: bool = False) -> Dict[int, datetime]:
+    """Compute the live scheduled time for each still-actionable undrafted Rule V pick.
+
+    Rules:
+      - Normal picks keep their designated/admin-overridden time until their normal deadline.
+      - A first miss moves once to the end-of-day queue, starting at 7 PM ET.
+      - If the evening slot's one-hour window is missed, the pick is omitted from
+        the returned map and is treated as skipped.
+
+    `include_expired_evening=True` is used by queue enforcement so it can detect
+    evening slots whose deadline has just passed and either draft from queue or
+    persist the skip.
+    """
+    now = _coerce_eastern(now)
+    picks, designated = _load_picks_overrides_and_designated()
+    miss_state = _load_pick_miss_state()
+    next_deadlines = _next_deadlines_from_designated(designated)
+    unpersisted_evening_slots = _evening_slots_for_unpersisted_misses(now, picks, designated, miss_state)
+
+    scheduled: Dict[int, datetime] = {}
+    for idx, rec in enumerate(picks):
+        if rec["player_id"]:
+            continue
+        order_id = int(rec["id"])
+        state = miss_state.get(order_id, {})
+        if state.get("skipped_at"):
+            continue
+
+        persisted_evening = state.get("rescheduled_time")
+        if persisted_evening:
+            evening_deadline = persisted_evening + timedelta(minutes=SLOT_MINUTES)
+            if include_expired_evening or now < evening_deadline:
+                scheduled[idx] = persisted_evening
+            continue
+
+        dynamic_evening = unpersisted_evening_slots.get(idx)
+        if dynamic_evening:
+            evening_deadline = dynamic_evening + timedelta(minutes=SLOT_MINUTES)
+            if include_expired_evening or now < evening_deadline:
+                scheduled[idx] = dynamic_evening
+            continue
+
+        if now < next_deadlines[idx]:
+            scheduled[idx] = designated[idx]
+
+    return scheduled
+
+
+def get_current_on_clock_pick(now: Optional[datetime] = None) -> Optional[Dict[str, Any]]:
+    """Return the actionable Rule V pick with the earliest current scheduled time."""
+    now = _coerce_eastern(now or datetime.now(tz=EASTERN))
+    picks, designated = _load_picks_overrides_and_designated()
+    scheduled_time = _compute_scheduled_times(now)
+
+    best_idx = None
+    best_key = None
+    for idx, rec in enumerate(picks):
+        if rec["player_id"] or idx not in scheduled_time:
+            continue
+        t = scheduled_time[idx]
+        key = (t, idx)
+        if best_key is None or key < best_key:
+            best_key = key
+            best_idx = idx
+
+    if best_idx is None:
+        return None
+
+    rec = picks[best_idx]
+    scheduled = scheduled_time[best_idx].astimezone(EASTERN)
+    deadline = _deadline_for_scheduled_index(best_idx, scheduled, designated).astimezone(EASTERN)
+    return {
+        "id": int(rec["id"]),
+        "round": int(rec["round"]),
+        "pick": int(rec["pick"]),
+        "team": rec["team"],
+        "scheduled_time_iso": scheduled.isoformat(timespec="minutes"),
+        "deadline_time_iso": deadline.isoformat(timespec="minutes"),
+    }
+
+
+def get_current_pick_info(now: Optional[datetime] = None) -> Optional[Dict[str, Any]]:
+    """Compatibility helper mirroring the amateur draft order page API."""
+    info = get_current_on_clock_pick(now)
+    if not info:
+        return None
+    info = dict(info)
+    info["pick_label"] = f"{int(info['round'])}.{int(info['pick']):02d}"
+    return info
 
 
 def set_pick_and_following_times(round_num: int, pick_num: int, start_dt: datetime) -> Dict[str, Any]:
@@ -286,6 +508,7 @@ def set_pick_and_following_times(round_num: int, pick_num: int, start_dt: dateti
         raise ValueError(f"No Rule V pick found for round {round_num}, pick {pick_num}")
 
     _ensure_pick_overrides_table(conn)
+    _ensure_pick_miss_state_table(conn)
     following = picks[target_idx:]
     slots = regular_pick_slots_from(start_dt, len(following))
     cur.executemany(
@@ -296,6 +519,11 @@ def set_pick_and_following_times(round_num: int, pick_num: int, start_dt: dateti
             scheduled_time=excluded.scheduled_time
         """,
         [(int(rec["id"]), slot.isoformat(timespec="minutes")) for rec, slot in zip(following, slots)],
+    )
+    # Admin-rescheduling makes later picks actionable again, so clear old missed/skipped state.
+    cur.executemany(
+        "DELETE FROM rulev_pick_miss_state WHERE rulev_order_id=?",
+        [(int(rec["id"]),) for rec in following],
     )
     conn.commit()
     target = picks[target_idx]
@@ -315,6 +543,9 @@ def set_pick_and_following_times(round_num: int, pick_num: int, start_dt: dateti
 def compute_rows(team_filter: Optional[str] = None) -> List[Dict[str, Any]]:
     now = datetime.now(tz=EASTERN)
     picks, designated = _load_picks_overrides_and_designated()
+    scheduled_map = _compute_scheduled_times(now)
+    miss_state = _load_pick_miss_state()
+    normal_deadlines = _next_deadlines_from_designated(designated)
 
     conn = get_conn()
     cur = conn.cursor()
@@ -324,9 +555,8 @@ def compute_rows(team_filter: Optional[str] = None) -> List[Dict[str, Any]]:
 
     rows: List[Dict[str, Any]] = []
     for idx, rec in enumerate(picks):
+        order_id = int(rec["id"])
         pick_label = f"{int(rec['round'])}.{int(rec['pick']):02d}"
-        scheduled = designated[idx].astimezone(EASTERN)
-        deadline = _deadline_for_index(designated, idx).astimezone(EASTERN)
 
         if rec["player_id"]:
             pname = player_name_by_id.get(int(rec["player_id"]), f"Player #{rec['player_id']}")
@@ -337,29 +567,55 @@ def compute_rows(team_filter: Optional[str] = None) -> List[Dict[str, Any]]:
                 "time_display": "",
                 "status": f"Selected at {rec['drafted_at'] or '—'}",
             })
+            continue
+
+        scheduled = scheduled_map.get(idx)
+        state = miss_state.get(order_id, {})
+        skipped = bool(state.get("skipped_at")) or (scheduled is None and now >= normal_deadlines[idx])
+
+        if skipped:
+            time_display = "—"
+            status = "Skipped"
         else:
-            if now >= deadline:
-                status = "Missed"
-            elif now >= scheduled:
+            scheduled = (scheduled or designated[idx]).astimezone(EASTERN)
+            time_display = fmt_est(scheduled)
+            deadline = _deadline_for_scheduled_index(idx, scheduled, designated)
+            if _is_evening_reschedule(idx, scheduled, designated):
+                status = "On clock (rescheduled)" if now >= scheduled and now < deadline else "Missed → end of day"
+            elif now >= scheduled and now < deadline:
                 status = "On clock"
             else:
                 status = "Scheduled"
-            rows.append({
-                "pick_label": pick_label,
-                "team": rec["team"],
-                "player": None,
-                "time_display": fmt_est(scheduled),
-                "status": status,
-            })
+
+        rows.append({
+            "pick_label": pick_label,
+            "team": rec["team"],
+            "player": None,
+            "time_display": time_display,
+            "status": status,
+        })
 
     if team_filter:
         rows = [r for r in rows if r["team"] == team_filter]
     return rows
 
 
+def _run_rulev_queue_enforcement() -> None:
+    """Run Rule V queue enforcement opportunistically without importing at module load time."""
+    try:
+        from rulev_app import enforce_queue_actions  # local import avoids circular imports
+        enforce_queue_actions(max_steps=25)
+    except Exception as exc:
+        try:
+            current_app.logger.exception("[rulev/order] enforce_queue_actions failed: %s", exc)
+        except Exception:
+            pass
+
+
 @rulev_order_bp.route("/order")
 def order_page():
-    # pagination
+    _run_rulev_queue_enforcement()
+
     try:
         page = max(1, int(request.args.get("page", "1")))
     except ValueError:
@@ -393,6 +649,8 @@ def order_page():
 
 @rulev_order_bp.get("/api/order")
 def api_order():
+    _run_rulev_queue_enforcement()
+
     try:
         page = max(1, int(request.args.get("page", "1")))
     except ValueError:

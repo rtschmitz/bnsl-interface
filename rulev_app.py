@@ -8,7 +8,7 @@ import logging
 import re
 import sqlite3
 from pathlib import Path
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any, Dict, List
 
 from flask import Blueprint, current_app, has_app_context, request, jsonify, session, render_template_string, abort
@@ -337,6 +337,27 @@ def init_db():
         player_id INTEGER,
         drafted_at TEXT,
         UNIQUE(round, pick) ON CONFLICT IGNORE
+      )
+    """)
+
+    # Rule V draft queue + per-team preference.  The queue lives in rulev.db,
+    # separate from the amateur draft queue, but follows the same UX: managers
+    # can add available players, reorder them, and optionally let the queue pick
+    # at the start of their clock.  Default remains end-of-clock.
+    cur.execute("""
+      CREATE TABLE IF NOT EXISTS rulev_draft_queue (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        team TEXT NOT NULL,
+        player_id INTEGER NOT NULL,
+        position INTEGER NOT NULL,
+        created_at TEXT NOT NULL,
+        UNIQUE(team, player_id) ON CONFLICT IGNORE
+      )
+    """)
+    cur.execute("""
+      CREATE TABLE IF NOT EXISTS rulev_team_prefs (
+        team TEXT PRIMARY KEY,
+        use_queue_at_start INTEGER NOT NULL DEFAULT 0
       )
     """)
 
@@ -686,8 +707,8 @@ def bootstrap_rulev(sync_roster: bool = True) -> None:
 def current_pick() -> Dict[str, Any] | None:
     """Time-aware Rule V current pick.
 
-    Rule V missed picks do not roll to the end of the day; once their window
-    expires, the draft simply advances to the next scheduled undrafted pick.
+    The order-page scheduler owns missed-pick behavior.  Normal missed windows
+    roll once to an end-of-day slot; missed end-of-day slots are skipped.
     """
     from rulev_order_page import get_current_on_clock_pick
 
@@ -701,10 +722,18 @@ def current_pick() -> Dict[str, Any] | None:
     total = int(cur.fetchone()[0] or 0)
     cur.execute("SELECT COUNT(*) FROM rulev_order WHERE player_id IS NOT NULL")
     made = int(cur.fetchone()[0] or 0)
+    skipped = 0
+    try:
+        cur.execute("SELECT COUNT(*) FROM rulev_pick_miss_state WHERE skipped_at IS NOT NULL")
+        skipped = int(cur.fetchone()[0] or 0)
+    except sqlite3.Error:
+        skipped = 0
     conn.close()
 
     cur_pick.update({
         "picks_made": made,
+        "skipped_picks": skipped,
+        "resolved_picks": made + skipped,
         "total_picks": total,
     })
     return cur_pick
@@ -744,6 +773,351 @@ def _require_authed_team() -> str:
     if not team:
         abort(401, "Not logged in")
     return team
+
+
+def remove_player_from_all_queues(player_id: int) -> None:
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("DELETE FROM rulev_draft_queue WHERE player_id=?", (int(player_id),))
+    conn.commit()
+    conn.close()
+
+
+def get_team_queue(team: str) -> list[sqlite3.Row]:
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("""
+        SELECT
+            dq.player_id,
+            dq.position AS qpos,
+            p.name,
+            p.position,
+            p.org,
+            p.dob,
+            COALESCE(p.rulev_eligible, 1) AS rulev_eligible,
+            p.ovr,
+            p.pot,
+            p.def,
+            p.drafted_by,
+            p.drafted_at
+        FROM rulev_draft_queue dq
+        JOIN rulev_players p ON p.id = dq.player_id
+        WHERE dq.team = ?
+        ORDER BY dq.position ASC, dq.id ASC
+    """, (team,))
+    rows = cur.fetchall()
+    conn.close()
+    return rows
+
+
+def get_team_queue_top_available(team: str) -> int | None:
+    """Return the first still-available Rule V player in this team's queue."""
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("""
+        SELECT dq.player_id
+          FROM rulev_draft_queue dq
+         WHERE dq.team = ?
+         ORDER BY dq.position ASC, dq.id ASC
+    """, (team,))
+    pids = [int(r[0]) for r in cur.fetchall()]
+    if not pids:
+        conn.close()
+        return None
+
+    qmarks = ",".join("?" for _ in pids)
+    cur.execute(f"""
+        SELECT id, drafted_by, COALESCE(rulev_eligible, 1) AS rulev_eligible
+          FROM rulev_players
+         WHERE id IN ({qmarks})
+    """, pids)
+    by_id = {int(r["id"]): r for r in cur.fetchall()}
+
+    for pid in pids:
+        row = by_id.get(pid)
+        if not row:
+            continue
+        if not (row["drafted_by"] or "").strip() and int(row["rulev_eligible"] or 0) == 1:
+            conn.close()
+            return pid
+    conn.close()
+    return None
+
+
+def set_queue_mode(team: str, use_at_start: bool) -> None:
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("""
+      INSERT INTO rulev_team_prefs(team, use_queue_at_start) VALUES(?, ?)
+      ON CONFLICT(team) DO UPDATE SET use_queue_at_start=excluded.use_queue_at_start
+    """, (team, 1 if use_at_start else 0))
+    conn.commit()
+    conn.close()
+
+
+def get_queue_mode(team: str) -> bool:
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("SELECT use_queue_at_start FROM rulev_team_prefs WHERE team=?", (team,))
+    row = cur.fetchone()
+    conn.close()
+    return bool(row[0]) if row else False
+
+
+def _complete_rulev_pick(team: str, player_id: int, rulev_order_id: int) -> None:
+    """Shared Rule V pick implementation for manual picks and queue auto-picks."""
+    conn = get_conn()
+    c = conn.cursor()
+
+    c.execute("SELECT id, name, org, drafted_by, COALESCE(rulev_eligible, 1) AS rulev_eligible FROM rulev_players WHERE id=?", (int(player_id),))
+    r = c.fetchone()
+    if not r:
+        conn.close()
+        raise RuntimeError("Player not found")
+    if (r["drafted_by"] or "").strip():
+        conn.close()
+        raise RuntimeError("Player already picked")
+    if int(r["rulev_eligible"] or 0) != 1:
+        conn.close()
+        raise RuntimeError("Player is not Rule V eligible")
+
+    c.execute("SELECT id, team, player_id FROM rulev_order WHERE id=?", (int(rulev_order_id),))
+    order_row = c.fetchone()
+    if not order_row:
+        conn.close()
+        raise RuntimeError("Rule V order row not found")
+    if order_row["player_id"]:
+        conn.close()
+        raise RuntimeError("Rule V pick already filled")
+    if str(order_row["team"] or "") != str(team or ""):
+        conn.close()
+        raise RuntimeError("Team does not match this Rule V pick")
+
+    now = datetime.utcnow().isoformat(timespec="seconds")
+    losing_team = canonical_team_abbr(r["org"] or "")
+    picking_team = canonical_team_abbr(team)
+    player_name = str(r["name"] or "").strip()
+
+    c.execute("UPDATE rulev_players SET drafted_by=?, drafted_at=? WHERE id=?", (team, now, int(player_id)))
+    c.execute("UPDATE rulev_order SET player_id=?, drafted_at=? WHERE id=?", (int(player_id), now, int(rulev_order_id)))
+    conn.commit()
+    conn.close()
+
+    roster_update = apply_rulev_pick_to_roster(int(player_id), picking_team, now)
+    if roster_update.get("updated"):
+        sync_after_rulev_roster_mutation()
+    else:
+        current_app.logger.warning(
+            "Rule V pick did not update roster.db for rulev_player_id=%s: %s",
+            player_id, roster_update.get("reason", "unknown reason")
+        )
+
+    try:
+        notify_discord_rulev_pick(int(rulev_order_id))
+    except Exception:
+        current_app.logger.exception("Failed to post Rule V draft-pick Discord notification")
+
+    if losing_team and picking_team:
+        try:
+            from financials_app import record_finance_payment
+            record_finance_payment(
+                source_type="rulev_pick_fee",
+                source_id=int(rulev_order_id),
+                payer_team_abbr=picking_team,
+                receiver_team_abbr=losing_team,
+                amount=RULEV_PICK_FEE,
+                description=f"Rule V draft fee for {player_name}",
+                effective_date=now[:10],
+            )
+        except Exception:
+            current_app.logger.exception("Failed to post Rule V draft payment")
+
+    remove_player_from_all_queues(int(player_id))
+    try:
+        from rulev_order_page import clear_rulev_pick_miss_state
+        clear_rulev_pick_miss_state(int(rulev_order_id))
+    except Exception:
+        current_app.logger.exception("Failed to clear Rule V missed-pick state after completed pick")
+
+
+def perform_rulev_pick_internal(team: str, player_id: int, rulev_order_id: int) -> None:
+    """Bypass session; used for queue auto-picks."""
+    _complete_rulev_pick(team, int(player_id), int(rulev_order_id))
+
+
+def enforce_queue_actions(max_steps: int = 10) -> None:
+    """
+    Best-effort Rule V queue enforcement.
+
+    Priority:
+      1) If a normal pick window expires, draft from that team's queue if
+         possible; otherwise persist a one-time end-of-day reschedule.
+      2) If that end-of-day window expires, draft from queue if possible;
+         otherwise persist the pick as skipped.
+      3) If the current team has opted into start-of-clock queue usage, draft
+         from queue once the scheduled time has arrived.
+    """
+    from rulev_order_page import (
+        EASTERN,
+        _compute_scheduled_times,
+        _deadline_for_index,
+        _deadline_for_scheduled_index,
+        _is_evening_reschedule,
+        _load_pick_miss_state,
+        _load_picks_overrides_and_designated,
+        get_current_pick_info,
+        mark_rulev_pick_first_missed,
+        mark_rulev_pick_skipped,
+    )
+
+    try:
+        limit = max(1, int(max_steps))
+    except Exception:
+        limit = 10
+
+    safety = 0
+    while safety < limit:
+        safety += 1
+        progressed = False
+        now = datetime.now(tz=EASTERN)
+
+        try:
+            picks, designated = _load_picks_overrides_and_designated()
+            if not picks:
+                break
+            miss_state = _load_pick_miss_state()
+            # Include expired evening slots so this enforcement pass can decide
+            # whether to draft from queue or mark the pick skipped.  The public
+            # scheduler omits expired evening slots afterward.
+            scheduled = _compute_scheduled_times(now, include_expired_evening=True)
+        except Exception as e:
+            current_app.logger.exception("Rule V schedule compute failed during queue enforcement: %s", e)
+            break
+
+        # ---------- 1) NORMAL DEADLINE PASSED -> QUEUE OR ONE-TIME EOD ----------
+        normal_overdue: list[int] = []
+        for i, rec in enumerate(picks):
+            if rec["player_id"]:
+                continue
+            order_id = int(rec["id"])
+            state = miss_state.get(order_id, {})
+            if state.get("skipped_at") or state.get("rescheduled_time"):
+                continue
+            if now >= _deadline_for_index(designated, i):
+                normal_overdue.append(i)
+
+        normal_overdue.sort(key=lambda i: (_deadline_for_index(designated, i), i))
+        for i in normal_overdue:
+            rec = picks[i]
+            team = rec["team"]
+            pid = get_team_queue_top_available(team)
+            if pid:
+                try:
+                    perform_rulev_pick_internal(team, pid, int(rec["id"]))
+                except Exception:
+                    current_app.logger.exception(
+                        "Rule V queue normal-deadline pick failed for team=%s pick_id=%s player_id=%s",
+                        team, rec["id"], pid,
+                    )
+                else:
+                    progressed = True
+                    break
+
+            # Queue was empty: move this pick to its one allowed end-of-day slot.
+            rescheduled = scheduled.get(i)
+            if rescheduled is not None and _is_evening_reschedule(i, rescheduled, designated):
+                try:
+                    mark_rulev_pick_first_missed(int(rec["id"]), rescheduled, now)
+                except Exception:
+                    current_app.logger.exception(
+                        "Failed to persist Rule V first miss for team=%s pick_id=%s",
+                        team, rec["id"],
+                    )
+                progressed = True
+                break
+
+        if progressed:
+            continue
+
+        # ---------- 2) EOD DEADLINE PASSED -> QUEUE OR SKIP ----------
+        eod_overdue: list[int] = []
+        for i, rec in enumerate(picks):
+            if rec["player_id"] or i not in scheduled:
+                continue
+            order_id = int(rec["id"])
+            state = miss_state.get(order_id, {})
+            if state.get("skipped_at"):
+                continue
+            sched = scheduled[i]
+            if not _is_evening_reschedule(i, sched, designated):
+                continue
+            if now >= _deadline_for_scheduled_index(i, sched, designated):
+                eod_overdue.append(i)
+
+        eod_overdue.sort(key=lambda i: (scheduled[i], i))
+        for i in eod_overdue:
+            rec = picks[i]
+            team = rec["team"]
+            pid = get_team_queue_top_available(team)
+            if pid:
+                try:
+                    perform_rulev_pick_internal(team, pid, int(rec["id"]))
+                except Exception:
+                    current_app.logger.exception(
+                        "Rule V queue EOD pick failed for team=%s pick_id=%s player_id=%s",
+                        team, rec["id"], pid,
+                    )
+                else:
+                    progressed = True
+                    break
+
+            try:
+                mark_rulev_pick_skipped(int(rec["id"]), now)
+            except Exception:
+                current_app.logger.exception(
+                    "Failed to persist Rule V skipped pick for team=%s pick_id=%s",
+                    team, rec["id"],
+                )
+            progressed = True
+            break
+
+        if progressed:
+            continue
+
+        # ---------- 3) START-OF-CLOCK QUEUE MODE ----------
+        try:
+            info = get_current_pick_info(now)
+        except Exception as e:
+            current_app.logger.exception("Rule V get_current_pick_info failed during queue enforcement: %s", e)
+            info = None
+
+        if info:
+            team = info["team"]
+            scheduled_iso = info.get("scheduled_time_iso")
+            try:
+                sched_t = datetime.fromisoformat(scheduled_iso) if scheduled_iso else now
+                if sched_t.tzinfo is None:
+                    sched_t = sched_t.replace(tzinfo=EASTERN)
+                else:
+                    sched_t = sched_t.astimezone(EASTERN)
+            except Exception:
+                sched_t = now
+
+            if now >= sched_t and get_queue_mode(team):
+                pid = get_team_queue_top_available(team)
+                if pid:
+                    try:
+                        perform_rulev_pick_internal(team, pid, int(info["id"]))
+                    except Exception:
+                        current_app.logger.exception(
+                            "Rule V queue start-of-clock pick failed for team=%s pick_id=%s player_id=%s",
+                            team, info["id"], pid,
+                        )
+                    else:
+                        progressed = True
+
+        if not progressed:
+            break
 
 
 INDEX_HTML = r"""
@@ -792,11 +1166,14 @@ __BNSL_GAME_CSS__
           <select id="team" style="margin-left:8px;"></select>
         </label>
         <button class="btn primary" id="login">Login</button>
+        <a id="queue-link" class="btn" href="/rulev/queue" style="margin-left:4px; display:none;">View Rule V Queue</a>
 
         <div class="pill" style="margin-left:auto;">
           <span>Search:</span>
           <input id="search" type="text" placeholder="Type a player name…" style="min-width:260px;" />
-          <span class="muted">(substring)</span>
+          <label class="muted" style="margin-left:10px;">
+            <input id="hide-drafted" type="checkbox" /> Hide drafted players
+          </label>
         </div>
       </div>
 
@@ -833,8 +1210,10 @@ const curSpan = document.getElementById('cur');
 const prog = document.getElementById('prog');
 const tbody = document.getElementById('body');
 const search = document.getElementById('search');
+const hideDrafted = document.getElementById('hide-drafted');
+const queueLink = document.getElementById('queue-link');
 
-let state = { search:'', selectedTeam:'', authed:false, authedEmail:'', current:null, players:[] };
+let state = { search:'', hideDrafted:false, selectedTeam:'', authed:false, authedEmail:'', current:null, players:[] };
 
 function fmtIso(s){ if(!s) return ''; try { return new Date(s).toLocaleString(); } catch { return s; } }
 function rating(x){ return (x === null || x === undefined || x === '') ? '—' : String(x); }
@@ -843,9 +1222,17 @@ function setTeams(teams){
   teamSel.innerHTML = '<option value="">— Select Team —</option>' + teams.map(t => `<option value="${t}">${t}</option>`).join('');
 }
 
+async function fetchJson(url, opts){
+  const r = await fetch(url, opts);
+  if (!r.ok){
+    const text = await r.text();
+    throw new Error(`${url} failed (${r.status}): ${text.slice(0, 300)}`);
+  }
+  return await r.json();
+}
+
 async function fetchStatus(){
-  const r = await fetch('/rulev/api/status');
-  const d = await r.json();
+  const d = await fetchJson('/rulev/api/status');
   setTeams(d.teams || []);
   if (d.selected_team) teamSel.value = d.selected_team;
 
@@ -855,6 +1242,7 @@ async function fetchStatus(){
   state.current = d.current || null;
 
   loginBtn.disabled = !teamSel.value;
+  queueLink.style.display = (state.authed && state.selectedTeam) ? 'inline-block' : 'none';
 
   if (state.authed && state.selectedTeam){
     loginStatus.textContent = `🔓 Logged in as ${state.authedEmail} for ${state.selectedTeam}`;
@@ -864,17 +1252,16 @@ async function fetchStatus(){
 
   if (!state.current){
     curSpan.textContent = 'Draft complete';
-    prog.textContent = `${d.picks_made}/${d.total_picks}`;
+    prog.textContent = `${d.resolved_picks ?? d.picks_made}/${d.total_picks}`;
   } else {
     curSpan.textContent = `Round ${state.current.round}, Pick ${state.current.pick} — ${state.current.team}`;
-    prog.textContent = `${d.picks_made}/${d.total_picks}`;
+    prog.textContent = `${d.resolved_picks ?? d.picks_made}/${d.total_picks}`;
   }
 }
 
 async function fetchPlayers(){
-  const params = new URLSearchParams({ search: state.search });
-  const r = await fetch('/rulev/api/players?' + params.toString());
-  const d = await r.json();
+  const params = new URLSearchParams({ search: state.search, hide_drafted: state.hideDrafted ? '1' : '0' });
+  const d = await fetchJson('/rulev/api/players?' + params.toString());
   state.players = d.players || [];
   render();
 }
@@ -910,6 +1297,29 @@ function render(){
         await fetchPlayers();
       };
       action.appendChild(btn);
+    } else if (!p.drafted_by && p.rulev_eligible && state.authed && state.selectedTeam) {
+      if (p.in_queue) {
+        action.innerHTML = '<span class="muted">Queued</span>';
+      } else {
+        const qbtn = document.createElement('button');
+        qbtn.className = 'btn';
+        qbtn.textContent = 'Add to queue';
+        qbtn.onclick = async () => {
+          qbtn.disabled = true;
+          const resp = await fetch('/rulev/api/queue/add', {
+            method:'POST',
+            headers:{'Content-Type':'application/json'},
+            body: JSON.stringify({ player_id: p.id })
+          });
+          if (!resp.ok){
+            alert('Could not add to queue: ' + await resp.text());
+          }
+          await fetchPlayers();
+        };
+        action.appendChild(qbtn);
+      }
+    } else if (p.drafted_by) {
+      action.innerHTML = '<span class="muted">Picked</span>';
     } else {
       action.innerHTML = '<span class="muted">—</span>';
     }
@@ -932,6 +1342,7 @@ function render(){
 function debounce(fn, ms){ let t; return (...a)=>{ clearTimeout(t); t=setTimeout(()=>fn(...a), ms); } }
 
 search.addEventListener('input', debounce(()=>{ state.search = search.value || ''; fetchPlayers(); }, 120));
+hideDrafted.addEventListener('change', ()=>{ state.hideDrafted = hideDrafted.checked; fetchPlayers(); });
 
 teamSel.addEventListener('change', async ()=>{
   const t = teamSel.value || '';
@@ -952,8 +1363,14 @@ loginBtn.addEventListener('click', async ()=>{
 });
 
 (async function boot(){
-  await fetchStatus();
-  await fetchPlayers();
+  try {
+    await fetchStatus();
+    await fetchPlayers();
+  } catch (err) {
+    console.error(err);
+    curSpan.textContent = 'Could not load Rule V status';
+    tbody.innerHTML = `<tr><td colspan="9" class="muted">${String(err.message || err)}</td></tr>`;
+  }
 })();
 </script>
 
@@ -963,6 +1380,236 @@ loginBtn.addEventListener('click', async ()=>{
 </html>
 """
 INDEX_HTML = INDEX_HTML.replace("__BNSL_GAME_CSS__", BNSL_GAME_CSS + SORTABLE_TABLES_ASSETS)
+
+
+QUEUE_HTML = r"""
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Rule V Draft Queue</title>
+__BNSL_GAME_CSS__
+<style>
+  .row { display:flex; gap:12px; align-items:center; flex-wrap:wrap; }
+  .controls { display:flex; gap:8px; align-items:center; }
+  .taken { opacity: 0.55; }
+</style>
+</head>
+<body>
+<div class="page">
+  <div class="brand">
+    <div>
+      <h1>RULE V DRAFT</h1>
+    </div>
+    <div class="right">
+      <span class="badge">DRAFT ROOM</span>
+      <span class="badge">QUEUE</span>
+    </div>
+  </div>
+
+  <div class="panel pad">
+    <div class="row">
+      <a class="btn" href="/rulev/">← Back</a>
+      <span class="pill">Rule V Queue</span>
+      <span id="team-pill" class="pill"></span>
+    </div>
+
+    <div class="row">
+      <label class="pill" style="background: rgba(0,0,0,.16);">
+        <input type="radio" name="mode" id="mode-start"> Use queue at start of clock
+      </label>
+      <label class="pill" style="background: rgba(0,0,0,.16);">
+        <input type="radio" name="mode" id="mode-end"> Use queue at end of clock (default)
+      </label>
+      <button id="save-mode" class="btn primary">Save Mode</button>
+      <span class="muted">Queue order is top → bottom.</span>
+    </div>
+
+    <hr class="sep"/>
+
+    <div class="table-wrap">
+      <table data-sortable="true">
+        <thead>
+          <tr>
+            <th style="width:6%;">#</th>
+            <th style="width:26%;">Name</th>
+            <th style="width:8%;">Pos</th>
+            <th style="width:10%;">Org</th>
+            <th style="width:8%;">DOB</th>
+            <th style="width:6%;">OVR</th>
+            <th style="width:6%;">POT</th>
+            <th style="width:6%;">DEF</th>
+            <th style="width:14%;">Picked By</th>
+            <th style="width:10%;" data-no-sort="true">Actions</th>
+          </tr>
+        </thead>
+        <tbody id="queue-body"></tbody>
+      </table>
+    </div>
+
+    <script>
+      const tbody = document.getElementById('queue-body');
+      const saveModeBtn = document.getElementById('save-mode');
+      const modeStart = document.getElementById('mode-start');
+      const modeEnd = document.getElementById('mode-end');
+      const teamPill = document.getElementById('team-pill');
+
+      let queue = [];
+      let team = "";
+      let useStart = false;
+
+      function show(x){ return (x === null || x === undefined || x === '') ? '—' : x; }
+      function fmtIso(s){ if(!s) return ''; try { return new Date(s).toLocaleString(); } catch { return s; } }
+
+      async function load() {
+        const res = await fetch('/rulev/api/queue');
+        if (!res.ok) {
+          if (res.status === 401) {
+            alert('Please login from the Rule V draft page first.');
+            location.href = '/rulev/';
+            return;
+          }
+          alert('Failed to load queue: ' + await res.text());
+          return;
+        }
+        const data = await res.json();
+        team = data.team || '';
+        useStart = !!data.use_at_start;
+        queue = data.items || [];
+        render();
+      }
+
+      function render() {
+        teamPill.textContent = team ? ('Team: ' + team) : '';
+        modeStart.checked = useStart;
+        modeEnd.checked = !useStart;
+        tbody.innerHTML = '';
+
+        queue.forEach((p, idx) => {
+          const tr = document.createElement('tr');
+          if (p.drafted_by) tr.classList.add('taken');
+
+          const tdIdx = document.createElement('td');
+          tdIdx.textContent = String(idx + 1);
+
+          const tdName = document.createElement('td');
+          tdName.innerHTML = `<b>${p.name || ''}</b>`;
+
+          const tdPos = document.createElement('td');
+          tdPos.textContent = p.position || '—';
+
+          const tdOrg = document.createElement('td');
+          tdOrg.textContent = p.org || '—';
+
+          const tdDob = document.createElement('td');
+          tdDob.textContent = p.dob || '—';
+
+          const tdOvr = document.createElement('td');
+          tdOvr.textContent = show(p.ovr);
+
+          const tdPot = document.createElement('td');
+          tdPot.textContent = show(p.pot);
+
+          const tdDef = document.createElement('td');
+          tdDef.textContent = show(p.def);
+
+          const tdPicked = document.createElement('td');
+          tdPicked.textContent = p.drafted_by ? `${p.drafted_by} ${fmtIso(p.drafted_at)}` : '';
+
+          const tdAct = document.createElement('td');
+          const ctrls = document.createElement('div');
+          ctrls.className = 'controls';
+
+          const up = document.createElement('button');
+          up.className = 'btn';
+          up.textContent = '↑';
+          up.disabled = idx === 0;
+          up.onclick = () => move(idx, -1);
+
+          const down = document.createElement('button');
+          down.className = 'btn';
+          down.textContent = '↓';
+          down.disabled = idx === queue.length - 1;
+          down.onclick = () => move(idx, +1);
+
+          const del = document.createElement('button');
+          del.className = 'btn danger';
+          del.textContent = 'Remove';
+          del.onclick = () => remove(p.player_id);
+
+          ctrls.appendChild(up);
+          ctrls.appendChild(down);
+          ctrls.appendChild(del);
+          tdAct.appendChild(ctrls);
+
+          tr.appendChild(tdIdx);
+          tr.appendChild(tdName);
+          tr.appendChild(tdPos);
+          tr.appendChild(tdOrg);
+          tr.appendChild(tdDob);
+          tr.appendChild(tdOvr);
+          tr.appendChild(tdPot);
+          tr.appendChild(tdDef);
+          tr.appendChild(tdPicked);
+          tr.appendChild(tdAct);
+          tbody.appendChild(tr);
+        });
+      }
+
+      function move(i, delta) {
+        const j = i + delta;
+        if (j < 0 || j >= queue.length) return;
+        [queue[i], queue[j]] = [queue[j], queue[i]];
+        render();
+        saveOrder();
+      }
+
+      async function saveOrder() {
+        const order = queue.map(x => x.player_id);
+        await fetch('/rulev/api/queue/reorder', {
+          method: 'POST',
+          headers: {'Content-Type':'application/json'},
+          body: JSON.stringify({ order })
+        });
+      }
+
+      async function remove(pid) {
+        const res = await fetch('/rulev/api/queue/remove', {
+          method: 'POST',
+          headers: {'Content-Type':'application/json'},
+          body: JSON.stringify({ player_id: pid })
+        });
+        if (res.ok) {
+          queue = queue.filter(x => x.player_id !== pid);
+          render();
+        } else {
+          alert('Could not remove player: ' + await res.text());
+        }
+      }
+
+      saveModeBtn.onclick = async () => {
+        useStart = modeStart.checked;
+        const res = await fetch('/rulev/api/queue/mode', {
+          method: 'POST',
+          headers: {'Content-Type':'application/json'},
+          body: JSON.stringify({ use_at_start: useStart })
+        });
+        if (!res.ok) {
+          alert('Could not save queue mode: ' + await res.text());
+          return;
+        }
+        alert('Queue mode saved.');
+      };
+
+      load();
+    </script>
+  </div>
+</div>
+</body>
+</html>
+"""
+QUEUE_HTML = QUEUE_HTML.replace("__BNSL_GAME_CSS__", BNSL_GAME_CSS + SORTABLE_TABLES_ASSETS)
 
 
 
@@ -1008,9 +1655,24 @@ def index():
     return render_template_string(INDEX_HTML)
 
 
+@rulev_bp.get("/queue")
+def queue_page():
+    return render_template_string(QUEUE_HTML)
+
+
 @rulev_bp.get("/api/status")
 def api_status():
-    cur = current_pick()
+    # Keep the page responsive.  The full queue task can still process a backlog,
+    # but the first status poll should never sit on many historical misses.
+    try:
+        enforce_queue_actions(max_steps=3)
+    except Exception:
+        current_app.logger.exception("Rule V queue enforcement failed during status poll")
+    try:
+        cur = current_pick()
+    except Exception:
+        current_app.logger.exception("Rule V current-pick lookup failed during status poll")
+        cur = None
     selected_team = session.get("selected_team", "") or ""
     authed_team = session.get("authed_team", "") or ""
     authed_email = session.get("authed_email", "") or ""
@@ -1022,6 +1684,12 @@ def api_status():
     made = int(c.fetchone()[0] or 0)
     c.execute("SELECT COUNT(*) FROM rulev_order")
     total = int(c.fetchone()[0] or 0)
+    skipped = 0
+    try:
+        c.execute("SELECT COUNT(*) FROM rulev_pick_miss_state WHERE skipped_at IS NOT NULL")
+        skipped = int(c.fetchone()[0] or 0)
+    except Exception:
+        skipped = 0
     conn.close()
 
     return jsonify({
@@ -1032,6 +1700,8 @@ def api_status():
         "authed_for_selected": bool(selected_team) and (authed_team == selected_team),
         "current": cur,
         "picks_made": made,
+        "skipped_picks": skipped,
+        "resolved_picks": made + skipped,
         "total_picks": total,
     })
 
@@ -1075,15 +1745,30 @@ def api_login_team():
 @rulev_bp.get("/api/players")
 def api_players():
     q = (request.args.get("search") or "").strip().lower()
+    hide_drafted = request.args.get("hide_drafted") == "1"
 
     conn = get_conn()
     cur = conn.cursor()
+
+    authed_team = session.get("authed_team", "") or ""
+    in_queue = set()
+    if authed_team:
+        try:
+            cur.execute("SELECT player_id FROM rulev_draft_queue WHERE team=?", (authed_team,))
+            in_queue = {int(r[0]) for r in cur.fetchall()}
+        except sqlite3.OperationalError:
+            # Older deployments may have the Rule V DB before the queue table existed.
+            # before_app_request normally creates it, but keep this endpoint fail-open.
+            current_app.logger.exception("Rule V queue table lookup failed while loading players")
+            in_queue = set()
 
     clauses = ["(COALESCE(rulev_eligible, 1)=1 OR COALESCE(drafted_by, '') != '')"]
     params: List[Any] = []
     if q:
         clauses.append("LOWER(name) LIKE ?")
         params.append(f"%{q}%")
+    if hide_drafted:
+        clauses.append("COALESCE(drafted_by, '') = ''")
 
     sql = "SELECT * FROM rulev_players WHERE " + " AND ".join(clauses) + " ORDER BY name COLLATE NOCASE ASC"
     cur.execute(sql, params)
@@ -1105,8 +1790,114 @@ def api_players():
             "def": _row_value(r, "def", None),
             "drafted_by": r["drafted_by"],
             "drafted_at": r["drafted_at"],
+            "in_queue": (int(r["id"]) in in_queue),
         })
     return jsonify({"players": players})
+
+
+@rulev_bp.get("/api/queue")
+def api_queue_get():
+    team = _require_authed_team()
+    rows = get_team_queue(team)
+    items = []
+    for r in rows:
+        items.append({
+            "player_id": int(r["player_id"]),
+            "qpos": int(r["qpos"] or 0),
+            "name": r["name"],
+            "position": r["position"],
+            "org": r["org"],
+            "dob": r["dob"],
+            "rulev_eligible": int(r["rulev_eligible"] or 1),
+            "ovr": r["ovr"],
+            "pot": r["pot"],
+            "def": r["def"],
+            "drafted_by": r["drafted_by"],
+            "drafted_at": r["drafted_at"],
+        })
+    return jsonify({
+        "team": team,
+        "use_at_start": get_queue_mode(team),
+        "items": items,
+    })
+
+
+@rulev_bp.post("/api/queue/add")
+def api_queue_add():
+    team = _require_authed_team()
+    data = request.get_json(force=True, silent=True) or {}
+    pid = int(data.get("player_id") or 0)
+    if pid <= 0:
+        return ("missing player_id", 400)
+
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("SELECT drafted_by, COALESCE(rulev_eligible, 1) AS rulev_eligible FROM rulev_players WHERE id=?", (pid,))
+    pr = cur.fetchone()
+    if not pr:
+        conn.close()
+        return ("player not found", 404)
+    if (pr["drafted_by"] or "").strip() or int(pr["rulev_eligible"] or 0) != 1:
+        conn.close()
+        return ("player not addable", 409)
+
+    cur.execute("SELECT COALESCE(MAX(position), 0) FROM rulev_draft_queue WHERE team=?", (team,))
+    next_pos = int(cur.fetchone()[0] or 0) + 1
+    cur.execute("""
+        INSERT OR IGNORE INTO rulev_draft_queue(team, player_id, position, created_at)
+        VALUES(?,?,?,?)
+    """, (team, pid, next_pos, datetime.utcnow().isoformat(timespec="seconds")))
+    conn.commit()
+    conn.close()
+    return ("", 204)
+
+
+@rulev_bp.post("/api/queue/remove")
+def api_queue_remove():
+    team = _require_authed_team()
+    data = request.get_json(force=True, silent=True) or {}
+    pid = int(data.get("player_id") or 0)
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("DELETE FROM rulev_draft_queue WHERE team=? AND player_id=?", (team, pid))
+    conn.commit()
+    conn.close()
+    return ("", 204)
+
+
+@rulev_bp.post("/api/queue/reorder")
+def api_queue_reorder():
+    team = _require_authed_team()
+    data = request.get_json(force=True, silent=True) or {}
+    order = data.get("order") or []
+    if not isinstance(order, list) or not all(isinstance(x, int) for x in order):
+        return ("invalid order", 400)
+
+    conn = get_conn()
+    cur = conn.cursor()
+    for idx, pid in enumerate(order, start=1):
+        cur.execute("UPDATE rulev_draft_queue SET position=? WHERE team=? AND player_id=?", (idx, team, pid))
+    conn.commit()
+    conn.close()
+    return ("", 204)
+
+
+@rulev_bp.post("/api/queue/mode")
+def api_queue_mode():
+    team = _require_authed_team()
+    data = request.get_json(force=True, silent=True) or {}
+    set_queue_mode(team, bool(data.get("use_at_start")))
+    return ("", 204)
+
+
+@rulev_bp.post("/tasks/enforce_queue")
+def task_enforce_queue():
+    try:
+        enforce_queue_actions(max_steps=200)
+        return ("", 204)
+    except Exception as e:
+        current_app.logger.exception("Rule V queue enforcement task failed")
+        return (f"enforce failed: {e}", 500)
 
 
 @rulev_bp.post("/api/pick")
@@ -1127,59 +1918,20 @@ def api_pick():
     if team != selected_team:
         return ("Not logged in for this team", 401)
 
-    conn = get_conn()
-    c = conn.cursor()
-
-    # validate player availability
-    c.execute("SELECT id, name, org, drafted_by FROM rulev_players WHERE id=?", (player_id,))
-    r = c.fetchone()
-    if not r:
-        conn.close()
-        return ("Player not found", 404)
-    if (r["drafted_by"] or "").strip():
-        conn.close()
-        return ("Player already picked", 409)
-
-    now = datetime.utcnow().isoformat(timespec="seconds")
-    losing_team = canonical_team_abbr(r["org"] or "")
-    picking_team = canonical_team_abbr(team)
-    player_name = str(r["name"] or "").strip()
-
-    # assign player + mark order
-    c.execute("UPDATE rulev_players SET drafted_by=?, drafted_at=? WHERE id=?", (team, now, player_id))
-    c.execute("UPDATE rulev_order SET player_id=?, drafted_at=? WHERE id=?", (player_id, now, cur["id"]))
-    rulev_order_id = int(cur["id"])
-    conn.commit()
-    conn.close()
-
-    roster_update = apply_rulev_pick_to_roster(player_id, picking_team, now)
-    if roster_update.get("updated"):
-        sync_after_rulev_roster_mutation()
-    else:
-        current_app.logger.warning(
-            "Rule V pick did not update roster.db for rulev_player_id=%s: %s",
-            player_id, roster_update.get("reason", "unknown reason")
-        )
+    try:
+        _complete_rulev_pick(team, player_id, int(cur["id"]))
+    except RuntimeError as e:
+        msg = str(e)
+        status = 409 if "already" in msg.lower() or "eligible" in msg.lower() else 404 if "not found" in msg.lower() else 500
+        return (msg, status)
+    except Exception as e:
+        current_app.logger.exception("Failed to make Rule V pick")
+        return (f"Failed to pick: {e}", 500)
 
     try:
-        notify_discord_rulev_pick(rulev_order_id)
+        enforce_queue_actions()
     except Exception:
-        current_app.logger.exception("Failed to post Rule V draft-pick Discord notification")
-
-    if losing_team and picking_team:
-        try:
-            from financials_app import record_finance_payment
-            record_finance_payment(
-                source_type="rulev_pick_fee",
-                source_id=int(cur["id"]),
-                payer_team_abbr=picking_team,
-                receiver_team_abbr=losing_team,
-                amount=RULEV_PICK_FEE,
-                description=f"Rule V draft fee for {player_name}",
-                effective_date=now[:10],
-            )
-        except Exception:
-            current_app.logger.exception("Failed to post Rule V draft payment")
+        current_app.logger.exception("Rule V queue enforcement failed after manual pick")
 
     return ("", 204)
 
