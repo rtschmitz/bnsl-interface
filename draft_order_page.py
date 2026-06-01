@@ -160,14 +160,56 @@ def _ensure_pick_overrides_table(conn: sqlite3.Connection) -> None:
         CREATE TABLE IF NOT EXISTS pick_overrides (
             draft_order_id INTEGER PRIMARY KEY,
             scheduled_time TEXT NOT NULL,
-            missed INTEGER DEFAULT 0
+            missed INTEGER DEFAULT 0,
+            skipped_at TEXT
         )
     """)
     cur.execute("PRAGMA table_info(pick_overrides)")
     cols = {r[1] for r in cur.fetchall()}
     if "missed" not in cols:
         cur.execute("ALTER TABLE pick_overrides ADD COLUMN missed INTEGER DEFAULT 0")
+    if "skipped_at" not in cols:
+        cur.execute("ALTER TABLE pick_overrides ADD COLUMN skipped_at TEXT")
     conn.commit()
+
+
+def _coerce_eastern(dt: datetime) -> datetime:
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=EASTERN).replace(second=0, microsecond=0)
+    return dt.astimezone(EASTERN).replace(second=0, microsecond=0)
+
+
+def _iso(dt: datetime) -> str:
+    return _coerce_eastern(dt).isoformat(timespec="minutes")
+
+
+def _load_pick_skipped_state() -> dict[int, datetime]:
+    """Return manually skipped amateur draft picks keyed by draft_order.id."""
+    conn = get_conn()
+    cur = conn.cursor()
+    _ensure_pick_overrides_table(conn)
+    cur.execute("SELECT draft_order_id, skipped_at FROM pick_overrides WHERE skipped_at IS NOT NULL")
+    rows = cur.fetchall()
+    conn.close()
+    skipped: dict[int, datetime] = {}
+    for r in rows:
+        try:
+            dt = datetime.fromisoformat(r["skipped_at"])
+            skipped[int(r["draft_order_id"])] = _coerce_eastern(dt)
+        except Exception:
+            skipped[int(r["draft_order_id"])] = datetime.now(tz=EASTERN)
+    return skipped
+
+
+def count_skipped_picks() -> int:
+    """Count amateur draft picks manually marked skipped by an admin."""
+    conn = get_conn()
+    cur = conn.cursor()
+    _ensure_pick_overrides_table(conn)
+    cur.execute("SELECT COUNT(*) FROM pick_overrides WHERE skipped_at IS NOT NULL")
+    n = int(cur.fetchone()[0] or 0)
+    conn.close()
+    return n
 
 
 def validate_regular_pick_time(dt: datetime) -> datetime:
@@ -324,6 +366,7 @@ def compute_rows(now: Optional[datetime] = None, team_filter: Optional[str] = No
 
     # Use the SAME scheduler the app uses elsewhere
     scheduled = _compute_scheduled_times(now)
+    skipped_state = _load_pick_skipped_state()
 
     # For the “missed” label, use the order-page rule (deadline = next DESIGNATED time)
     next_deadlines = _next_deadlines_from_designated(designated)
@@ -338,6 +381,16 @@ def compute_rows(now: Optional[datetime] = None, team_filter: Optional[str] = No
                 "player": player_name_by_id.get(rec["player_id"], f"Player #{rec['player_id']}"),
                 "time_display": "",
                 "status": f"Selected at {rec['drafted_at'] or '—'}",
+            })
+            continue
+
+        if int(rec["id"]) in skipped_state:
+            rows.append({
+                "pick_label": pick_label,
+                "team": rec["team"],
+                "player": None,
+                "time_display": "—",
+                "status": "Skipped",
             })
             continue
 
@@ -372,12 +425,13 @@ def get_current_on_clock_pick(now: Optional[datetime] = None) -> Optional[Dict[s
 
     picks, designated = _load_picks_overrides_and_designated()
     scheduled_time = _compute_scheduled_times(now)
+    skipped_state = _load_pick_skipped_state()
 
     # Among undrafted picks, select the one with the minimum scheduled_time; tie-breaker: draft order
     best_idx = None
     best_key = None
     for i, rec in enumerate(picks):
-        if rec["player_id"]:
+        if rec["player_id"] or int(rec["id"]) in skipped_state:
             continue
         t = scheduled_time.get(i, designated[i])
         key = (t, i)
@@ -411,11 +465,12 @@ def get_current_pick_info(now: Optional[datetime] = None) -> Optional[Dict[str, 
         return None
 
     scheduled_time = _compute_scheduled_times(now)
+    skipped_state = _load_pick_skipped_state()
 
     best_idx = None
     best_key = None
     for i, rec in enumerate(picks):
-        if rec["player_id"]:
+        if rec["player_id"] or int(rec["id"]) in skipped_state:
             continue
         t = scheduled_time.get(i, designated[i])
         key = (t, i)
@@ -510,8 +565,9 @@ def _compute_scheduled_times(now: datetime) -> Dict[int, datetime]:
     """
     picks, designated = _load_picks_overrides_and_designated()
     next_deadlines = _next_deadlines_from_designated(designated)
+    skipped_state = _load_pick_skipped_state()
 
-    undrafted_idxs = [i for i, r in enumerate(picks) if not r["player_id"]]
+    undrafted_idxs = [i for i, r in enumerate(picks) if not r["player_id"] and int(r["id"]) not in skipped_state]
 
     # Initial classification: which picks are already 'missed' by their next designated deadline
     missed_by_day: Dict[tuple[int, int, int], List[int]] = {}
@@ -581,8 +637,8 @@ def _compute_scheduled_times(now: datetime) -> Dict[int, datetime]:
     return scheduled_time
 
 
-def set_pick_and_following_times(round_num: int, pick_num: int, start_dt: datetime) -> Dict[str, Any]:
-    """Admin helper: set one pick's time and regenerate every later current-year draft pick slot."""
+def set_pick_and_following_times(round_num: int, pick_num: int, start_dt: datetime, include_following: bool = True) -> Dict[str, Any]:
+    """Admin helper: set one pick's time, optionally regenerating every later current-year draft pick slot."""
     start_dt = validate_regular_pick_time(start_dt)
     conn = get_conn()
     cur = conn.cursor()
@@ -602,17 +658,18 @@ def set_pick_and_following_times(round_num: int, pick_num: int, start_dt: dateti
         raise ValueError(f"No amateur draft pick found for round {round_num}, pick {pick_num}")
 
     _ensure_pick_overrides_table(conn)
-    following = picks[target_idx:]
-    slots = regular_pick_slots_from(start_dt, len(following))
+    affected = picks[target_idx:] if include_following else [picks[target_idx]]
+    slots = regular_pick_slots_from(start_dt, len(affected)) if include_following else [start_dt]
     cur.executemany(
         """
-        INSERT INTO pick_overrides(draft_order_id, scheduled_time, missed)
-        VALUES (?, ?, 0)
+        INSERT INTO pick_overrides(draft_order_id, scheduled_time, missed, skipped_at)
+        VALUES (?, ?, 0, NULL)
         ON CONFLICT(draft_order_id) DO UPDATE SET
             scheduled_time=excluded.scheduled_time,
-            missed=0
+            missed=0,
+            skipped_at=NULL
         """,
-        [(int(rec["id"]), slot.isoformat(timespec="minutes")) for rec, slot in zip(following, slots)],
+        [(int(rec["id"]), slot.isoformat(timespec="minutes")) for rec, slot in zip(affected, slots)],
     )
     conn.commit()
     target = picks[target_idx]
@@ -625,7 +682,62 @@ def set_pick_and_following_times(round_num: int, pick_num: int, start_dt: dateti
         "pick_label": target["label"] or f"{int(round_num)}.{int(pick_num):02d}",
         "team": target["team"],
         "start_time": start_dt.isoformat(timespec="minutes"),
-        "updated_count": len(following),
+        "updated_count": len(affected),
+        "scope": "following" if include_following else "single",
+    }
+
+
+def mark_draft_pick_skipped(round_num: int, pick_num: int, when: Optional[datetime] = None) -> Dict[str, Any]:
+    """Admin helper: mark one amateur draft pick as skipped without selecting a player."""
+    when = _coerce_eastern(when or datetime.now(tz=EASTERN))
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("""
+      SELECT id, round, pick, team, player_id, drafted_at, label
+      FROM draft_order
+      ORDER BY round ASC, pick ASC
+    """)
+    picks = cur.fetchall()
+    target_idx = None
+    for idx, rec in enumerate(picks):
+        if int(rec["round"]) == int(round_num) and int(rec["pick"]) == int(pick_num):
+            target_idx = idx
+            break
+    if target_idx is None:
+        conn.close()
+        raise ValueError(f"No amateur draft pick found for round {round_num}, pick {pick_num}")
+    target = picks[target_idx]
+    if target["player_id"]:
+        conn.close()
+        raise ValueError("That amateur draft pick already has a selected player")
+
+    _ensure_pick_overrides_table(conn)
+    # Preserve the pick's current designated time in the override row because scheduled_time is NOT NULL.
+    _, designated = _load_picks_overrides_and_designated()
+    scheduled = designated[target_idx].isoformat(timespec="minutes")
+    cur.execute(
+        """
+        INSERT INTO pick_overrides(draft_order_id, scheduled_time, missed, skipped_at)
+        VALUES (?, ?, 0, ?)
+        ON CONFLICT(draft_order_id) DO UPDATE SET
+            scheduled_time=excluded.scheduled_time,
+            missed=0,
+            skipped_at=excluded.skipped_at
+        """,
+        (int(target["id"]), scheduled, _iso(when)),
+    )
+    conn.commit()
+    conn.close()
+    return {
+        "draft_kind": "draft",
+        "draft_name": "Amateur Draft",
+        "round": int(round_num),
+        "pick": int(pick_num),
+        "pick_label": target["label"] or f"{int(round_num)}.{int(pick_num):02d}",
+        "team": target["team"],
+        "skipped_at": _iso(when),
+        "updated_count": 1,
+        "scope": "single",
     }
 
 

@@ -674,6 +674,10 @@ def set_player_free_agent(
             roster_status='',
             active_roster=0,
             fa_class=?,
+            rulev_status=0,
+            rulev_original_team=NULL,
+            rulev_selected_by=NULL,
+            rulev_selected_at=NULL,
             option_decision=COALESCE(?, option_decision),
             option_decision_at=CASE WHEN ? IS NOT NULL THEN ? ELSE option_decision_at END,
             arbitration_decision=COALESCE(?, arbitration_decision),
@@ -730,6 +734,29 @@ def ensure_roster_draft_columns(conn: sqlite3.Connection) -> None:
         WHERE draft_player_id IS NOT NULL
     """)
 
+
+
+
+def ensure_roster_rulev_columns(conn: sqlite3.Connection) -> None:
+    """Add persistent Rule V status fields to roster_players.
+
+    rulev_status=1 means the player is currently under Rule V active-roster
+    restrictions. rulev_original_team is the club he was selected from;
+    rulev_selected_by is the club that made the Rule V pick. The player's
+    current owner remains roster_players.franchise.
+    """
+    cur = conn.cursor()
+    cur.execute("PRAGMA table_info(roster_players)")
+    cols = {row[1] for row in cur.fetchall()}
+    additions = {
+        "rulev_status": "ALTER TABLE roster_players ADD COLUMN rulev_status INTEGER NOT NULL DEFAULT 0",
+        "rulev_original_team": "ALTER TABLE roster_players ADD COLUMN rulev_original_team TEXT",
+        "rulev_selected_by": "ALTER TABLE roster_players ADD COLUMN rulev_selected_by TEXT",
+        "rulev_selected_at": "ALTER TABLE roster_players ADD COLUMN rulev_selected_at TEXT",
+    }
+    for col, ddl in additions.items():
+        if col not in cols:
+            cur.execute(ddl)
 
 def get_draft_db_path() -> Path:
     configured = current_app.config.get("DRAFT_DB_PATH")
@@ -794,6 +821,7 @@ def sync_drafted_players_from_draft_db(conn: sqlite3.Connection | None = None) -
     if conn is None:
         conn = get_conn()
     ensure_roster_draft_columns(conn)
+    ensure_roster_rulev_columns(conn)
     cur = conn.cursor()
 
     dconn = sqlite3.connect(str(draft_db))
@@ -1047,6 +1075,7 @@ def bootstrap_roster():
 
     ensure_roster_decision_columns(conn)
     ensure_roster_draft_columns(conn)
+    ensure_roster_rulev_columns(conn)
 
     cur.execute("SELECT COUNT(*) FROM roster_players")
     count = int(cur.fetchone()[0] or 0)
@@ -1223,7 +1252,11 @@ def bootstrap_roster():
                         affiliate_team='',
                         roster_status='',
                         active_roster=0,
-                        fa_class=?
+                        fa_class=?,
+                        rulev_status=0,
+                        rulev_original_team=NULL,
+                        rulev_selected_by=NULL,
+                        rulev_selected_at=NULL
                     WHERE id=?
                 """, (CURRENT_FA_CLASS, player_id))
 
@@ -1357,6 +1390,10 @@ def api_players():
             "pot": row_value(r, "pot", None),
             "def": row_value(r, "def", None),
             "rulev_eligible": row_rulev,
+            "rulev_status": bool(int(row_value(r, "rulev_status", 0) or 0)),
+            "rulev_original_team": canonical_team_abbr(row_value(r, "rulev_original_team", "") or ""),
+            "rulev_selected_by": canonical_team_abbr(row_value(r, "rulev_selected_by", "") or ""),
+            "rulev_selected_at": row_value(r, "rulev_selected_at", "") or "",
             "pending_option_decision": pending_option,
             "pending_arbitration_decision": pending_arb,
             "contract_decision_pending": pending_option or pending_arb,
@@ -1463,6 +1500,7 @@ def api_update_player():
     conn = get_conn()
     cur = conn.cursor()
     ensure_roster_decision_columns(conn)
+    ensure_roster_rulev_columns(conn)
 
     cur.execute("SELECT * FROM roster_players WHERE id=?", (player_id,))
     row = cur.fetchone()
@@ -1495,8 +1533,12 @@ def api_update_player():
     waiver_reason = ""
     should_waive = False
     options_remaining = int(row["options_remaining"] or 0)
+    is_rulev_player = bool(int(row_value(row, "rulev_status", 0) or 0))
 
-    if old_status == "Active" and new_status == "40-man" and options_remaining <= 0:
+    if is_rulev_player and old_status == "Active" and new_status != "Active":
+        should_waive = True
+        waiver_reason = "Rule V player removed from active roster"
+    elif old_status == "Active" and new_status == "40-man" and options_remaining <= 0:
         should_waive = True
         waiver_reason = "Out of options: active player sent to minors/40-man"
     elif old_on_40 and not new_on_40:
@@ -1556,6 +1598,7 @@ def api_player_action():
     conn = get_conn()
     cur = conn.cursor()
     ensure_roster_decision_columns(conn)
+    ensure_roster_rulev_columns(conn)
     cur.execute("SELECT * FROM roster_players WHERE id=?", (player_id,))
     row = cur.fetchone()
     if not row:
@@ -1724,6 +1767,7 @@ ROSTER_HTML = """
           <th>DOB</th>
           <th>B/T</th>
           <th>Status</th>
+          <th>Rule V</th>
           <th>Contract</th>
           <th>Service</th>
           <th>Salary</th>
@@ -1881,6 +1925,10 @@ async function fetchPlayers() {
         '</select>';
     }
 
+    const rulevHtml = p.rulev_status
+      ? `<span class="pill mini" title="Selected by ${esc(p.rulev_selected_by || "")} from ${esc(p.rulev_original_team || "")}">Rule V</span>`
+      : "";
+
     tr.innerHTML = `
       <td>${esc(p.position || "")}</td>
       <td><b>${esc(p.name)}</b></td>
@@ -1888,6 +1936,7 @@ async function fetchPlayers() {
       <td>${esc(p.dob || "")}</td>
       <td>${esc(p.bt || "")}</td>
       <td>${statusHtml}</td>
+      <td>${rulevHtml}</td>
       <td>${esc(p.contract_type || "")}</td>
       <td>${Number(p.service_time).toFixed(2)}</td>
       <td>${p.salary_m === null || p.salary_m === undefined ? "" : moneyM(p.salary_m)}</td>

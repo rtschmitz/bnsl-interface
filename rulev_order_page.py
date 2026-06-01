@@ -303,6 +303,37 @@ def mark_rulev_pick_skipped(rulev_order_id: int, when: Optional[datetime] = None
     conn.close()
 
 
+def mark_rulev_pick_skipped_by_round_pick(round_num: int, pick_num: int, when: Optional[datetime] = None) -> Dict[str, Any]:
+    """Admin helper: mark one Rule V pick as skipped without selecting a player."""
+    when = _coerce_eastern(when or datetime.now(tz=EASTERN))
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("""
+      SELECT id, round, pick, team, player_id, drafted_at
+      FROM rulev_order
+      WHERE round=? AND pick=?
+    """, (int(round_num), int(pick_num)))
+    target = cur.fetchone()
+    conn.close()
+    if target is None:
+        raise ValueError(f"No Rule V pick found for round {round_num}, pick {pick_num}")
+    if target["player_id"]:
+        raise ValueError("That Rule V pick already has a selected player")
+
+    mark_rulev_pick_skipped(int(target["id"]), when)
+    return {
+        "draft_kind": "rulev",
+        "draft_name": "Rule V Draft",
+        "round": int(round_num),
+        "pick": int(pick_num),
+        "pick_label": f"{int(round_num)}.{int(pick_num):02d}",
+        "team": target["team"],
+        "skipped_at": _iso(when),
+        "updated_count": 1,
+        "scope": "single",
+    }
+
+
 def clear_rulev_pick_miss_state(rulev_order_id: int) -> None:
     """Clear missed/skipped state, useful when an admin resets times or the pick is filled."""
     conn = get_conn()
@@ -546,8 +577,8 @@ def get_current_pick_info(now: Optional[datetime] = None) -> Optional[Dict[str, 
     return info
 
 
-def set_pick_and_following_times(round_num: int, pick_num: int, start_dt: datetime) -> Dict[str, Any]:
-    """Admin helper: set one Rule V pick's time and regenerate every later Rule V pick slot."""
+def set_pick_and_following_times(round_num: int, pick_num: int, start_dt: datetime, include_following: bool = True) -> Dict[str, Any]:
+    """Admin helper: set one Rule V pick's time, optionally regenerating every later Rule V pick slot."""
     start_dt = validate_regular_pick_time(start_dt)
     conn = get_conn()
     cur = conn.cursor()
@@ -568,8 +599,8 @@ def set_pick_and_following_times(round_num: int, pick_num: int, start_dt: dateti
 
     _ensure_pick_overrides_table(conn)
     _ensure_pick_miss_state_table(conn)
-    following = picks[target_idx:]
-    slots = regular_pick_slots_from(start_dt, len(following))
+    affected = picks[target_idx:] if include_following else [picks[target_idx]]
+    slots = regular_pick_slots_from(start_dt, len(affected)) if include_following else [start_dt]
     cur.executemany(
         """
         INSERT INTO rulev_pick_overrides(rulev_order_id, scheduled_time)
@@ -577,12 +608,12 @@ def set_pick_and_following_times(round_num: int, pick_num: int, start_dt: dateti
         ON CONFLICT(rulev_order_id) DO UPDATE SET
             scheduled_time=excluded.scheduled_time
         """,
-        [(int(rec["id"]), slot.isoformat(timespec="minutes")) for rec, slot in zip(following, slots)],
+        [(int(rec["id"]), slot.isoformat(timespec="minutes")) for rec, slot in zip(affected, slots)],
     )
-    # Admin-rescheduling makes later picks actionable again, so clear old missed/skipped state.
+    # Admin-rescheduling makes affected picks actionable again, so clear old missed/skipped state.
     cur.executemany(
         "DELETE FROM rulev_pick_miss_state WHERE rulev_order_id=?",
-        [(int(rec["id"]),) for rec in following],
+        [(int(rec["id"]),) for rec in affected],
     )
     conn.commit()
     target = picks[target_idx]
@@ -595,7 +626,8 @@ def set_pick_and_following_times(round_num: int, pick_num: int, start_dt: dateti
         "pick_label": f"{int(round_num)}.{int(pick_num):02d}",
         "team": target["team"],
         "start_time": start_dt.isoformat(timespec="minutes"),
-        "updated_count": len(following),
+        "updated_count": len(affected),
+        "scope": "following" if include_following else "single",
     }
 
 

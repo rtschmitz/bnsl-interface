@@ -357,6 +357,14 @@ def notify_waiver_created(waiver_id: int) -> None:
         details.append(f"If unclaimed: {desired}")
     if reason:
         details.append(f"Reason: {reason}")
+    if int(_row_value(row, "rulev_status", 0) or 0):
+        original = canonical_team_abbr(_row_value(row, "rulev_original_team", "") or "")
+        selected_by = canonical_team_abbr(_row_value(row, "rulev_selected_by", "") or team)
+        details.append(
+            f"⚠️ **Rule V player:** selected by {selected_by or team}"
+            + (f" from {original}" if original else "")
+            + ". If claimed, Rule V status follows the player to the claiming team. If unclaimed, handle original-team reacquisition manually before/after processing."
+        )
     send_discord_message(
         "BNSL_DISCORD_WAIVERS_WEBHOOK_URL",
         "\n".join(details),
@@ -377,6 +385,11 @@ def notify_waiver_claimed(payload: dict[str, Any]) -> None:
     )
     if run_at:
         content += f"\nWaiver run: {run_at}."
+    if payload.get("rulev_status"):
+        original = canonical_team_abbr(payload.get("rulev_original_team") or "")
+        content += "\nRule V status retained with claiming team."
+        if original:
+            content += f" Original Rule V team: {original}."
     send_discord_message(
         "BNSL_DISCORD_ROSTER_WEBHOOK_URL",
         content,
@@ -391,6 +404,19 @@ def ensure_table_column(conn: sqlite3.Connection, table: str, column: str, ddl: 
     if column not in cols:
         cur.execute(f"ALTER TABLE {table} ADD COLUMN {ddl}")
 
+
+
+
+def ensure_roster_rulev_columns(conn: sqlite3.Connection) -> None:
+    """Ensure the shared roster table can store active Rule V status."""
+    cur = conn.cursor()
+    cur.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='roster_players'")
+    if not cur.fetchone():
+        return
+    ensure_table_column(conn, "roster_players", "rulev_status", "rulev_status INTEGER NOT NULL DEFAULT 0")
+    ensure_table_column(conn, "roster_players", "rulev_original_team", "rulev_original_team TEXT")
+    ensure_table_column(conn, "roster_players", "rulev_selected_by", "rulev_selected_by TEXT")
+    ensure_table_column(conn, "roster_players", "rulev_selected_at", "rulev_selected_at TEXT")
 
 def compact_claim_priorities(cur: sqlite3.Cursor, team: str) -> None:
     cur.execute("""
@@ -437,7 +463,11 @@ def ensure_waiver_schema(conn: sqlite3.Connection) -> None:
             run_at TEXT NOT NULL,
             status TEXT NOT NULL DEFAULT 'active',
             claimed_by_team TEXT,
-            processed_at TEXT
+            processed_at TEXT,
+            rulev_status INTEGER NOT NULL DEFAULT 0,
+            rulev_original_team TEXT,
+            rulev_selected_by TEXT,
+            rulev_selected_at TEXT
         )
     """)
     conn.execute("""
@@ -452,10 +482,17 @@ def ensure_waiver_schema(conn: sqlite3.Connection) -> None:
         )
     """)
     ensure_table_column(conn, "waiver_claims", "claim_priority", "claim_priority INTEGER")
+    ensure_table_column(conn, "waiver_entries", "rulev_status", "rulev_status INTEGER NOT NULL DEFAULT 0")
+    ensure_table_column(conn, "waiver_entries", "rulev_original_team", "rulev_original_team TEXT")
+    ensure_table_column(conn, "waiver_entries", "rulev_selected_by", "rulev_selected_by TEXT")
+    ensure_table_column(conn, "waiver_entries", "rulev_selected_at", "rulev_selected_at TEXT")
+    ensure_roster_rulev_columns(conn)
 
     # Keep legacy Washington codes consistent with roster/financials data.
     conn.execute("UPDATE waiver_entries SET waived_from_team='WAS' WHERE waived_from_team='WSH'")
     conn.execute("UPDATE waiver_entries SET claimed_by_team='WAS' WHERE claimed_by_team='WSH'")
+    conn.execute("UPDATE waiver_entries SET rulev_original_team='WAS' WHERE rulev_original_team='WSH'")
+    conn.execute("UPDATE waiver_entries SET rulev_selected_by='WAS' WHERE rulev_selected_by='WSH'")
     conn.execute("UPDATE waiver_claims SET team_abbr='WAS' WHERE team_abbr='WSH'")
 
     # Backfill priorities for claims created before claim-ordering existed.
@@ -514,8 +551,9 @@ def create_waiver_from_roster_row(
             contract_option, contract_expires, service_time, previous_service_time,
             service_time_2025, options_remaining, fa_class, fangraphs_id, mlbam_id,
             waived_from_team, pre_waiver_status, desired_status, waiver_reason,
-            waived_at, run_at, status
-        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?, 'active')
+            waived_at, run_at, status,
+            rulev_status, rulev_original_team, rulev_selected_by, rulev_selected_at
+        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?, 'active', ?,?,?,?)
     """, (
         player_id,
         str(_row_value(player_row, "name", "") or ""),
@@ -542,6 +580,10 @@ def create_waiver_from_roster_row(
         waiver_reason,
         iso(now),
         iso(run_at),
+        1 if int(_row_value(player_row, "rulev_status", 0) or 0) else 0,
+        canonical_team_abbr(_row_value(player_row, "rulev_original_team", "") or ""),
+        canonical_team_abbr(_row_value(player_row, "rulev_selected_by", "") or ""),
+        _row_value(player_row, "rulev_selected_at", "") or "",
     ))
     return int(cur.lastrowid)
 
@@ -575,6 +617,10 @@ def _restore_claimed_player(cur: sqlite3.Cursor, waiver: sqlite3.Row, claiming_t
             active_roster=?,
             options_remaining=?,
             fa_class=?,
+            rulev_status=?,
+            rulev_original_team=?,
+            rulev_selected_by=?,
+            rulev_selected_at=?,
             fangraphs_id=COALESCE(NULLIF(?, ''), fangraphs_id),
             mlbam_id=COALESCE(?, mlbam_id)
         WHERE id=?
@@ -593,6 +639,10 @@ def _restore_claimed_player(cur: sqlite3.Cursor, waiver: sqlite3.Row, claiming_t
         1 if restore_status == "Active" else 0,
         int(waiver["options_remaining"] or 0),
         waiver["fa_class"] or "",
+        1 if int(_row_value(waiver, "rulev_status", 0) or 0) else 0,
+        canonical_team_abbr(_row_value(waiver, "rulev_original_team", "") or ""),
+        canonical_team_abbr(_row_value(waiver, "rulev_selected_by", "") or ""),
+        _row_value(waiver, "rulev_selected_at", "") or "",
         waiver["fangraphs_id"] or "",
         waiver["mlbam_id"],
         int(waiver["player_id"]),
@@ -700,6 +750,9 @@ def process_due_waivers() -> dict[str, int]:
                 "waived_from_team": waiver["waived_from_team"],
                 "pre_waiver_status": waiver["pre_waiver_status"],
                 "run_at": waiver["run_at"],
+                "rulev_status": bool(int(_row_value(waiver, "rulev_status", 0) or 0)),
+                "rulev_original_team": _row_value(waiver, "rulev_original_team", "") or "",
+                "rulev_selected_by": _row_value(waiver, "rulev_selected_by", "") or "",
             })
             if winner_team in priority:
                 priority.remove(winner_team)
@@ -708,13 +761,14 @@ def process_due_waivers() -> dict[str, int]:
             claimed += 1
 
         cur.execute("""
-            SELECT id
+            SELECT *
             FROM waiver_entries
             WHERE status='active' AND run_at=?
             ORDER BY datetime(waived_at) ASC, id ASC
         """, (run_at,))
-        remaining = [int(r["id"]) for r in cur.fetchall()]
-        for waiver_id in remaining:
+        remaining = cur.fetchall()
+        for waiver in remaining:
+            waiver_id = int(waiver["id"])
             cur.execute("""
                 UPDATE waiver_entries
                 SET status='unclaimed', processed_at=?
@@ -722,6 +776,15 @@ def process_due_waivers() -> dict[str, int]:
             """, (iso(now), waiver_id))
             if cur.rowcount:
                 cur.execute("UPDATE waiver_claims SET status='denied' WHERE waiver_id=?", (waiver_id,))
+                if int(_row_value(waiver, "rulev_status", 0) or 0):
+                    cur.execute("""
+                        UPDATE roster_players
+                        SET rulev_status=0,
+                            rulev_original_team=NULL,
+                            rulev_selected_by=NULL,
+                            rulev_selected_at=NULL
+                        WHERE id=?
+                    """, (int(waiver["player_id"]),))
                 processed += 1
                 unclaimed += 1
 
@@ -795,6 +858,10 @@ def waiver_to_dict(row: sqlite3.Row, authed_team: str = "", claims_by_waiver: di
         "claim_count": len(claims),
         "my_claim": bool(canonical_team_abbr(authed_team) and canonical_team_abbr(authed_team) in [canonical_team_abbr(c) for c in claims]),
         "can_claim": bool(canonical_team_abbr(authed_team) and row["status"] == "active" and canonical_team_abbr(authed_team) != canonical_team_abbr(row["waived_from_team"] or "")),
+        "rulev_status": bool(int(_row_value(row, "rulev_status", 0) or 0)),
+        "rulev_original_team": canonical_team_abbr(_row_value(row, "rulev_original_team", "") or ""),
+        "rulev_selected_by": canonical_team_abbr(_row_value(row, "rulev_selected_by", "") or ""),
+        "rulev_selected_at": _row_value(row, "rulev_selected_at", "") or "",
     }
 
 
@@ -1211,8 +1278,11 @@ async function fetchWaivers() {
     const action = w.status === "active"
       ? `<button class="btn claim-btn" data-id="${w.id}" ${!w.can_claim || w.my_claim ? "disabled" : ""}>${w.my_claim ? "Claim entered" : "Claim"}</button>`
       : `<span>${w.status === "claimed" ? "Claimed by " + esc(w.claimed_by_team) : "Unclaimed"}</span>`;
+    const rulevBadge = w.rulev_status
+      ? `<br><span class="chip" title="Selected by ${esc(w.rulev_selected_by || "")} from ${esc(w.rulev_original_team || "")}">Rule V — original ${esc(w.rulev_original_team || "?")}</span>`
+      : "";
     tr.innerHTML = `
-      <td><b>${esc(w.name)}</b><br><span class="subtle">${esc(w.position)} • ${esc(w.contract_type)} • ${Number(w.service_time).toFixed(2)} svc • opt ${w.options_remaining}</span></td>
+      <td><b>${esc(w.name)}</b>${rulevBadge}<br><span class="subtle">${esc(w.position)} • ${esc(w.contract_type)} • ${Number(w.service_time).toFixed(2)} svc • opt ${w.options_remaining}</span></td>
       <td>${esc(w.team)}</td>
       <td>${esc(w.reason)}</td>
       <td>${esc(w.desired_status)}</td>

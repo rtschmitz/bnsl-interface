@@ -395,6 +395,94 @@ def _row_value(row: sqlite3.Row, key: str, default: Any = None) -> Any:
         return default
 
 
+def _team_abbr_variants(team: Any) -> list[str]:
+    """Return likely roster-db abbreviations for a team name/code."""
+    primary = canonical_team_abbr(team)
+    raw = str(team or "").strip().upper()
+    vals: list[str] = []
+    for val in (primary, raw):
+        if val and val not in vals:
+            vals.append(val)
+    # Older parts of the app have used both code families for these teams.
+    swaps = {"CWS": "CHW", "CHW": "CWS", "WSH": "WAS", "WAS": "WSH"}
+    for val in list(vals):
+        alt = swaps.get(val)
+        if alt and alt not in vals:
+            vals.append(alt)
+    return vals
+
+
+def rulev_team_40man_count(team: Any) -> int | None:
+    """Count players occupying this team's 40-man roster slots in roster.db.
+
+    BNSL's roster buckets treat both Active and 40-man as protected/on-40.
+    Return None if the roster DB cannot be read so the draft does not hard-fail
+    because of a transient DB/config problem.
+    """
+    teams = _team_abbr_variants(team)
+    if not teams:
+        return 0
+    roster_path = get_roster_db_path()
+    if not roster_path.exists():
+        logging.warning("Rule V 40-man count skipped: roster.db does not exist: %s", roster_path)
+        return None
+
+    try:
+        rconn = sqlite3.connect(str(roster_path))
+        rconn.row_factory = sqlite3.Row
+        rcur = rconn.cursor()
+        qmarks = ",".join("?" for _ in teams)
+        rcur.execute(f"""
+            SELECT COUNT(*)
+            FROM roster_players
+            WHERE franchise IN ({qmarks})
+              AND LOWER(TRIM(COALESCE(roster_status, ''))) IN ('active', '40-man', '40 man', '40man')
+        """, teams)
+        count = int(rcur.fetchone()[0] or 0)
+        rconn.close()
+        return count
+    except Exception:
+        try:
+            rconn.close()  # type: ignore[name-defined]
+        except Exception:
+            pass
+        current_app.logger.exception("Could not count 40-man roster for Rule V team %s", team)
+        return None
+
+
+def rulev_team_has_full_40man(team: Any) -> bool:
+    count = rulev_team_40man_count(team)
+    return count is not None and count >= 40
+
+
+def mark_rulev_pick_skipped_for_full_40man(rulev_order_id: int, team: Any, when: datetime | None = None) -> None:
+    """Skip a Rule V pick because the team has no open 40-man slot."""
+    from rulev_order_page import EASTERN, mark_rulev_pick_skipped
+
+    stamp = when or datetime.now(tz=EASTERN)
+    mark_rulev_pick_skipped(int(rulev_order_id), stamp)
+    current_app.logger.info(
+        "Rule V pick_id=%s for team=%s skipped because the team has 40+ players on its 40-man roster",
+        rulev_order_id,
+        team,
+    )
+
+
+def ensure_roster_rulev_columns(conn: sqlite3.Connection) -> None:
+    """Ensure roster.db can remember active Rule V restrictions."""
+    cur = conn.cursor()
+    cur.execute("PRAGMA table_info(roster_players)")
+    cols = {row[1] for row in cur.fetchall()}
+    additions = {
+        "rulev_status": "ALTER TABLE roster_players ADD COLUMN rulev_status INTEGER NOT NULL DEFAULT 0",
+        "rulev_original_team": "ALTER TABLE roster_players ADD COLUMN rulev_original_team TEXT",
+        "rulev_selected_by": "ALTER TABLE roster_players ADD COLUMN rulev_selected_by TEXT",
+        "rulev_selected_at": "ALTER TABLE roster_players ADD COLUMN rulev_selected_at TEXT",
+    }
+    for col, ddl in additions.items():
+        if col not in cols:
+            cur.execute(ddl)
+
 def apply_rulev_pick_to_roster(rulev_player_id: int, picking_team_abbr: str, drafted_at: str) -> dict[str, Any]:
     """Move the selected Rule V player in roster.db to the drafting team.
 
@@ -428,6 +516,7 @@ def apply_rulev_pick_to_roster(rulev_player_id: int, picking_team_abbr: str, dra
     roster_path = get_roster_db_path()
     rconn = sqlite3.connect(str(roster_path))
     rconn.row_factory = sqlite3.Row
+    ensure_roster_rulev_columns(rconn)
     rcur = rconn.cursor()
     rcur.execute("SELECT * FROM roster_players WHERE id=?", (roster_player_id,))
     roster_row = rcur.fetchone()
@@ -450,13 +539,20 @@ def apply_rulev_pick_to_roster(rulev_player_id: int, picking_team_abbr: str, dra
             roster_status=?,
             active_roster=1,
             contract_type=?,
-            salary=?
+            salary=?,
+            rulev_status=1,
+            rulev_original_team=?,
+            rulev_selected_by=?,
+            rulev_selected_at=?
         WHERE id=?
     """, (
         picking_team_abbr,
         RULEV_ROSTER_STATUS,
         new_contract,
         new_salary,
+        canonical_team_abbr(old_team),
+        picking_team_abbr,
+        drafted_at,
         roster_player_id,
     ))
     rconn.commit()
@@ -470,6 +566,9 @@ def apply_rulev_pick_to_roster(rulev_player_id: int, picking_team_abbr: str, dra
         "new_team": picking_team_abbr,
         "new_status": RULEV_ROSTER_STATUS,
         "salary": new_salary,
+        "rulev_status": True,
+        "rulev_original_team": canonical_team_abbr(old_team),
+        "rulev_selected_by": picking_team_abbr,
         "drafted_at": drafted_at,
     }
 
@@ -893,6 +992,11 @@ def _complete_rulev_pick(team: str, player_id: int, rulev_order_id: int) -> None
         conn.close()
         raise RuntimeError("Team does not match this Rule V pick")
 
+    forty_count = rulev_team_40man_count(team)
+    if forty_count is not None and forty_count >= 40:
+        conn.close()
+        raise RuntimeError("Rule V pick skipped: team already has 40 players on the 40-man roster")
+
     now = datetime.utcnow().isoformat(timespec="seconds")
     losing_team = canonical_team_abbr(r["org"] or "")
     picking_team = canonical_team_abbr(team)
@@ -950,11 +1054,13 @@ def enforce_queue_actions(max_steps: int = 10) -> None:
     Best-effort Rule V queue enforcement.
 
     Priority:
-      1) If a normal pick window expires, draft from that team's queue if
+      1) Once a team is on the clock, skip its pick immediately if it already
+         has 40+ players on its 40-man roster.
+      2) If a normal pick window expires, draft from that team's queue if
          possible; otherwise persist a one-time end-of-day reschedule.
-      2) If that end-of-day window expires, draft from queue if possible;
+      3) If that end-of-day window expires, draft from queue if possible;
          otherwise persist the pick as skipped.
-      3) If the current team has opted into start-of-clock queue usage, draft
+      4) If the current team has opted into start-of-clock queue usage, draft
          from queue once the scheduled time has arrived.
     """
     from rulev_order_page import (
@@ -1010,6 +1116,17 @@ def enforce_queue_actions(max_steps: int = 10) -> None:
         for i in normal_overdue:
             rec = picks[i]
             team = rec["team"]
+            if rulev_team_has_full_40man(team):
+                try:
+                    mark_rulev_pick_skipped_for_full_40man(int(rec["id"]), team, now)
+                except Exception:
+                    current_app.logger.exception(
+                        "Failed to skip Rule V pick for full 40-man team=%s pick_id=%s",
+                        team, rec["id"],
+                    )
+                progressed = True
+                break
+
             pid = get_team_queue_top_available(team)
             if pid:
                 try:
@@ -1058,6 +1175,17 @@ def enforce_queue_actions(max_steps: int = 10) -> None:
         for i in eod_overdue:
             rec = picks[i]
             team = rec["team"]
+            if rulev_team_has_full_40man(team):
+                try:
+                    mark_rulev_pick_skipped_for_full_40man(int(rec["id"]), team, now)
+                except Exception:
+                    current_app.logger.exception(
+                        "Failed to skip Rule V EOD pick for full 40-man team=%s pick_id=%s",
+                        team, rec["id"],
+                    )
+                progressed = True
+                break
+
             pid = get_team_queue_top_available(team)
             if pid:
                 try:
@@ -1103,7 +1231,17 @@ def enforce_queue_actions(max_steps: int = 10) -> None:
             except Exception:
                 sched_t = now
 
-            if now >= sched_t and get_queue_mode(team):
+            if now >= sched_t and rulev_team_has_full_40man(team):
+                try:
+                    mark_rulev_pick_skipped_for_full_40man(int(info["id"]), team, now)
+                except Exception:
+                    current_app.logger.exception(
+                        "Failed to skip Rule V start-of-clock pick for full 40-man team=%s pick_id=%s",
+                        team, info["id"],
+                    )
+                else:
+                    progressed = True
+            elif now >= sched_t and get_queue_mode(team):
                 pid = get_team_queue_top_available(team)
                 if pid:
                     try:
@@ -1918,11 +2056,32 @@ def api_pick():
     if team != selected_team:
         return ("Not logged in for this team", 401)
 
+    if rulev_team_has_full_40man(team):
+        # If the pick's scheduled time has arrived, persist the skip immediately;
+        # if a manager is trying to pick early, just block the pick.
+        try:
+            from rulev_order_page import EASTERN
+            scheduled_iso = cur.get("scheduled_time_iso") if isinstance(cur, dict) else None
+            sched_t = datetime.fromisoformat(scheduled_iso) if scheduled_iso else None
+            if sched_t is not None:
+                if sched_t.tzinfo is None:
+                    sched_t = sched_t.replace(tzinfo=EASTERN)
+                else:
+                    sched_t = sched_t.astimezone(EASTERN)
+            now_et = datetime.now(tz=EASTERN)
+            if sched_t is None or now_et >= sched_t:
+                mark_rulev_pick_skipped_for_full_40man(int(cur["id"]), team, now_et)
+                return ("Rule V pick skipped: team already has 40 players on the 40-man roster", 409)
+        except Exception:
+            current_app.logger.exception("Failed to mark full-40-man Rule V pick skipped during manual pick")
+        return ("Cannot make Rule V pick: team already has 40 players on the 40-man roster", 409)
+
     try:
         _complete_rulev_pick(team, player_id, int(cur["id"]))
     except RuntimeError as e:
         msg = str(e)
-        status = 409 if "already" in msg.lower() or "eligible" in msg.lower() else 404 if "not found" in msg.lower() else 500
+        low = msg.lower()
+        status = 409 if ("already" in low or "eligible" in low or "40-man" in low or "skipped" in low) else 404 if "not found" in low else 500
         return (msg, status)
     except Exception as e:
         current_app.logger.exception("Failed to make Rule V pick")

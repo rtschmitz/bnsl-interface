@@ -1118,6 +1118,7 @@ def enforce_queue_actions():
     from draft_order_page import (
         _load_picks_overrides_and_designated,
         _compute_scheduled_times,
+        _load_pick_skipped_state,
         get_current_pick_info,
         EASTERN,
     )
@@ -1134,12 +1135,13 @@ def enforce_queue_actions():
                 current_app.logger.info("[enforce] no picks; exiting")
                 break
             scheduled = _compute_scheduled_times(now)
+            skipped_state = _load_pick_skipped_state()
         except Exception as e:
             current_app.logger.exception("[enforce] schedule compute failed: %s", e)
             break
 
         # ---------- 1) END-OF-CLOCK FIRST (deadline passed → try queue) ----------
-        undrafted = [i for i, r in enumerate(picks) if not r["player_id"]]
+        undrafted = [i for i, r in enumerate(picks) if not r["player_id"] and int(r["id"]) not in skipped_state]
         if not undrafted:
             current_app.logger.info("[enforce] draft complete; exiting")
             break
@@ -1327,10 +1329,18 @@ def get_current_pick() -> Dict[str, Any] | None:
     total_picks = cur.fetchone()[0]
     cur.execute("SELECT COUNT(*) FROM draft_order WHERE player_id IS NOT NULL")
     made = cur.fetchone()[0]
+    skipped = 0
+    try:
+        from draft_order_page import count_skipped_picks
+        skipped = count_skipped_picks()
+    except Exception:
+        skipped = 0
     conn.close()
 
     current.update({
         "picks_made": made,
+        "skipped_picks": skipped,
+        "resolved_picks": made + skipped,
         "total_picks": total_picks,
     })
     return current
@@ -1938,10 +1948,10 @@ async function fetchDraftStatus() {
 
     if (!data.current) {
       currentPickSpan.textContent = 'Draft complete';
-      picksProgress.textContent = `${data.picks_made}/${data.total_picks}`;
+      picksProgress.textContent = `${data.resolved_picks ?? data.picks_made}/${data.total_picks}`;
     } else {
       currentPickSpan.textContent = `Round ${data.current.round}, Pick ${data.current.pick} — ${data.current.team}`;
-      picksProgress.textContent = `${data.picks_made}/${data.total_picks}`;
+      picksProgress.textContent = `${data.resolved_picks ?? data.picks_made}/${data.total_picks}`;
     }
   } catch (err) {
     console.error('fetchDraftStatus failed:', err);
@@ -2462,6 +2472,12 @@ def api_draft_status():
         made = int(cur.fetchone()[0] or 0)
         cur.execute("SELECT COUNT(*) FROM draft_order")
         total = int(cur.fetchone()[0] or 0)
+        skipped = 0
+        try:
+            from draft_order_page import count_skipped_picks
+            skipped = count_skipped_picks()
+        except Exception:
+            skipped = 0
         conn.close()
 
         selected_team = session.get("selected_team", "") or ""
@@ -2475,6 +2491,8 @@ def api_draft_status():
             "selected_team": selected_team,
             "teams": MLB_TEAMS,
             "picks_made": made,
+            "skipped_picks": skipped,
+            "resolved_picks": made + skipped,
             "total_picks": total,
             "authed_team": authed_team,
             "authed_email": authed_email,
@@ -2489,6 +2507,8 @@ def api_draft_status():
             "selected_team": session.get("selected_team", "") or "",
             "teams": MLB_TEAMS,
             "picks_made": 0,
+            "skipped_picks": 0,
+            "resolved_picks": 0,
             "total_picks": 0,
             "authed_team": "",
             "authed_email": "",

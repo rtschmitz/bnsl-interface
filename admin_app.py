@@ -224,19 +224,58 @@ def _pick_label(row: sqlite3.Row, *, rulev: bool = False) -> str:
     return f"{int(row['round'])}.{int(row['pick']):02d}"
 
 
+def _ensure_draft_skip_schema(conn: sqlite3.Connection) -> None:
+    cur = conn.cursor()
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS pick_overrides (
+            draft_order_id INTEGER PRIMARY KEY,
+            scheduled_time TEXT NOT NULL,
+            missed INTEGER DEFAULT 0,
+            skipped_at TEXT
+        )
+    """)
+    cur.execute("PRAGMA table_info(pick_overrides)")
+    cols = {r[1] for r in cur.fetchall()}
+    if "missed" not in cols:
+        cur.execute("ALTER TABLE pick_overrides ADD COLUMN missed INTEGER DEFAULT 0")
+    if "skipped_at" not in cols:
+        cur.execute("ALTER TABLE pick_overrides ADD COLUMN skipped_at TEXT")
+    conn.commit()
+
+
+def _ensure_rulev_skip_schema(conn: sqlite3.Connection) -> None:
+    cur = conn.cursor()
+    cur.execute("""
+      CREATE TABLE IF NOT EXISTS rulev_pick_miss_state (
+        rulev_order_id INTEGER PRIMARY KEY,
+        first_missed_at TEXT,
+        rescheduled_time TEXT,
+        skipped_at TEXT
+      )
+    """)
+    conn.commit()
+
+
 def _draft_pick_choices() -> dict[str, list[dict[str, str]]]:
     choices: dict[str, list[dict[str, str]]] = {"draft": [], "rulev": []}
 
     try:
         conn = get_draft_conn()
+        _ensure_draft_skip_schema(conn)
         cur = conn.cursor()
         cur.execute("""
-            SELECT id, round, pick, team, player_id, drafted_at, label
-            FROM draft_order
-            ORDER BY round ASC, pick ASC
+            SELECT d.id, d.round, d.pick, d.team, d.player_id, d.drafted_at, d.label, po.skipped_at
+            FROM draft_order d
+            LEFT JOIN pick_overrides po ON po.draft_order_id = d.id
+            ORDER BY d.round ASC, d.pick ASC
         """)
         for row in cur.fetchall():
-            status = "selected" if row["player_id"] else "open"
+            if row["player_id"]:
+                status = "selected"
+            elif row["skipped_at"]:
+                status = "skipped"
+            else:
+                status = "open"
             label = _pick_label(row)
             choices["draft"].append({
                 "value": f"{int(row['round'])}|{int(row['pick'])}",
@@ -248,14 +287,21 @@ def _draft_pick_choices() -> dict[str, list[dict[str, str]]]:
 
     try:
         conn = get_rulev_conn()
+        _ensure_rulev_skip_schema(conn)
         cur = conn.cursor()
         cur.execute("""
-            SELECT id, round, pick, team, player_id, drafted_at
-            FROM rulev_order
-            ORDER BY round ASC, pick ASC
+            SELECT o.id, o.round, o.pick, o.team, o.player_id, o.drafted_at, ms.skipped_at
+            FROM rulev_order o
+            LEFT JOIN rulev_pick_miss_state ms ON ms.rulev_order_id = o.id
+            ORDER BY o.round ASC, o.pick ASC
         """)
         for row in cur.fetchall():
-            status = "selected" if row["player_id"] else "open"
+            if row["player_id"]:
+                status = "selected"
+            elif row["skipped_at"]:
+                status = "skipped"
+            else:
+                status = "open"
             label = _pick_label(row, rulev=True)
             choices["rulev"].append({
                 "value": f"{int(row['round'])}|{int(row['pick'])}",
@@ -791,7 +837,7 @@ ADMIN_HTML = """
 
         <div class="card">
           <h2>Set Draft Pick Time</h2>
-          <p class="muted">Choose Amateur Draft or Rule V, choose a round/pick, then set the new ET start time. That pick and every later pick are regenerated hourly from 9 AM–6 PM ET, skipping Sundays. Rule V missed picks are skipped, not moved to an evening queue.</p>
+          <p class="muted">Choose Amateur Draft or Rule V, then either set a new ET start time or mark one pick as skipped. Time changes can apply to only the selected pick or to that pick plus every later pick.</p>
           <form method="post" action="set-draft-time">
             <div class="row">
               <label>Draft
@@ -805,14 +851,28 @@ ADMIN_HTML = """
               </label>
             </div>
             <div class="row" style="margin-top:10px;">
-              <label>Date
-                <input name="pick_date" type="date" value="{{ today }}">
+              <label>Action
+                <select id="draft-time-action" name="draft_time_action">
+                  <option value="set_time">Set pick time</option>
+                  <option value="skip">Mark pick skipped</option>
+                </select>
               </label>
-              <label>Time ET
-                <input name="pick_time" type="time" value="09:00" step="3600">
+              <label id="draft-time-scope-wrap">Scope
+                <select id="draft-time-scope" name="time_scope">
+                  <option value="following">This pick and all following picks</option>
+                  <option value="single">This pick only</option>
+                </select>
               </label>
             </div>
-            <div style="margin-top:12px;"><button class="btn primary" type="submit">Set draft time</button></div>
+            <div id="draft-time-fields" class="row" style="margin-top:10px;">
+              <label>Date
+                <input id="draft-time-date" name="pick_date" type="date" value="{{ today }}">
+              </label>
+              <label>Time ET
+                <input id="draft-time-time" name="pick_time" type="time" value="09:00" step="3600">
+              </label>
+            </div>
+            <div style="margin-top:12px;"><button id="draft-time-submit" class="btn primary" type="submit">Set draft time</button></div>
           </form>
         </div>
 
@@ -881,6 +941,13 @@ searchBox.addEventListener('input', () => {
 const draftTimeChoices = {{ draft_time_choices|tojson }};
 const draftTimeKind = document.getElementById('draft-time-kind');
 const draftTimePick = document.getElementById('draft-time-pick');
+const draftTimeAction = document.getElementById('draft-time-action');
+const draftTimeScopeWrap = document.getElementById('draft-time-scope-wrap');
+const draftTimeScope = document.getElementById('draft-time-scope');
+const draftTimeFields = document.getElementById('draft-time-fields');
+const draftTimeDate = document.getElementById('draft-time-date');
+const draftTimeTime = document.getElementById('draft-time-time');
+const draftTimeSubmit = document.getElementById('draft-time-submit');
 function refreshDraftTimePickOptions(){
   if (!draftTimeKind || !draftTimePick) return;
   const rows = draftTimeChoices[draftTimeKind.value] || [];
@@ -899,9 +966,23 @@ function refreshDraftTimePickOptions(){
     draftTimePick.appendChild(opt);
   }
 }
+function refreshDraftTimeActionUi(){
+  if (!draftTimeAction) return;
+  const skipping = draftTimeAction.value === 'skip';
+  if (draftTimeFields) draftTimeFields.style.display = skipping ? 'none' : '';
+  if (draftTimeScopeWrap) draftTimeScopeWrap.style.display = skipping ? 'none' : '';
+  if (draftTimeDate) draftTimeDate.disabled = skipping;
+  if (draftTimeTime) draftTimeTime.disabled = skipping;
+  if (draftTimeScope) draftTimeScope.disabled = skipping;
+  if (draftTimeSubmit) draftTimeSubmit.textContent = skipping ? 'Mark pick skipped' : 'Set draft time';
+}
 if (draftTimeKind) {
   draftTimeKind.addEventListener('change', refreshDraftTimePickOptions);
   refreshDraftTimePickOptions();
+}
+if (draftTimeAction) {
+  draftTimeAction.addEventListener('change', refreshDraftTimeActionUi);
+  refreshDraftTimeActionUi();
 }
 
 const adminRefreshTargets = {{ refresh_targets|tojson }};
@@ -1097,7 +1178,36 @@ def set_draft_time():
     require_admin()
     try:
         draft_kind = (request.form.get("draft_kind") or "").strip().lower()
+        action = (request.form.get("draft_time_action") or "set_time").strip().lower()
         round_num, pick_num = _parse_pick_key(request.form.get("pick_key"))
+
+        if action in {"skip", "skipped", "mark_skipped"}:
+            if draft_kind == "draft":
+                from draft_order_page import mark_draft_pick_skipped
+                result = mark_draft_pick_skipped(round_num, pick_num)
+                refresh = ["draft"]
+            elif draft_kind == "rulev":
+                from rulev_order_page import mark_rulev_pick_skipped_by_round_pick
+                result = mark_rulev_pick_skipped_by_round_pick(round_num, pick_num)
+                refresh = ["rulev"]
+            else:
+                raise ValueError("Choose either Amateur Draft or Rule V Draft")
+
+            log_action(
+                "mark_draft_pick_skipped",
+                f"Marked {result['draft_name']} {result['pick_label']} ({result['team']}) as skipped",
+                result,
+            )
+            return redirect_with(
+                f"Marked {result['draft_name']} {result['pick_label']} as skipped.",
+                refresh=refresh,
+            )
+
+        if action not in {"set_time", "time", "set"}:
+            raise ValueError("Choose a valid draft-time action")
+
+        scope = (request.form.get("time_scope") or "following").strip().lower()
+        include_following = scope not in {"single", "only", "one"}
         start_dt = _parse_admin_draft_datetime(
             request.form.get("pick_date", ""),
             request.form.get("pick_time", "09:00"),
@@ -1105,23 +1215,24 @@ def set_draft_time():
 
         if draft_kind == "draft":
             from draft_order_page import set_pick_and_following_times, fmt_est
-            result = set_pick_and_following_times(round_num, pick_num, start_dt)
+            result = set_pick_and_following_times(round_num, pick_num, start_dt, include_following=include_following)
             refresh = ["draft"]
         elif draft_kind == "rulev":
             from rulev_order_page import set_pick_and_following_times, fmt_est
-            result = set_pick_and_following_times(round_num, pick_num, start_dt)
+            result = set_pick_and_following_times(round_num, pick_num, start_dt, include_following=include_following)
             refresh = ["rulev"]
         else:
             raise ValueError("Choose either Amateur Draft or Rule V Draft")
 
         when = fmt_est(start_dt)
+        scope_text = "this pick and all following picks" if include_following else "this pick only"
         log_action(
             "set_draft_pick_time",
-            f"Set {result['draft_name']} {result['pick_label']} ({result['team']}) to {when}; regenerated {result['updated_count']} pick time(s)",
+            f"Set {result['draft_name']} {result['pick_label']} ({result['team']}) to {when}; updated {result['updated_count']} pick time(s), scope={scope_text}",
             result,
         )
         return redirect_with(
-            f"Set {result['draft_name']} {result['pick_label']} to {when}.",
+            f"Set {result['draft_name']} {result['pick_label']} to {when} ({scope_text}).",
             refresh=refresh,
         )
     except Exception as e:
