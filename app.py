@@ -1,5 +1,6 @@
 import os
 from flask import Flask, render_template
+from ui_skin import BNSL_GAME_CSS
 
 from bnsl_paths import db_path, generated_path, input_path
 
@@ -65,7 +66,7 @@ def create_app():
 
     @app.get("/")
     def home():
-        return render_template("home.html")
+        return render_template("home.html", BNSL_GAME_CSS=BNSL_GAME_CSS)
 
     return app
 
