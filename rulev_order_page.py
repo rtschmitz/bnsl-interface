@@ -17,7 +17,9 @@ EASTERN = ZoneInfo("America/New_York")
 RULEV_START = datetime(2026, 3, 5, 9, 0, 0, tzinfo=EASTERN)
 DAY_FIRST_HOUR = 9
 DAY_LAST_HOUR = 18
-END_OF_DAY_MISS_HOUR = 19
+END_OF_DAY_MISS_HOUR = 18
+END_OF_DAY_MISS_MINUTE = 30
+END_OF_DAY_MISS_INTERVAL_MINUTES = 30
 SLOT_MINUTES = 60
 PICKS_PER_DAY = DAY_LAST_HOUR - DAY_FIRST_HOUR + 1
 
@@ -43,7 +45,7 @@ __BNSL_GAME_CSS__
     <div class="brand">
       <div>
         <h1>RULE V ORDER</h1>
-        <div class="sub">Times shown in ET • Missed picks roll once to the end of the day. If that rescheduled pick is missed, it is skipped.</div>
+        <div class="sub">Times shown in ET • Missed picks roll once to the end-of-day queue, starting at 6:30 PM ET in 30-minute slots. If that rescheduled pick is missed, it is skipped.</div>
       </div>
       <div class="right">
         <a class="btn" href="/rulev/">← Back</a>
@@ -198,20 +200,25 @@ def regular_pick_slots_from(start_dt: datetime, count: int) -> list[datetime]:
 
 
 def evening_miss_slot(start_day: date, offset: int) -> datetime:
-    """Return the offset-th end-of-day miss slot, starting at 7 PM ET.
+    """Return the offset-th end-of-day miss slot.
 
-    If more picks are rescheduled than fit between 7 PM and 11 PM, overflow is
-    placed at 7 PM+ on the next non-Sunday evening. That overflow is scheduling
+    Rule V end-of-day reschedules start at 6:30 PM ET and advance in
+    30-minute increments: 6:30, 7:00, 7:30, 8:00, and so on.  If more
+    picks are rescheduled than fit before midnight, overflow is placed at
+    6:30 PM+ on the next non-Sunday evening.  That overflow is scheduling
     capacity, not a second-chance rollover after a missed evening slot.
     """
-    slots_per_evening = max(1, 24 - END_OF_DAY_MISS_HOUR)
+    start_minutes = END_OF_DAY_MISS_HOUR * 60 + END_OF_DAY_MISS_MINUTE
+    interval = END_OF_DAY_MISS_INTERVAL_MINUTES
+    slots_per_evening = max(1, ((24 * 60) - start_minutes + interval - 1) // interval)
     extra_days, slot_in_day = divmod(max(0, int(offset)), slots_per_evening)
     day = next_non_sunday_date(start_day)
     advanced = 0
     while advanced < extra_days:
         day = next_non_sunday_date(day + timedelta(days=1))
         advanced += 1
-    return datetime(day.year, day.month, day.day, END_OF_DAY_MISS_HOUR + slot_in_day, 0, 0, tzinfo=EASTERN)
+    total_minutes = start_minutes + slot_in_day * interval
+    return datetime(day.year, day.month, day.day, total_minutes // 60, total_minutes % 60, 0, tzinfo=EASTERN)
 
 
 def base_slot_for_index(idx: int) -> datetime:
@@ -340,8 +347,9 @@ def _deadline_for_index(designated: list[datetime], idx: int) -> datetime:
     """Return the normal-window deadline for pick idx.
 
     Most picks expire when the next designated pick starts. For the last pick of
-    a day, this also enforces the one-hour window and allows a 6 PM missed pick
-    to move to the 7 PM evening slot rather than staying live overnight.
+    a day, this still enforces the normal one-hour window rather than letting
+    the pick stay live overnight; end-of-day reschedules use their own
+    30-minute evening slots.
     """
     one_hour = designated[idx] + timedelta(minutes=SLOT_MINUTES)
     if idx + 1 < len(designated):
@@ -360,8 +368,24 @@ def _is_evening_reschedule(idx: int, scheduled_time: datetime, designated: list[
 def _deadline_for_scheduled_index(idx: int, scheduled_time: datetime, designated: list[datetime]) -> datetime:
     scheduled_time = _coerce_eastern(scheduled_time)
     if _is_evening_reschedule(idx, scheduled_time, designated):
-        return scheduled_time + timedelta(minutes=SLOT_MINUTES)
+        return scheduled_time + timedelta(minutes=END_OF_DAY_MISS_INTERVAL_MINUTES)
     return _deadline_for_index(designated, idx)
+
+
+def _evening_slot_day_for_designated_time(dt: datetime) -> date:
+    """Return the evening-queue day for a missed normal-window pick."""
+    return next_non_sunday_date(_coerce_eastern(dt).date())
+
+
+def _evening_slot_offset_for_time(dt: datetime) -> int | None:
+    """Return 0 for 6:30 PM, 1 for 7 PM, etc.; None if not an evening slot."""
+    dt = _coerce_eastern(dt)
+    start_minutes = END_OF_DAY_MISS_HOUR * 60 + END_OF_DAY_MISS_MINUTE
+    dt_minutes = dt.hour * 60 + dt.minute
+    delta = dt_minutes - start_minutes
+    if delta < 0 or delta % END_OF_DAY_MISS_INTERVAL_MINUTES != 0:
+        return None
+    return delta // END_OF_DAY_MISS_INTERVAL_MINUTES
 
 
 def _evening_slots_for_unpersisted_misses(
@@ -370,10 +394,39 @@ def _evening_slots_for_unpersisted_misses(
     designated: list[datetime],
     miss_state: Dict[int, Dict[str, Optional[datetime]]],
 ) -> Dict[int, datetime]:
-    """Compute evening slots for normal-window misses that have not yet been persisted."""
+    """Compute evening slots for normal-window misses that have not yet been persisted.
+
+    Persisted first misses already occupy their evening slots.  This matters
+    because enforcement usually persists one missed pick per pass; without
+    accounting for those occupied slots, the next overdue pick would also be
+    assigned the same 6:30 PM slot.  Instead, same-day misses are assigned 6:30 PM, 7:00 PM, 7:30 PM,
+    ... in miss order.
+    """
     now = _coerce_eastern(now)
     first_misses_by_day: Dict[tuple[int, int, int], List[int]] = {}
+    occupied_offsets_by_day: Dict[tuple[int, int, int], set[int]] = {}
     next_deadlines = _next_deadlines_from_designated(designated)
+
+    # Existing first-miss rows reserve their already-assigned evening slots,
+    # even if the pick later became skipped.  Preserve the offset relative to
+    # the pick's original regular draft day, so overflow slots after 11 PM are
+    # also handled consistently.
+    idx_by_order_id = {int(rec["id"]): idx for idx, rec in enumerate(picks)}
+    for order_id, state in miss_state.items():
+        rescheduled = state.get("rescheduled_time")
+        idx = idx_by_order_id.get(int(order_id))
+        if not rescheduled or idx is None:
+            continue
+        rescheduled = _coerce_eastern(rescheduled)
+        original_day = _evening_slot_day_for_designated_time(designated[idx])
+        occupied_key = (original_day.year, original_day.month, original_day.day)
+        # Usually this is 0..10 (6:30 PM..11:30 PM).  If an evening has more misses
+        # than fit before midnight, evening_miss_slot spills later offsets to
+        # the next non-Sunday evening, so identify the exact relative offset.
+        for offset in range(0, max(30, len(picks) + 5)):
+            if evening_miss_slot(original_day, offset) == rescheduled:
+                occupied_offsets_by_day.setdefault(occupied_key, set()).add(offset)
+                break
 
     for idx, rec in enumerate(picks):
         if rec["player_id"]:
@@ -383,16 +436,22 @@ def _evening_slots_for_unpersisted_misses(
         if state.get("skipped_at") or state.get("rescheduled_time"):
             continue
         if now >= next_deadlines[idx]:
-            d = designated[idx].astimezone(EASTERN).date()
+            d = _evening_slot_day_for_designated_time(designated[idx])
             first_misses_by_day.setdefault((d.year, d.month, d.day), []).append(idx)
 
     slots: Dict[int, datetime] = {}
     for ymd in sorted(first_misses_by_day):
         y, m, d = ymd
         day = next_non_sunday_date(date(y, m, d))
+        occupied = set(occupied_offsets_by_day.get((day.year, day.month, day.day), set()))
         indices = sorted(first_misses_by_day[ymd], key=lambda i: (designated[i], i))
-        for offset, idx in enumerate(indices):
-            slots[idx] = evening_miss_slot(day, offset)
+        next_offset = 0
+        for idx in indices:
+            while next_offset in occupied:
+                next_offset += 1
+            slots[idx] = evening_miss_slot(day, next_offset)
+            occupied.add(next_offset)
+            next_offset += 1
     return slots
 
 
@@ -401,8 +460,8 @@ def _compute_scheduled_times(now: datetime, include_expired_evening: bool = Fals
 
     Rules:
       - Normal picks keep their designated/admin-overridden time until their normal deadline.
-      - A first miss moves once to the end-of-day queue, starting at 7 PM ET.
-      - If the evening slot's one-hour window is missed, the pick is omitted from
+      - A first miss moves once to the end-of-day queue, starting at 6:30 PM ET in 30-minute slots.
+      - If the evening slot's 30-minute window is missed, the pick is omitted from
         the returned map and is treated as skipped.
 
     `include_expired_evening=True` is used by queue enforcement so it can detect
@@ -426,14 +485,14 @@ def _compute_scheduled_times(now: datetime, include_expired_evening: bool = Fals
 
         persisted_evening = state.get("rescheduled_time")
         if persisted_evening:
-            evening_deadline = persisted_evening + timedelta(minutes=SLOT_MINUTES)
+            evening_deadline = persisted_evening + timedelta(minutes=END_OF_DAY_MISS_INTERVAL_MINUTES)
             if include_expired_evening or now < evening_deadline:
                 scheduled[idx] = persisted_evening
             continue
 
         dynamic_evening = unpersisted_evening_slots.get(idx)
         if dynamic_evening:
-            evening_deadline = dynamic_evening + timedelta(minutes=SLOT_MINUTES)
+            evening_deadline = dynamic_evening + timedelta(minutes=END_OF_DAY_MISS_INTERVAL_MINUTES)
             if include_expired_evening or now < evening_deadline:
                 scheduled[idx] = dynamic_evening
             continue
