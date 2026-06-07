@@ -8,7 +8,7 @@ Single-file Flask app implementing:
 - Fixed-contract bidding (1–6 years + optional club option year, fixed AAV)
 - Minimum AAV rules by (years + option)
 - Hometown multiplier (1.05x / 1.10x) applied to bid VALUE for hometown team bids
-- Outbid rule: new bid must be >= 10% higher bid value than current leader
+- Outbid rule: new bid must be >= 10% higher bid value than the current high bid
 - 48-hour timer resets on each new bid; auto-sign on expiry
 - Watchlist (bid directly from watchlist)
 - Bid history page (summary of all bids)
@@ -1356,7 +1356,15 @@ def _roster_db_row_is_unrostered(row: sqlite3.Row) -> bool:
     return (franchise == "") or (signed == 0) or (roster_status == "")
 
 
-def _find_existing_free_agent_id(cur: sqlite3.Cursor, roster_id: int | None, mlbam_id: int | None, fg_id: int | None, name: str) -> int | None:
+def _find_existing_free_agent_id(
+    cur: sqlite3.Cursor,
+    roster_id: int | None,
+    mlbam_id: int | None,
+    fg_id: int | None,
+    name: str,
+    *,
+    allow_name_fallback: bool = True,
+) -> int | None:
     if roster_id is not None:
         cur.execute("SELECT id FROM free_agents WHERE roster_player_id=?", (roster_id,))
         r = cur.fetchone()
@@ -1375,10 +1383,19 @@ def _find_existing_free_agent_id(cur: sqlite3.Cursor, roster_id: int | None, mlb
         if r:
             return int(r["id"])
 
-    # Last fallback: exact unaccented name match. This is intentionally last because
-    # duplicate names are possible, but it helps preserve old seeded DB rows.
-    if name:
-        cur.execute("SELECT id FROM free_agents WHERE LOWER(unaccent(name)) = LOWER(unaccent(?)) LIMIT 1", (name,))
+    # Last fallback: exact unaccented name match.  This is useful for preserving
+    # older seeded/manual FA rows that predate roster_player_id, but it must not
+    # run for duplicate roster names; otherwise several players named e.g.
+    # "Luis Garcia" all collapse onto the same free_agents row.
+    if allow_name_fallback and name:
+        cur.execute("""
+            SELECT id
+            FROM free_agents
+            WHERE LOWER(unaccent(name)) = LOWER(unaccent(?))
+              AND (roster_player_id IS NULL OR roster_player_id='')
+            ORDER BY id ASC
+            LIMIT 1
+        """, (name,))
         r = cur.fetchone()
         if r:
             return int(r["id"])
@@ -1406,6 +1423,18 @@ def sync_free_agents_from_roster_db() -> tuple[int, int]:
     roster_rows = [r for r in rcur.fetchall() if _roster_db_row_is_unrostered(r)]
     rconn.close()
 
+    # Duplicate player names are common enough that name-only matching cannot be
+    # used safely for every unrostered row.  Count the roster-side names first so
+    # the old name fallback is only allowed for names that uniquely identify one
+    # current unrostered roster row.  Roster/player IDs still remain the primary
+    # identity key, so existing rows with roster_player_id continue to update in
+    # place and keep their bids/watchlist state.
+    roster_name_counts: dict[str, int] = {}
+    for rr in roster_rows:
+        key = _norm_token(rr["name"] if "name" in rr.keys() else "")
+        if key:
+            roster_name_counts[key] = roster_name_counts.get(key, 0) + 1
+
     conn = get_conn()
     cur = conn.cursor()
 
@@ -1430,7 +1459,12 @@ def sync_free_agents_from_roster_db() -> tuple[int, int]:
         pot = _optional_int(r["pot"] if "pot" in r.keys() else None)
         def_rating = _optional_int(r["def"] if "def" in r.keys() else None)
 
-        existing_id = _find_existing_free_agent_id(cur, roster_id, mlbam_id, fg_id, name)
+        name_key = _norm_token(name)
+        allow_name_fallback = bool(name_key and roster_name_counts.get(name_key, 0) == 1)
+        existing_id = _find_existing_free_agent_id(
+            cur, roster_id, mlbam_id, fg_id, name,
+            allow_name_fallback=allow_name_fallback,
+        )
 
         if existing_id is None:
             cur.execute("""
@@ -1556,9 +1590,15 @@ def sync_free_agents_from_roster_if_needed(force: bool = False) -> None:
         if ootp_path.exists():
             import_ootp_free_agents_into_roster_db(ootp_path)
         sync_free_agents_from_roster_db()
-        # Do not apply hometown discounts here. HTD assignment is an explicit
-        # maintenance action only; normal FA searches/previews/bids should only
-        # read already-stored hometown_team/hometown_seasons values.
+        # Preserve the existing HTD machinery, but make sure any newly inserted
+        # roster-derived FA rows get their hometown data.  clear_missing=False
+        # avoids wiping manually reviewed/previously assigned discounts during
+        # routine roster syncs; the explicit HTD maintenance action still uses
+        # clear_missing=True when a full refresh is desired.
+        try:
+            assign_hometown_discounts_now(clear_missing=False)
+        except Exception:
+            logging.exception("Unable to refresh HTD assignments after roster FA sync")
         try:
             roster_mtime = roster_path.stat().st_mtime
         except OSError:
@@ -1702,18 +1742,54 @@ def get_current_leader(pid: int) -> Optional[sqlite3.Row]:
     conn.close()
     return row
 
-def player_snapshot_row(p: sqlite3.Row) -> Dict[str, Any]:
+
+def _roster_birthdates_for_ids(roster_ids: list[int]) -> dict[int, str]:
+    """Return date_of_birth from roster.db for FA rows keyed by roster_player_id."""
+    ids = sorted({int(x) for x in roster_ids if x})
+    if not ids:
+        return {}
+    try:
+        conn = get_roster_conn()
+        cur = conn.cursor()
+        placeholders = ",".join("?" for _ in ids)
+        cur.execute(
+            f"""
+            SELECT id, date_of_birth
+            FROM roster_players
+            WHERE id IN ({placeholders})
+            """,
+            ids,
+        )
+        out = {
+            int(r["id"]): str(r["date_of_birth"] or "").strip()
+            for r in cur.fetchall()
+        }
+        conn.close()
+        return out
+    except Exception:
+        logging.exception("Unable to load roster DOBs for FA display")
+        return {}
+
+
+def player_snapshot_row(p: sqlite3.Row, roster_dob_map: dict[int, str] | None = None) -> Dict[str, Any]:
     pid = int(p["id"])
     leader = get_current_leader(pid)
 
     mlbam_id = int(p["mlbam_id"] or 0) if "mlbam_id" in p.keys() else 0
+    roster_player_id = int(p["roster_player_id"] or 0) if "roster_player_id" in p.keys() and p["roster_player_id"] else 0
+    date_of_birth = ""
+    if roster_dob_map and roster_player_id:
+        date_of_birth = roster_dob_map.get(roster_player_id, "")
 
     return {
         "id": pid,
+        "roster_player_id": roster_player_id,
         "mlbam_id": mlbam_id,
         "fg_url": p["fg_url"] if "fg_url" in p.keys() else None,
 
         "name": p["name"],
+        "date_of_birth": date_of_birth,
+        "dob": date_of_birth,
         "position": p["position"],
         "ovr": p["ovr"] if "ovr" in p.keys() else None,
         "pot": p["pot"] if "pot" in p.keys() else None,
@@ -1755,7 +1831,12 @@ def fetch_free_agents(search: str = "", hide_signed: bool = False) -> List[Dict[
     cur.execute(q, params)
     rows = cur.fetchall()
     conn.close()
-    return [player_snapshot_row(r) for r in rows]
+    roster_dob_map = _roster_birthdates_for_ids([
+        int(r["roster_player_id"] or 0)
+        for r in rows
+        if "roster_player_id" in r.keys() and r["roster_player_id"]
+    ])
+    return [player_snapshot_row(r, roster_dob_map) for r in rows]
 
 def fetch_watchlist(team: str) -> List[Dict[str, Any]]:
     enforce_expirations()
@@ -1771,7 +1852,12 @@ def fetch_watchlist(team: str) -> List[Dict[str, Any]]:
     """, (team,))
     rows = cur.fetchall()
     conn.close()
-    return [player_snapshot_row(r) for r in rows]
+    roster_dob_map = _roster_birthdates_for_ids([
+        int(r["roster_player_id"] or 0)
+        for r in rows
+        if "roster_player_id" in r.keys() and r["roster_player_id"]
+    ])
+    return [player_snapshot_row(r, roster_dob_map) for r in rows]
 
 def compute_preview(team: str, pid: int, years: int, has_option: bool, aav_m: float, *, ignore_lock: bool = False) -> Dict[str, Any]:
     enforce_expirations()
@@ -1896,7 +1982,7 @@ def place_bid(team: str, pid: int, years: int, has_option: bool, aav_m: float, *
     if not prev["meets_outbid"]:
         need = prev["required_min_bid_value_m"]
         conn.close()
-        return (False, f"Bid must be at least 10% higher than current leader: need ≥ {fmt_money_m(need)} (1-year equiv).")
+        return (False, f"Bid must be at least 10% higher than the current high bid: need ≥ {fmt_money_m(need)} (1-year equiv).")
     if not prev.get("meets_cap", True):
         cap = prev.get("cap_summary") or {}
         conn.close()
@@ -2605,11 +2691,11 @@ INDEX_HTML = f"""
     <thead>
       <tr>
         <th style="width:22%;">Player</th>
+        <th style="width:9%;">DOB</th>
         <th style="width:7%;">Pos</th>
         <th style="width:6%;">OVR</th>
         <th style="width:6%;">POT</th>
         <th style="width:6%;">DEF</th>
-        <th style="width:14%;">Leader</th>
         <th style="width:14%;">1-yr equiv value</th>
         <th style="width:20%;">Bid expires / signs</th>
         <th style="width:10%;">Status</th>
@@ -2647,7 +2733,6 @@ INDEX_HTML = f"""
         </div>
       </div>
 
-      <div class="kv"><span>Current leader</span><b id="cur-leader">—</b></div>
       <div class="kv"><span>Current bid value (1-yr equiv)</span><b id="cur-val">—</b></div>
       <div class="kv"><span>Minimum required to submit (10% rule)</span><b id="min-required">—</b></div>
       <div class="kv"><span>Minimum AAV allowed by rules</span><b id="min-aav">—</b></div>
@@ -2781,7 +2866,6 @@ function renderPlayers() {{
     const img = p.mlbam_id ? `/fa/player_image/${{p.mlbam_id}}.png` : '';
     const imgTag = p.mlbam_id ? `<img class="pimg" src="${{img}}" loading="lazy" />` : '';
 
-    const leader = p.current_bid_team ? p.current_bid_team : '—';
     const val = p.current_bid_value_m !== null ? moneyM(p.current_bid_value_m) : '—';
     const exp = p.expires_at ? fmtIso(p.expires_at) : '—';
 
@@ -2830,11 +2914,11 @@ tr.innerHTML = `
     ${{linkClose}}
     <div class="muted" style="font-size:12px;">Hometown Discount: ${{p.hometown_team || '—'}}</div>
   </td>
+  <td>${{p.date_of_birth || '—'}}</td>
   <td>${{p.position || '—'}}</td>
   <td>${{rating(p.ovr)}}</td>
   <td>${{rating(p.pot)}}</td>
   <td>${{rating(p.def)}}</td>
-  <td>${{leader}}</td>
   <td>${{val}}</td>
   <td>${{exp}}</td>
   <td>${{status}}</td>
@@ -2886,7 +2970,7 @@ async function previewBid() {{
   const res = await fetch('/fa/api/bid_preview?' + params.toString());
   const data = await res.json();
 
-  curLeader.textContent = data.current_bid_team ? data.current_bid_team : '—';
+  if (curLeader) curLeader.textContent = data.current_bid_team ? data.current_bid_team : '—';
   curVal.textContent = data.current_bid_value_m !== null ? moneyM(data.current_bid_value_m) : '—';
   minRequired.textContent = data.required_min_bid_value_m !== null ? moneyM(data.required_min_bid_value_m) : '—';
   capAvail.textContent = data.cap_summary ? moneyM(data.cap_summary.available_cap_m) : '—';
@@ -2906,7 +2990,7 @@ async function previewBid() {{
     modalWarn.textContent = `AAV is below minimum for that structure (min ${{moneyM(data.min_aav_m)}}/yr).`;
     modalWarn.style.display = 'block';
   }} else if (!data.meets_outbid) {{
-    modalWarn.textContent = `Bid value must be at least 10% higher than current leader (need ≥ ${{moneyM(data.required_min_bid_value_m)}}).`;
+    modalWarn.textContent = `Bid value must be at least 10% higher than the current high bid (need ≥ ${{moneyM(data.required_min_bid_value_m)}}).`;
     modalWarn.style.display = 'block';
   }} else if (!data.meets_cap) {{
     modalWarn.textContent = `Bid would exceed your hard-cap space. Available after active FA bids: ${{moneyM(data.cap_summary?.available_cap_m || 0)}}.`;
@@ -3075,11 +3159,11 @@ WATCHLIST_HTML = f"""
     <thead>
       <tr>
         <th style="width:22%;">Player</th>
+        <th style="width:9%;">DOB</th>
         <th style="width:7%;">Pos</th>
         <th style="width:6%;">OVR</th>
         <th style="width:6%;">POT</th>
         <th style="width:6%;">DEF</th>
-        <th style="width:14%;">Leader</th>
         <th style="width:14%;">1-yr equiv value</th>
         <th style="width:20%;">Bid expires / signs</th>
         <th style="width:10%;">Status</th>
@@ -3189,7 +3273,6 @@ function render() {{
   for (const p of state.players) {{
     const tr = document.createElement('tr');
     tr.className = 'row-hover' + (p.signed_team ? ' signed' : '');
-    const leader = p.current_bid_team ? p.current_bid_team : '—';
     const val = p.current_bid_value_m !== null ? moneyM(p.current_bid_value_m) : '—';
     const exp = p.expires_at ? fmtIso(p.expires_at) : '—';
     const status = p.signed_team ? `Signed: ${{p.signed_team}}` : (state.faLocked ? (p.current_bid_team ? 'Bid frozen' : 'FA locked') : (p.current_bid_team ? 'Bidding open' : 'No bids'));
@@ -3234,11 +3317,11 @@ tr.innerHTML = `
     ${{linkClose}}
     <div class="muted" style="font-size:12px;">Hometown Discount: ${{p.hometown_team || '—'}}</div>
   </td>
+  <td>${{p.date_of_birth || '—'}}</td>
   <td>${{p.position || '—'}}</td>
   <td>${{rating(p.ovr)}}</td>
   <td>${{rating(p.pot)}}</td>
   <td>${{rating(p.def)}}</td>
-  <td>${{leader}}</td>
   <td>${{val}}</td>
   <td>${{exp}}</td>
   <td>${{status}}</td>
@@ -3290,7 +3373,7 @@ async function previewBid() {{
   const res = await fetch('/fa/api/bid_preview?' + params.toString());
   const data = await res.json();
 
-  curLeader.textContent = data.current_bid_team ? data.current_bid_team : '—';
+  if (curLeader) curLeader.textContent = data.current_bid_team ? data.current_bid_team : '—';
   curVal.textContent = data.current_bid_value_m !== null ? moneyM(data.current_bid_value_m) : '—';
   minRequired.textContent = data.required_min_bid_value_m !== null ? moneyM(data.required_min_bid_value_m) : '—';
   capAvail.textContent = data.cap_summary ? moneyM(data.cap_summary.available_cap_m) : '—';
@@ -3310,7 +3393,7 @@ async function previewBid() {{
     modalWarn.textContent = `AAV is below minimum for that structure (min ${{moneyM(data.min_aav_m)}}/yr).`;
     modalWarn.style.display = 'block';
   }} else if (!data.meets_outbid) {{
-    modalWarn.textContent = `Bid value must be at least 10% higher than current leader (need ≥ ${{moneyM(data.required_min_bid_value_m)}}).`;
+    modalWarn.textContent = `Bid value must be at least 10% higher than the current high bid (need ≥ ${{moneyM(data.required_min_bid_value_m)}}).`;
     modalWarn.style.display = 'block';
   }} else if (!data.meets_cap) {{
     modalWarn.textContent = `Bid would exceed your hard-cap space. Available after active FA bids: ${{moneyM(data.cap_summary?.available_cap_m || 0)}}.`;
