@@ -680,6 +680,66 @@ def _search_roster_players(q: str, limit: int = 25) -> list[dict[str, Any]]:
     conn.close()
     return rows
 
+def _fa_locked() -> bool:
+    try:
+        from fa_app import is_fa_locked
+        return is_fa_locked()
+    except Exception:
+        current_app.logger.exception("Unable to read FA lock state")
+        return False
+
+
+def _search_fa_players(q: str, limit: int = 25) -> list[dict[str, Any]]:
+    """Substring search over unsigned free agents for the admin QO form."""
+    q = (q or "").strip()
+    if not q or (len(q) < 2 and not q.isdigit()):
+        return []
+    normalized = "".join(
+        ch for ch in unicodedata.normalize("NFKD", q.lower())
+        if not unicodedata.combining(ch)
+    )
+    try:
+        from fa_app import get_conn as get_fa_conn, sync_free_agents_from_roster_if_needed
+        sync_free_agents_from_roster_if_needed(force=False)
+        conn = get_fa_conn()
+        cur = conn.cursor()
+        cur.execute(
+            """
+            SELECT
+              p.id, p.name, p.position, p.last_team,
+              b.team AS current_bid_team, b.aav_m AS current_aav_m
+            FROM free_agents p
+            LEFT JOIN bids b ON b.player_id=p.id AND b.status='ACTIVE'
+            WHERE COALESCE(p.is_roster_unrostered,0)=1
+              AND (p.signed_team IS NULL OR p.signed_team='')
+              AND (
+                LOWER(unaccent(p.name)) LIKE ?
+                OR CAST(p.id AS TEXT)=?
+              )
+            ORDER BY
+              CASE
+                WHEN LOWER(unaccent(p.name))=? THEN 0
+                WHEN LOWER(unaccent(p.name)) LIKE ? THEN 1
+                ELSE 2
+              END,
+              unaccent(p.name) COLLATE NOCASE ASC
+            LIMIT ?
+            """,
+            (
+                f"%{normalized}%",
+                q,
+                normalized,
+                f"{normalized}%",
+                int(limit),
+            ),
+        )
+        rows = [dict(r) for r in cur.fetchall()]
+        conn.close()
+        return rows
+    except Exception:
+        current_app.logger.exception("Unable to search FA choices for admin QO form")
+        return []
+
 
 ADMIN_HTML = """
 <!doctype html>
@@ -766,6 +826,35 @@ ADMIN_HTML = """
             <input type="hidden" name="locked" value="{{ '0' if roster_locked else '1' }}">
             <div class="pill" style="display:inline-block; margin-bottom:10px;">Status: <b>{{ 'LOCKED' if roster_locked else 'UNLOCKED' }}</b></div>
             <div><button class="btn {{ '' if roster_locked else 'primary' }}" type="submit">{{ 'Unlock roster' if roster_locked else 'Lock roster' }}</button></div>
+          </form>
+        </div>
+
+        <div class="card">
+          <h2>Free Agency Lock</h2>
+          <p class="muted">When locked, teams cannot submit FA bids from the FA page and active bids/QOs have no signing deadline. Unlocking FA gives every active unsigned bid a fresh 48-hour clock.</p>
+          <form method="post" action="toggle-fa-lock">
+            <input type="hidden" name="locked" value="{{ '0' if fa_locked else '1' }}">
+            <div class="pill" style="display:inline-block; margin-bottom:10px;">Status: <b>{{ 'LOCKED' if fa_locked else 'UNLOCKED' }}</b></div>
+            <div><button class="btn {{ '' if fa_locked else 'primary' }}" type="submit">{{ 'Unlock FA' if fa_locked else 'Lock FA' }}</button></div>
+          </form>
+        </div>
+
+        <div class="card">
+          <h2>Set QO</h2>
+          <p class="muted">Creates a standard one-year qualifying-offer FA bid at <b>$22.773M</b>. If FA is locked, the bid is created immediately but will not start its 48-hour clock until FA is unlocked.</p>
+          <form method="post" action="set-qo">
+            <div class="row">
+              <label>Team
+                <select name="team">{% for t in teams %}<option value="{{ t }}">{{ team_label(t) }}</option>{% endfor %}</select>
+              </label>
+              <label>Search free agent
+                <input id="qo-player-search" placeholder="Type at least 2 characters of a free agent name">
+                <input id="qo-player-id" name="player_id" type="hidden">
+              </label>
+            </div>
+            <div id="qo-player-selected" class="muted" style="margin-top:8px;">No free agent selected.</div>
+            <div id="qo-player-results" class="search-results muted" style="margin:8px 0 12px;">Type at least 2 characters to search unsigned free agents.</div>
+            <div style="margin-top:12px;"><button id="qo-submit" class="btn primary" type="submit" disabled>Set QO</button></div>
           </form>
         </div>
 
@@ -938,6 +1027,53 @@ searchBox.addEventListener('input', () => {
   }, 200);
 });
 
+
+const qoSearchBox = document.getElementById('qo-player-search');
+const qoResults = document.getElementById('qo-player-results');
+const qoSelected = document.getElementById('qo-player-selected');
+const qoPlayerId = document.getElementById('qo-player-id');
+const qoSubmit = document.getElementById('qo-submit');
+let qoPlayersById = {};
+let qoTimer = null;
+function resetQOSelection(message){
+  if (qoPlayerId) qoPlayerId.value = '';
+  if (qoSelected) qoSelected.textContent = message || 'No free agent selected.';
+  if (qoSubmit) qoSubmit.disabled = true;
+}
+function qoPlayerSummary(p){
+  const bits = [`#${esc(p.id)}`];
+  if (p.position) bits.push(esc(p.position));
+  if (p.last_team) bits.push(`last: ${esc(p.last_team)}`);
+  if (p.current_bid_team) bits.push(`current: ${esc(p.current_bid_team)} $${Number(p.current_aav_m || 0).toFixed(3)}M`);
+  return bits.join(' • ');
+}
+if (qoSearchBox) {
+  qoSearchBox.addEventListener('input', () => {
+    clearTimeout(qoTimer);
+    const q = qoSearchBox.value.trim();
+    resetQOSelection('No free agent selected.');
+    if (q.length < 2 && !/^\\d+$/.test(q)) {
+      qoResults.textContent = 'Type at least 2 characters to search unsigned free agents.';
+      return;
+    }
+    qoTimer = setTimeout(async () => {
+      const res = await fetch('api/fa-players?q=' + encodeURIComponent(q));
+      if (!res.ok) { qoResults.textContent = 'Search failed.'; return; }
+      const data = await res.json();
+      qoPlayersById = Object.fromEntries((data.players || []).map(p => [String(p.id), p]));
+      if (!data.players.length) { qoResults.textContent = 'No matching unsigned free agents.'; return; }
+      qoResults.innerHTML = data.players.map(p => `<div><button class="btn" type="button" data-qo-id="${p.id}">Use</button> <b>${esc(p.name)}</b> <span class="muted">${qoPlayerSummary(p)}</span></div>`).join('');
+      qoResults.querySelectorAll('button[data-qo-id]').forEach(btn => btn.onclick = () => {
+        const p = qoPlayersById[String(btn.dataset.qoId)] || {};
+        qoPlayerId.value = p.id || '';
+        qoSearchBox.value = p.name || '';
+        qoSelected.innerHTML = `Selected: <b>${esc(p.name || '')}</b> <span class="muted">${qoPlayerSummary(p)}</span>`;
+        qoSubmit.disabled = !qoPlayerId.value;
+      });
+    }, 200);
+  });
+}
+
 const draftTimeChoices = {{ draft_time_choices|tojson }};
 const draftTimeKind = document.getElementById('draft-time-kind');
 const draftTimePick = document.getElementById('draft-time-pick');
@@ -1010,6 +1146,7 @@ def index():
         roster_statuses=ROSTER_STATUS_TYPES,
         today=today,
         roster_locked=_is_roster_locked() if is_admin_authed() else False,
+        fa_locked=_fa_locked() if is_admin_authed() else False,
         draft_time_choices=_draft_pick_choices() if is_admin_authed() else {"draft": [], "rulev": []},
         logs=admin_logs() if is_admin_authed() else [],
         msg=request.args.get("msg", ""),
@@ -1039,6 +1176,13 @@ def api_players():
     require_admin()
     q = request.args.get("q", "")
     return jsonify({"players": _search_roster_players(q)})
+
+
+@admin_bp.get("/api/fa-players")
+def api_fa_players():
+    require_admin()
+    q = request.args.get("q", "")
+    return jsonify({"players": _search_fa_players(q)})
 
 
 @admin_bp.post("/bonus-payment")
@@ -1170,6 +1314,54 @@ def toggle_roster_lock():
         )
     except Exception as e:
         current_app.logger.exception("Admin roster-lock toggle failed")
+        return redirect_with(error=str(e))
+
+
+@admin_bp.post("/toggle-fa-lock")
+def toggle_fa_lock():
+    require_admin()
+    try:
+        locked = _bool_from_form(request.form.get("locked")) == 1
+        from fa_app import set_fa_locked
+        result = set_fa_locked(locked)
+        log_action(
+            "fa_lock",
+            f"Free agency {'locked' if locked else 'unlocked'}; {result.get('active_bids_updated', 0)} active bids updated",
+            result,
+        )
+        return redirect_with(
+            f"Free agency is now {'locked' if locked else 'unlocked'}.",
+            refresh=["fa", "financials"],
+        )
+    except Exception as e:
+        current_app.logger.exception("Admin FA-lock toggle failed")
+        return redirect_with(error=str(e))
+
+
+@admin_bp.post("/set-qo")
+def set_qo():
+    require_admin()
+    try:
+        team = canonical_team_abbr(request.form.get("team"))
+        if team not in TEAM_ABBRS:
+            raise ValueError("Unknown team")
+        player_id = int(request.form.get("player_id") or 0)
+        if player_id <= 0:
+            raise ValueError("Select a valid free agent")
+        from fa_app import set_qualifying_offer, QO_AAV_M
+        result = set_qualifying_offer(team, player_id, QO_AAV_M)
+        log_action(
+            "set_qo",
+            f"Set QO for {result['player_name']} by {team}: ${QO_AAV_M:.3f}M",
+            {"team_abbr": team, **result},
+        )
+        clock_note = " clock frozen until FA is unlocked" if result.get("fa_locked") else " 48-hour clock started"
+        return redirect_with(
+            f"Set QO for {result['player_name']} by {team} at ${QO_AAV_M:.3f}M;{clock_note}.",
+            refresh=["fa", "financials"],
+        )
+    except Exception as e:
+        current_app.logger.exception("Admin QO creation failed")
         return redirect_with(error=str(e))
 
 

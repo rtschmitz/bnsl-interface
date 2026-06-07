@@ -104,6 +104,9 @@ HOMETOWN_DISCOUNTS_DB = Path(os.environ.get(
 ROSTER_DB_SYNC_TTL_SECONDS = int(os.environ.get("BNSL_ROSTER_DB_SYNC_TTL_SECONDS", "15"))
 CURRENT_SEASON = 2025
 CURRENT_FA_CLASS = str(CURRENT_SEASON + 1)
+QO_AAV_M = 22.773
+FA_LOCK_META_KEY = "fa_locked"
+
 
 # To avoid reparsing a large roster on every request, sync if the file mtime changed
 # or after this TTL. Set to 0 if you want every request to check the roster file.
@@ -182,6 +185,195 @@ def get_conn() -> sqlite3.Connection:
         return "".join(ch for ch in unicodedata.normalize("NFKD", str(s)) if not unicodedata.combining(ch))
     conn.create_function("unaccent", 1, _unaccent)
     return conn
+
+
+def ensure_fa_meta_schema(conn: sqlite3.Connection) -> None:
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS app_meta (
+            key TEXT PRIMARY KEY,
+            value TEXT NOT NULL
+        )
+        """
+    )
+    conn.commit()
+
+
+def get_fa_meta(key: str, default: str = "") -> str:
+    conn = get_conn()
+    ensure_fa_meta_schema(conn)
+    cur = conn.cursor()
+    cur.execute("SELECT value FROM app_meta WHERE key=?", (key,))
+    row = cur.fetchone()
+    conn.close()
+    return str(row["value"] if row else default)
+
+
+def set_fa_meta(key: str, value: Any) -> None:
+    conn = get_conn()
+    ensure_fa_meta_schema(conn)
+    conn.execute(
+        """
+        INSERT INTO app_meta(key, value)
+        VALUES (?, ?)
+        ON CONFLICT(key) DO UPDATE SET value=excluded.value
+        """,
+        (key, str(value)),
+    )
+    conn.commit()
+    conn.close()
+
+
+def is_fa_locked() -> bool:
+    return get_fa_meta(FA_LOCK_META_KEY, "0").strip().lower() in {"1", "true", "yes", "on", "locked"}
+
+
+def set_fa_locked(locked: bool) -> dict[str, Any]:
+    """
+    Lock/unlock free agency.
+
+    Locked: public FA bids are blocked and active bids have no signing deadline.
+    Unlocked: every active, unsigned bid receives a fresh 48-hour signing clock.
+    """
+    conn = get_conn()
+    ensure_fa_meta_schema(conn)
+    now = utcnow()
+    cur = conn.cursor()
+    cur.execute(
+        """
+        INSERT INTO app_meta(key, value)
+        VALUES (?, ?)
+        ON CONFLICT(key) DO UPDATE SET value=excluded.value
+        """,
+        (FA_LOCK_META_KEY, "1" if locked else "0"),
+    )
+    if locked:
+        cur.execute(
+            """
+            UPDATE bids
+            SET expires_at=NULL
+            WHERE status='ACTIVE'
+              AND player_id IN (
+                SELECT id FROM free_agents
+                WHERE signed_team IS NULL OR signed_team=''
+              )
+            """
+        )
+    else:
+        unlock_exp = iso(now + timedelta(hours=48))
+        cur.execute(
+            """
+            UPDATE bids
+            SET expires_at=?
+            WHERE status='ACTIVE'
+              AND player_id IN (
+                SELECT id FROM free_agents
+                WHERE signed_team IS NULL OR signed_team=''
+              )
+            """,
+            (unlock_exp,),
+        )
+    affected = int(cur.rowcount or 0)
+    conn.commit()
+    conn.close()
+    return {"locked": bool(locked), "active_bids_updated": affected}
+
+
+def team_to_abbr_for_financials(team: Any) -> str:
+    text = str(team or "").strip()
+    if not text:
+        return ""
+    if text in TEAM_TO_ABBR:
+        return TEAM_TO_ABBR[text]
+    code = canonical_team_abbr(text)
+    if code in ABBR_TO_TEAM:
+        return code
+    return TEAM_TO_ABBR.get(text, code)
+
+
+def normalize_bid_team(team: Any) -> str:
+    """Store FA bid teams as the full MLB team name whenever possible."""
+    text = str(team or "").strip()
+    if not text:
+        return ""
+    abbr = team_to_abbr_for_financials(text)
+    return ABBR_TO_TEAM.get(abbr, text)
+
+
+def bid_team_variants(team: Any) -> list[str]:
+    full = normalize_bid_team(team)
+    abbr = team_to_abbr_for_financials(team)
+    variants = [full]
+    if abbr and abbr not in variants:
+        variants.append(abbr)
+    raw = str(team or "").strip()
+    if raw and raw not in variants:
+        variants.append(raw)
+    return variants
+
+
+def active_bid_commitments_for_team(team: Any, excluding_player_id: int | None = None) -> float:
+    """Return active FA bid AAV commitments for this team in dollars."""
+    variants = bid_team_variants(team)
+    if not variants:
+        return 0.0
+    placeholders = ",".join("?" for _ in variants)
+    params: list[Any] = list(variants)
+    where_exclude = ""
+    if excluding_player_id is not None:
+        where_exclude = "AND b.player_id<>?"
+        params.append(int(excluding_player_id))
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute(
+        f"""
+        SELECT COALESCE(SUM(COALESCE(b.aav_m, 0) * 1000000.0), 0) AS committed
+        FROM bids b
+        JOIN free_agents p ON p.id=b.player_id
+        WHERE b.status='ACTIVE'
+          AND b.team IN ({placeholders})
+          AND (p.signed_team IS NULL OR p.signed_team='')
+          {where_exclude}
+        """,
+        params,
+    )
+    row = cur.fetchone()
+    conn.close()
+    return float(row["committed"] or 0.0) if row else 0.0
+
+
+def get_team_cap_summary(team: Any, excluding_player_id: int | None = None) -> dict[str, Any] | None:
+    """
+    Current cap space minus active FA bid commitments.
+    Values are returned in dollars and millions for convenient API/UI use.
+    """
+    abbr = team_to_abbr_for_financials(team)
+    if not abbr:
+        return None
+    try:
+        from financials_app import compute_financial_rows
+        rows = compute_financial_rows(abbr)
+    except Exception:
+        current_app.logger.exception("Unable to compute FA cap space for %s", team)
+        return None
+    if not rows:
+        return None
+    row = rows[0]
+    committed = active_bid_commitments_for_team(team, excluding_player_id=excluding_player_id)
+    cap_space = float(row.get("cap_space") or 0.0)
+    available = cap_space - committed
+    return {
+        "team": normalize_bid_team(team),
+        "abbr": abbr,
+        "hard_cap": float(row.get("hard_cap") or 0.0),
+        "cap_space": cap_space,
+        "active_bid_commitments": committed,
+        "available_cap": available,
+        "hard_cap_m": float(row.get("hard_cap") or 0.0) / 1000000.0,
+        "cap_space_m": cap_space / 1000000.0,
+        "active_bid_commitments_m": committed / 1000000.0,
+        "available_cap_m": available / 1000000.0,
+    }
 
 def _require_authed_team() -> str:
     team = session.get("authed_team")
@@ -367,6 +559,8 @@ def init_db():
             UNIQUE(team, player_id) ON CONFLICT IGNORE
         )
     """)
+
+    ensure_fa_meta_schema(conn)
 
     conn.commit()
     conn.close()
@@ -1372,7 +1566,7 @@ def sync_free_agents_from_roster_if_needed(force: bool = False) -> None:
         _last_roster_sync_signature = (roster_mtime, ootp_mtime)
         _last_roster_sync_checked_at = now
 
-def seed_qualifying_offers(qo_aav_m: float = 21.2):
+def seed_qualifying_offers(qo_aav_m: float = QO_AAV_M):
     """
     Seed players with seed_qo=1 with an opening QO bid:
     - 1 year
@@ -1382,7 +1576,7 @@ def seed_qualifying_offers(qo_aav_m: float = 21.2):
     - 48-hour timer starts immediately
     """
     now = utcnow()
-    exp = now + timedelta(hours=48)
+    exp = None if is_fa_locked() else now + timedelta(hours=48)
 
     conn = get_conn()
     cur = conn.cursor()
@@ -1402,7 +1596,7 @@ def seed_qualifying_offers(qo_aav_m: float = 21.2):
 
     for r in rows:
         pid = int(r["id"])
-        team = (r["last_team"] or r["hometown_team"] or "").strip()
+        team = normalize_bid_team((r["last_team"] or r["hometown_team"] or "").strip())
         if not team:
             continue
         hm_mult = 1.0
@@ -1417,7 +1611,7 @@ def seed_qualifying_offers(qo_aav_m: float = 21.2):
         cur.execute("""
             INSERT INTO bids(player_id, team, years, has_option, aav_m, bid_value_m, hometown_mult, created_at, expires_at, status)
             VALUES(?,?,?,?,?,?,?,?,?, 'ACTIVE')
-        """, (pid, team, 1, 0, float(qo_aav_m), float(bid_val), float(hm_mult), iso(now), iso(exp)))
+        """, (pid, team, 1, 0, float(qo_aav_m), float(bid_val), float(hm_mult), iso(now), iso(exp) if exp else None))
 
     conn.commit()
     conn.close()
@@ -1429,6 +1623,8 @@ def enforce_expirations():
     Auto-sign any player whose ACTIVE bid has expired.
     Called opportunistically on page/API hits.
     """
+    if is_fa_locked():
+        return
     now = utcnow()
     conn = get_conn()
     cur = conn.cursor()
@@ -1577,8 +1773,9 @@ def fetch_watchlist(team: str) -> List[Dict[str, Any]]:
     conn.close()
     return [player_snapshot_row(r) for r in rows]
 
-def compute_preview(team: str, pid: int, years: int, has_option: bool, aav_m: float) -> Dict[str, Any]:
+def compute_preview(team: str, pid: int, years: int, has_option: bool, aav_m: float, *, ignore_lock: bool = False) -> Dict[str, Any]:
     enforce_expirations()
+    team = normalize_bid_team(team)
 
     years = clamp_int(years, 1, 6, 1)
     has_option = bool(has_option)
@@ -1618,6 +1815,13 @@ def compute_preview(team: str, pid: int, years: int, has_option: bool, aav_m: fl
     if required is not None:
         meets_outbid = (my_val >= required - 1e-9)
 
+    fa_locked = is_fa_locked()
+    cap_summary = get_team_cap_summary(team, excluding_player_id=pid)
+    bid_cost = aav_m * 1000000.0
+    meets_cap = True
+    if cap_summary is not None:
+        meets_cap = bid_cost <= float(cap_summary["available_cap"] or 0.0) + 0.01
+
     return {
         "player_id": pid,
         "team": team,
@@ -1641,13 +1845,21 @@ def compute_preview(team: str, pid: int, years: int, has_option: bool, aav_m: fl
 
         "required_min_bid_value_m": required,  # this is the 10% rule threshold
 
+        "fa_locked": fa_locked,
+        "cap_summary": cap_summary,
+        "bid_cost_m": bid_cost / 1000000.0,
+        "meets_cap": meets_cap,
+
         "meets_min_aav": meets_min_aav,
         "meets_outbid": meets_outbid,
-        "ok_to_submit": (not signed) and meets_min_aav and meets_outbid,
+        "ok_to_submit": (ignore_lock or not fa_locked) and (not signed) and meets_min_aav and meets_outbid and meets_cap,
     }
 
-def place_bid(team: str, pid: int, years: int, has_option: bool, aav_m: float) -> Tuple[bool, str]:
+def place_bid(team: str, pid: int, years: int, has_option: bool, aav_m: float, *, allow_when_locked: bool = False) -> Tuple[bool, str]:
     enforce_expirations()
+    team = normalize_bid_team(team)
+    if is_fa_locked() and not allow_when_locked:
+        return (False, "Free agency is currently locked. No FA bids can be made until an admin unlocks FA.")
 
     years = clamp_int(years, 1, 6, 1)
     has_option = bool(has_option)
@@ -1673,7 +1885,7 @@ def place_bid(team: str, pid: int, years: int, has_option: bool, aav_m: float) -
 
     # preview for validations
     try:
-        prev = compute_preview(team, pid, years, has_option, aav_m)
+        prev = compute_preview(team, pid, years, has_option, aav_m, ignore_lock=allow_when_locked)
     except Exception as e:
         conn.close()
         return (False, str(e))
@@ -1685,10 +1897,14 @@ def place_bid(team: str, pid: int, years: int, has_option: bool, aav_m: float) -
         need = prev["required_min_bid_value_m"]
         conn.close()
         return (False, f"Bid must be at least 10% higher than current leader: need ≥ {fmt_money_m(need)} (1-year equiv).")
+    if not prev.get("meets_cap", True):
+        cap = prev.get("cap_summary") or {}
+        conn.close()
+        return (False, f"Bid would exceed your hard-cap space. Available cap after current FA bids: {fmt_money_m(float(cap.get('available_cap_m', 0.0)))}; bid AAV: {fmt_money_m(float(prev.get('bid_cost_m', 0.0)))}.")
 
     # Calculate + insert
     now = utcnow()
-    exp = now + timedelta(hours=48)
+    exp = None if is_fa_locked() else now + timedelta(hours=48)
 
     # Mark previous active as outbid, clear their expiry
     cur.execute("UPDATE bids SET status='OUTBID', expires_at=NULL WHERE player_id=? AND status='ACTIVE'", (pid,))
@@ -1704,12 +1920,51 @@ def place_bid(team: str, pid: int, years: int, has_option: bool, aav_m: float) -
         float(prev["my_bid_value_m"]),
         float(prev["hometown_multiplier"]),
         iso(now),
-        iso(exp),
+        iso(exp) if exp else None,
     ))
 
     conn.commit()
     conn.close()
     return (True, "")
+
+
+def set_qualifying_offer(team: str, player_id: int, qo_aav_m: float = QO_AAV_M) -> dict[str, Any]:
+    """Admin helper: create a standard 1-year QO bid for the selected team/player."""
+    bid_team = normalize_bid_team(team)
+    pid = int(player_id or 0)
+    if pid <= 0:
+        raise ValueError("Select a valid free agent")
+    if not bid_team:
+        raise ValueError("Select a valid team")
+
+    ok, msg = place_bid(bid_team, pid, 1, False, float(qo_aav_m), allow_when_locked=True)
+    if not ok:
+        raise ValueError(msg)
+
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute(
+        """
+        SELECT p.name, b.expires_at, b.bid_value_m, b.aav_m
+        FROM bids b
+        JOIN free_agents p ON p.id=b.player_id
+        WHERE b.player_id=? AND b.team=? AND b.status='ACTIVE'
+        ORDER BY b.id DESC
+        LIMIT 1
+        """,
+        (pid, bid_team),
+    )
+    row = cur.fetchone()
+    conn.close()
+    return {
+        "player_id": pid,
+        "player_name": row["name"] if row else f"player #{pid}",
+        "team": bid_team,
+        "aav_m": float(row["aav_m"] if row else qo_aav_m),
+        "bid_value_m": float(row["bid_value_m"] if row else qo_aav_m),
+        "expires_at": row["expires_at"] if row else None,
+        "fa_locked": is_fa_locked(),
+    }
 
 
 def bootstrap_fa():
@@ -1722,7 +1977,7 @@ def bootstrap_fa():
     """
     init_db()
     sync_free_agents_from_roster_if_needed(force=True)
-    seed_qualifying_offers(qo_aav_m=21.2)
+    seed_qualifying_offers(qo_aav_m=QO_AAV_M)
 
 # ---------- UI (templates) ----------
 
@@ -2318,6 +2573,7 @@ INDEX_HTML = f"""
     </label>
     <button id="login-btn" class="btn">Login</button>
 
+    <a class="btn" href="/">← Home</a>
     <a class="btn" id="watchlist-link" href="watchlist" style="display:none;">Watchlist</a>
     <a class="btn" href="history">Bid History</a>
     <a class="btn" href="export.csv">Export CSV</a>
@@ -2333,8 +2589,14 @@ INDEX_HTML = f"""
     </div>
   </div>
 
-  <div class="pill" id="login-pill">
-    <span id="login-status">🔒 Not logged in</span>
+  <div class="topbar" style="margin-top:10px;">
+    <div class="pill" id="login-pill">
+      <span id="login-status">🔒 Not logged in</span>
+    </div>
+    <div class="pill" id="fa-lock-pill">FA status: Loading…</div>
+    <div class="pill" id="cap-space-pill" style="display:none;">
+      <span id="cap-space-status">Available cap: —</span>
+    </div>
   </div>
 
   <hr class="sep" />
@@ -2407,6 +2669,9 @@ const loginBtn = document.getElementById('login-btn');
 const watchlistLink = document.getElementById('watchlist-link');
 const searchInput = document.getElementById('search');
 const hideSigned = document.getElementById('hide-signed');
+const faLockPill = document.getElementById('fa-lock-pill');
+const capSpacePill = document.getElementById('cap-space-pill');
+const capSpaceStatus = document.getElementById('cap-space-status');
 
 const modal = document.getElementById('bid-modal');
 const modalClose = document.getElementById('modal-close');
@@ -2418,6 +2683,7 @@ const aavInput = document.getElementById('aav');
 const curLeader = document.getElementById('cur-leader');
 const curVal = document.getElementById('cur-val');
 const minRequired = document.getElementById('min-required');
+const capAvail = document.getElementById('cap-avail');
 const minAav = document.getElementById('min-aav');
 const myVal = document.getElementById('my-val');
 const hmMult = document.getElementById('hm-mult');
@@ -2429,6 +2695,8 @@ let state = {{
   team: "",
   authed: false,
   authedEmail: "",
+  faLocked: false,
+  capSummary: null,
   search: "",
   hideSigned: false,
   players: [],
@@ -2465,6 +2733,22 @@ async function fetchStatus() {{
   state.team = data.selected_team || "";
   state.authed = !!data.authed_for_selected;
   state.authedEmail = data.authed_email || "";
+  state.faLocked = !!data.fa_locked;
+  state.capSummary = data.cap_summary || null;
+
+  if (faLockPill) {{
+    faLockPill.textContent = state.faLocked
+      ? '🔒 FA locked — bids are frozen'
+      : '🔓 FA unlocked — active bids sign after 48h';
+  }}
+  if (capSpacePill && capSpaceStatus) {{
+    if (state.authed && state.capSummary) {{
+      capSpacePill.style.display = 'inline-flex';
+      capSpaceStatus.textContent = `Available cap: ${{moneyM(state.capSummary.available_cap_m)}} (active FA bids: ${{moneyM(state.capSummary.active_bid_commitments_m)}})`;
+    }} else {{
+      capSpacePill.style.display = 'none';
+    }}
+  }}
 
   const loginStatus = document.getElementById('login-status');
   if (state.authed && state.team) {{
@@ -2501,14 +2785,14 @@ function renderPlayers() {{
     const val = p.current_bid_value_m !== null ? moneyM(p.current_bid_value_m) : '—';
     const exp = p.expires_at ? fmtIso(p.expires_at) : '—';
 
-    const status = p.signed_team ? `Signed: ${{p.signed_team}}` : (p.current_bid_team ? 'Bidding open' : 'No bids');
+    const status = p.signed_team ? `Signed: ${{p.signed_team}}` : (state.faLocked ? (p.current_bid_team ? 'Bid frozen' : 'FA locked') : (p.current_bid_team ? 'Bidding open' : 'No bids'));
 
     const actionTd = document.createElement('td');
 
     const bidBtn = document.createElement('button');
     bidBtn.className = 'btn';
     bidBtn.textContent = 'Bid';
-    bidBtn.disabled = !state.authed || !!p.signed_team;
+    bidBtn.disabled = !state.authed || state.faLocked || !!p.signed_team;
     bidBtn.onclick = () => openBidModal(p);
 
 const wBtn = document.createElement('button');
@@ -2605,13 +2889,17 @@ async function previewBid() {{
   curLeader.textContent = data.current_bid_team ? data.current_bid_team : '—';
   curVal.textContent = data.current_bid_value_m !== null ? moneyM(data.current_bid_value_m) : '—';
   minRequired.textContent = data.required_min_bid_value_m !== null ? moneyM(data.required_min_bid_value_m) : '—';
+  capAvail.textContent = data.cap_summary ? moneyM(data.cap_summary.available_cap_m) : '—';
   minAav.textContent = moneyM(data.min_aav_m) + '/yr';
   myVal.textContent = moneyM(data.my_bid_value_m);
   hmMult.textContent = data.is_hometown_bid ? `${{data.hometown_multiplier.toFixed(2)}}x (hometown)` : `${{data.hometown_multiplier.toFixed(2)}}x`;
 
   submitBidBtn.disabled = !data.ok_to_submit;
 
-  if (data.signed) {{
+  if (data.fa_locked) {{
+    modalWarn.textContent = "Free agency is locked. Admin QOs can be entered, but public FA bids are frozen.";
+    modalWarn.style.display = 'block';
+  }} else if (data.signed) {{
     modalWarn.textContent = "This player is already signed.";
     modalWarn.style.display = 'block';
   }} else if (!data.meets_min_aav) {{
@@ -2619,6 +2907,9 @@ async function previewBid() {{
     modalWarn.style.display = 'block';
   }} else if (!data.meets_outbid) {{
     modalWarn.textContent = `Bid value must be at least 10% higher than current leader (need ≥ ${{moneyM(data.required_min_bid_value_m)}}).`;
+    modalWarn.style.display = 'block';
+  }} else if (!data.meets_cap) {{
+    modalWarn.textContent = `Bid would exceed your hard-cap space. Available after active FA bids: ${{moneyM(data.cap_summary?.available_cap_m || 0)}}.`;
     modalWarn.style.display = 'block';
   }} else {{
     modalOk.textContent = "Bid is valid to submit.";
@@ -2629,7 +2920,7 @@ async function previewBid() {{
 function openBidModal(p) {{
   state.modalPlayer = p;
   modalTitle.textContent = `Bid: ${{p.name}}`;
-  modalSubtitle.textContent = p.signed_team ? `Signed to ${{p.signed_team}}` : 'Set years/option/AAV. Preview updates live.';
+  modalSubtitle.textContent = p.signed_team ? `Signed to ${{p.signed_team}}` : (state.faLocked ? 'FA is locked; public bids are frozen.' : 'Set years/option/AAV. Preview updates live.');
 
   fillYearsDropdown();
   yearsSel.value = "1";
@@ -2766,13 +3057,18 @@ WATCHLIST_HTML = f"""
     <!-- existing topbar/table -->
 <body>
   <div class="topbar">
-    <a class="btn" href="./">← Back</a>
+    <a class="btn" href="./">← Back to FA</a>
+    <a class="btn" href="/">← Home</a>
     <span class="pill">Watchlist</span>
     <a class="btn" href="history">Bid History</a>
   </div>
 
-  <div class="pill" id="login-pill">
-    <span id="login-status">Loading…</span>
+  <div class="topbar" style="margin-top:10px;">
+    <div class="pill" id="login-pill">
+      <span id="login-status">Loading…</span>
+    </div>
+    <div class="pill" id="fa-lock-pill">FA status: Loading…</div>
+    <div class="pill" id="cap-space-pill" style="display:none;"><span id="cap-space-status">Available cap: —</span></div>
   </div>
 
   <table data-sortable="true">
@@ -2801,6 +3097,9 @@ WATCHLIST_HTML = f"""
 <script>
 const wlBody = document.getElementById('wl-body');
 const loginStatus = document.getElementById('login-status');
+const faLockPill = document.getElementById('fa-lock-pill');
+const capSpacePill = document.getElementById('cap-space-pill');
+const capSpaceStatus = document.getElementById('cap-space-status');
 
 // modal refs (duplicated IDs match embedded chunk)
 const modal = document.getElementById('bid-modal');
@@ -2813,6 +3112,7 @@ const aavInput = document.getElementById('aav');
 const curLeader = document.getElementById('cur-leader');
 const curVal = document.getElementById('cur-val');
 const minRequired = document.getElementById('min-required');
+const capAvail = document.getElementById('cap-avail');
 const minAav = document.getElementById('min-aav');
 const myVal = document.getElementById('my-val');
 const hmMult = document.getElementById('hm-mult');
@@ -2824,6 +3124,8 @@ let state = {{
   team: "",
   authed: false,
   authedEmail: "",
+  faLocked: false,
+  capSummary: null,
   players: [],
   modalPlayer: null
 }};
@@ -2844,6 +3146,21 @@ async function fetchStatus() {{
   state.team = data.selected_team || "";
   state.authed = !!data.authed_for_selected;
   state.authedEmail = data.authed_email || "";
+  state.faLocked = !!data.fa_locked;
+  state.capSummary = data.cap_summary || null;
+  if (faLockPill) {{
+    faLockPill.textContent = state.faLocked
+      ? '🔒 FA locked — bids are frozen'
+      : '🔓 FA unlocked — active bids sign after 48h';
+  }}
+  if (capSpacePill && capSpaceStatus) {{
+    if (state.authed && state.capSummary) {{
+      capSpacePill.style.display = 'inline-flex';
+      capSpaceStatus.textContent = `Available cap: ${{moneyM(state.capSummary.available_cap_m)}} (active FA bids: ${{moneyM(state.capSummary.active_bid_commitments_m)}})`;
+    }} else {{
+      capSpacePill.style.display = 'none';
+    }}
+  }}
   if (state.authed && state.team) {{
     loginStatus.textContent = `🔓 Logged in as ${{state.authedEmail}} for ${{state.team}}`;
   }} else {{
@@ -2875,7 +3192,7 @@ function render() {{
     const leader = p.current_bid_team ? p.current_bid_team : '—';
     const val = p.current_bid_value_m !== null ? moneyM(p.current_bid_value_m) : '—';
     const exp = p.expires_at ? fmtIso(p.expires_at) : '—';
-    const status = p.signed_team ? `Signed: ${{p.signed_team}}` : (p.current_bid_team ? 'Bidding open' : 'No bids');
+    const status = p.signed_team ? `Signed: ${{p.signed_team}}` : (state.faLocked ? (p.current_bid_team ? 'Bid frozen' : 'FA locked') : (p.current_bid_team ? 'Bidding open' : 'No bids'));
     const img = p.mlbam_id ? `/fa/player_image/${{p.mlbam_id}}.png` : '';
     const imgTag = p.mlbam_id ? `<img class="pimg" src="${{img}}" loading="lazy" />` : '';
 
@@ -2884,7 +3201,7 @@ function render() {{
     const bidBtn = document.createElement('button');
     bidBtn.className = 'btn';
     bidBtn.textContent = 'Bid';
-    bidBtn.disabled = !state.authed || !!p.signed_team;
+    bidBtn.disabled = !state.authed || state.faLocked || !!p.signed_team;
     bidBtn.onclick = () => openBidModal(p);
 
     const rmBtn = document.createElement('button');
@@ -2976,13 +3293,17 @@ async function previewBid() {{
   curLeader.textContent = data.current_bid_team ? data.current_bid_team : '—';
   curVal.textContent = data.current_bid_value_m !== null ? moneyM(data.current_bid_value_m) : '—';
   minRequired.textContent = data.required_min_bid_value_m !== null ? moneyM(data.required_min_bid_value_m) : '—';
+  capAvail.textContent = data.cap_summary ? moneyM(data.cap_summary.available_cap_m) : '—';
   minAav.textContent = moneyM(data.min_aav_m) + '/yr';
   myVal.textContent = moneyM(data.my_bid_value_m);
   hmMult.textContent = data.is_hometown_bid ? `${{data.hometown_multiplier.toFixed(2)}}x (hometown)` : `${{data.hometown_multiplier.toFixed(2)}}x`;
 
   submitBidBtn.disabled = !data.ok_to_submit;
 
-  if (data.signed) {{
+  if (data.fa_locked) {{
+    modalWarn.textContent = "Free agency is locked. Admin QOs can be entered, but public FA bids are frozen.";
+    modalWarn.style.display = 'block';
+  }} else if (data.signed) {{
     modalWarn.textContent = "This player is already signed.";
     modalWarn.style.display = 'block';
   }} else if (!data.meets_min_aav) {{
@@ -2990,6 +3311,9 @@ async function previewBid() {{
     modalWarn.style.display = 'block';
   }} else if (!data.meets_outbid) {{
     modalWarn.textContent = `Bid value must be at least 10% higher than current leader (need ≥ ${{moneyM(data.required_min_bid_value_m)}}).`;
+    modalWarn.style.display = 'block';
+  }} else if (!data.meets_cap) {{
+    modalWarn.textContent = `Bid would exceed your hard-cap space. Available after active FA bids: ${{moneyM(data.cap_summary?.available_cap_m || 0)}}.`;
     modalWarn.style.display = 'block';
   }} else {{
     modalOk.textContent = "Bid is valid to submit.";
@@ -3000,7 +3324,7 @@ async function previewBid() {{
 function openBidModal(p) {{
   state.modalPlayer = p;
   modalTitle.textContent = `Bid: ${{p.name}}`;
-  modalSubtitle.textContent = p.signed_team ? `Signed to ${{p.signed_team}}` : 'Set years/option/AAV. Preview updates live.';
+  modalSubtitle.textContent = p.signed_team ? `Signed to ${{p.signed_team}}` : (state.faLocked ? 'FA is locked; public bids are frozen.' : 'Set years/option/AAV. Preview updates live.');
   fillYearsDropdown();
   yearsSel.value = "1";
   optSel.value = "0";
@@ -3229,7 +3553,7 @@ def index():
 @fa_bp.route("/watchlist")
 def watchlist_page():
     if not session.get("authed_team"):
-        return redirect(url_for("index"))
+        return redirect(url_for("fa.index"))
     return render_template_string(WATCHLIST_HTML)
 
 @fa_bp.route("/history")
@@ -3244,12 +3568,15 @@ def api_fa_status():
     selected_team = session.get("selected_team", "") or ""
     authed_team = session.get("authed_team", "") or ""
     authed_email = session.get("authed_email", "") or ""
+    cap_summary = get_team_cap_summary(authed_team) if authed_team else None
     return jsonify({
         "teams": MLB_TEAMS,
         "selected_team": selected_team,
         "authed_team": authed_team,
         "authed_email": authed_email,
         "authed_for_selected": bool(selected_team) and (selected_team == authed_team),
+        "fa_locked": is_fa_locked(),
+        "cap_summary": cap_summary,
     })
 
 @fa_bp.post("/api/select_team")
