@@ -97,6 +97,20 @@ OOTP_FA_ROSTER = Path(os.environ.get(
     "BNSL_OOTP_FA_ROSTER",
     str(input_path("bnsl_ootp27_fixed_rosters_oldids_optionsupdated.txt")),
 ))
+
+# OOTP ratings exports used to populate roster.db ovr/pot/def before the FA
+# table mirrors those values into fa.db/free_agents.  The second file covers
+# free agents who are not present in the main all-ratings export.  You can
+# override both at once with BNSL_OOTP_RATINGS_CSVS=/path/a.csv,/path/b.csv
+# or individually with the two env vars below.
+OOTP_RATINGS_CSV = Path(os.environ.get(
+    "BNSL_OOTP_RATINGS_CSV",
+    str(input_path("bnsl_ootp2027_allratingsexport.csv")),
+))
+OOTP_FA_RATINGS_CSV = Path(os.environ.get(
+    "BNSL_OOTP_FA_RATINGS_CSV",
+    str(input_path("bnsl_ootp27_allratingsexport_fa.csv")),
+))
 HOMETOWN_DISCOUNTS_DB = Path(os.environ.get(
     "BNSL_HOMETOWN_DISCOUNTS_DB",
     str(generated_path("hometown_discounts.db")),
@@ -794,7 +808,7 @@ def import_free_agents_csv(path: Path):
 
 
 # ---------- Roster-source sync for Free Agency tab ----------
-_last_roster_sync_signature: tuple[float | None, float | None] | None = None
+_last_roster_sync_signature: tuple[float | None, ...] | None = None
 _last_roster_sync_checked_at: float = 0.0
 
 
@@ -812,6 +826,38 @@ def get_ootp_fa_roster_path() -> Path:
         if cfg:
             return Path(cfg)
     return OOTP_FA_ROSTER
+
+
+def get_ootp_ratings_csv_paths() -> list[Path]:
+    """Return the ordered OOTP ratings CSVs to merge for OVR/POT/DEF."""
+    raw_paths: Any = None
+    if has_app_context():
+        raw_paths = current_app.config.get("OOTP_RATINGS_CSV_PATHS")
+
+    if raw_paths is None:
+        env_paths = os.environ.get("BNSL_OOTP_RATINGS_CSVS", "").strip()
+        if env_paths:
+            # Accept comma-separated or os.pathsep-separated lists.
+            raw_paths = re.split(r"[," + re.escape(os.pathsep) + r"]+", env_paths)
+
+    if raw_paths is None:
+        raw_paths = [OOTP_RATINGS_CSV, OOTP_FA_RATINGS_CSV]
+    elif isinstance(raw_paths, (str, Path)):
+        raw_paths = [raw_paths]
+
+    out: list[Path] = []
+    seen: set[str] = set()
+    for item in raw_paths:
+        text = str(item or "").strip()
+        if not text:
+            continue
+        path = Path(text)
+        key = str(path)
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(path)
+    return out
 
 
 def get_hometown_discounts_db_path() -> Path:
@@ -1372,6 +1418,177 @@ def import_ootp_free_agents_into_roster_db(path: Path | None = None) -> tuple[in
     return (seen, inserted)
 
 
+def _normalize_rating_dob(value: Any) -> str:
+    """Normalize OOTP ratings DOB values like MM/DD/YYYY to YYYY-MM-DD."""
+    text = str(value or "").strip()
+    if not text or text in {"-", "—"}:
+        return ""
+    for fmt in ("%m/%d/%Y", "%m-%d-%Y", "%Y-%m-%d"):
+        try:
+            return datetime.strptime(text, fmt).strftime("%Y-%m-%d")
+        except Exception:
+            pass
+    return text
+
+
+def _rating_optional_int(value: Any) -> int | None:
+    text = str(value or "").strip()
+    if not text or text in {"-", "—"}:
+        return None
+    try:
+        return int(float(text))
+    except Exception:
+        return None
+
+
+def _rating_row_match_keys(row: dict[str, str]) -> list[str]:
+    name = _row_get_ci(row, "Name", "player")
+    first = _row_get_ci(row, "First Name", "FirstName", "first_name")
+    last = _row_get_ci(row, "Last Name", "LastName", "last_name")
+    if not first or not last:
+        f2, l2 = _split_name(name)
+        first = first or f2
+        last = last or l2
+    dob = _normalize_rating_dob(_row_get_ci(row, "DOB", "date_of_birth", "birth_date"))
+    team = _row_get_ci(row, "TM", "Team", "Team Name", "franchise")
+    ootp_id = _row_get_ci(row, "ID", "id", "ootp_id")
+    return _player_match_keys(first, last, dob, team, "", "", ootp_id)
+
+
+def _iter_ootp_ratings_csv(path: Path):
+    """Yield OOTP all-ratings CSV rows with case-insensitive DictReader keys."""
+    with Path(path).open(newline="", encoding="utf-8-sig") as f:
+        reader = csv.DictReader(f)
+        for row in reader:
+            if not row:
+                continue
+            # Keep original keys for _row_get_ci, but normalize None values.
+            yield {str(k or "").strip(): str(v or "").strip() for k, v in row.items()}
+
+
+def _load_combined_ootp_rating_map(paths: list[Path]) -> tuple[dict[str, dict[str, Any]], set[str], int, int]:
+    """
+    Merge OOTP ratings exports into a key map.
+
+    Later files in the ordered path list overwrite earlier files for the same
+    player signature, so the FA ratings export can fill or supersede rows from
+    the main ratings export. Ambiguous name-only keys are marked duplicate and
+    skipped during matching, preserving the duplicate-player handling used
+    elsewhere in the app.
+    """
+    rating_by_key: dict[str, dict[str, Any]] = {}
+    owner_by_key: dict[str, str] = {}
+    duplicate_keys: set[str] = set()
+    files_loaded = 0
+    rows_loaded = 0
+
+    for source_index, path in enumerate(paths):
+        if not path.exists():
+            logging.info("OOTP ratings CSV skipped; file does not exist: %s", path)
+            continue
+        files_loaded += 1
+        for row in _iter_ootp_ratings_csv(path):
+            name = _row_get_ci(row, "Name", "player")
+            first = _row_get_ci(row, "First Name", "FirstName", "first_name")
+            last = _row_get_ci(row, "Last Name", "LastName", "last_name")
+            if not first or not last:
+                f2, l2 = _split_name(name)
+                first = first or f2
+                last = last or l2
+            if not last:
+                continue
+
+            dob = _normalize_rating_dob(_row_get_ci(row, "DOB", "date_of_birth", "birth_date"))
+            ootp_id = _row_get_ci(row, "ID", "id", "ootp_id")
+            signature = _norm_token(ootp_id) or f"{_norm_token(first)}:{_norm_token(last)}:{_norm_token(dob)}"
+            if not signature:
+                continue
+
+            rec = {
+                "name": name or f"{first} {last}".strip(),
+                "first_name": first,
+                "last_name": last,
+                "dob": dob,
+                "ootp_id": _parse_positive_int(ootp_id),
+                "ovr": _rating_optional_int(_row_get_ci(row, "OVR")),
+                "pot": _rating_optional_int(_row_get_ci(row, "POT")),
+                "def": _rating_optional_int(_row_get_ci(row, "DEF")),
+                "source_path": str(path),
+                "source_index": source_index,
+            }
+            rows_loaded += 1
+
+            for key in _rating_row_match_keys(row):
+                prev_owner = owner_by_key.get(key)
+                if prev_owner is not None and prev_owner != signature:
+                    duplicate_keys.add(key)
+                    continue
+                owner_by_key[key] = signature
+                rating_by_key[key] = rec
+
+    return rating_by_key, duplicate_keys, files_loaded, rows_loaded
+
+
+def update_roster_db_ratings_from_exports(paths: list[Path] | None = None) -> tuple[int, int, int]:
+    """
+    Refresh roster_players.ovr/pot/def from the merged OOTP ratings exports.
+
+    The FA table already copies these columns from roster.db into free_agents.
+    Running this before sync_free_agents_from_roster_db makes the FA page pull
+    ratings from the combined main + FA all-ratings CSV set.
+
+    Returns: (files_loaded, rating_rows_loaded, roster_rows_updated)
+    """
+    roster_path = get_roster_db_path()
+    if not roster_path.exists():
+        logging.warning("OOTP ratings sync skipped: roster.db does not exist: %s", roster_path)
+        return (0, 0, 0)
+
+    rating_paths = paths or get_ootp_ratings_csv_paths()
+    rating_by_key, duplicate_keys, files_loaded, rows_loaded = _load_combined_ootp_rating_map(rating_paths)
+    if not rating_by_key:
+        return (files_loaded, rows_loaded, 0)
+
+    conn = get_roster_conn()
+    cur = conn.cursor()
+    ensure_roster_fa_import_columns(conn)
+    cur.execute("SELECT * FROM roster_players")
+    roster_rows = cur.fetchall()
+
+    updated = 0
+    for roster_row in roster_rows:
+        match = None
+        for key in _roster_row_match_keys(roster_row):
+            if key in duplicate_keys:
+                continue
+            rec = rating_by_key.get(key)
+            if rec is not None:
+                match = rec
+                break
+        if match is None:
+            continue
+
+        cur.execute("""
+            UPDATE roster_players
+            SET ovr=?, pot=?, def=?
+            WHERE id=?
+        """, (
+            match["ovr"],
+            match["pot"],
+            match["def"],
+            int(roster_row["id"]),
+        ))
+        updated += 1
+
+    conn.commit()
+    conn.close()
+    logging.info(
+        "OOTP ratings sync complete: %s files, %s rating rows, %s roster rows updated",
+        files_loaded, rows_loaded, updated,
+    )
+    return (files_loaded, rows_loaded, updated)
+
+
 def _roster_db_row_is_unrostered(row: sqlite3.Row) -> bool:
     franchise = str(row["franchise"] or "").strip()
     roster_status = str(row["roster_status"] or "").strip()
@@ -1605,13 +1822,21 @@ def sync_free_agents_from_roster_if_needed(force: bool = False) -> None:
     except OSError:
         ootp_mtime = None
 
-    signature = (roster_mtime, ootp_mtime)
+    ratings_mtimes: list[float | None] = []
+    for ratings_path in get_ootp_ratings_csv_paths():
+        try:
+            ratings_mtimes.append(ratings_path.stat().st_mtime if ratings_path.exists() else None)
+        except OSError:
+            ratings_mtimes.append(None)
+
+    signature = (roster_mtime, ootp_mtime, *ratings_mtimes)
     ttl_expired = (ROSTER_DB_SYNC_TTL_SECONDS <= 0) or ((now - _last_roster_sync_checked_at) >= ROSTER_DB_SYNC_TTL_SECONDS)
     changed = (_last_roster_sync_signature is None) or (signature != _last_roster_sync_signature)
 
     if force or changed or ttl_expired:
         if ootp_path.exists():
             import_ootp_free_agents_into_roster_db(ootp_path)
+        update_roster_db_ratings_from_exports()
         sync_free_agents_from_roster_db()
         # Preserve the existing HTD machinery, but make sure any newly inserted
         # roster-derived FA rows get their hometown data.  clear_missing=False
@@ -1626,7 +1851,15 @@ def sync_free_agents_from_roster_if_needed(force: bool = False) -> None:
             roster_mtime = roster_path.stat().st_mtime
         except OSError:
             pass
-        _last_roster_sync_signature = (roster_mtime, ootp_mtime)
+        # Recompute after writes so the cache reflects the post-sync state.
+        try:
+            ratings_mtimes = [
+                (path.stat().st_mtime if path.exists() else None)
+                for path in get_ootp_ratings_csv_paths()
+            ]
+        except OSError:
+            ratings_mtimes = []
+        _last_roster_sync_signature = (roster_mtime, ootp_mtime, *ratings_mtimes)
         _last_roster_sync_checked_at = now
 
 def seed_qualifying_offers(qo_aav_m: float = QO_AAV_M):
@@ -3979,6 +4212,7 @@ if __name__ == "__main__":
     ap = argparse.ArgumentParser()
     ap.add_argument("--sync-registry", action="store_true", help="Import/refresh players from player_registry.csv into DB")
     ap.add_argument("--sync-roster", action="store_true", help="Import/refresh free agents from live roster.db and OOTP FA export")
+    ap.add_argument("--sync-ratings", action="store_true", help="Import/refresh OOTP ratings from the merged main + FA ratings CSVs into roster.db")
     ap.add_argument("--apply-htd", action="store_true", help="Apply hometown discounts from hometown_discounts.db to current free agents")
     ap.add_argument("--prefetch-headshots", action="store_true", help="Download headshots for all players with mlbam_id")
     args = ap.parse_args()
@@ -3986,10 +4220,21 @@ if __name__ == "__main__":
     if args.sync_roster:
         init_db()
         sync_free_agents_from_roster_if_needed(force=True)
-        print("✅ Roster free agents synced.")
+        print("✅ Roster free agents synced, including merged OOTP ratings.")
         if args.apply_htd:
             summary = assign_hometown_discounts_now(clear_missing=True)
             print(f"✅ Hometown discounts applied: {summary}")
+        raise SystemExit(0)
+
+    if args.sync_ratings:
+        init_db()
+        files_loaded, rows_loaded, updated = update_roster_db_ratings_from_exports()
+        unrostered, upserted = sync_free_agents_from_roster_db()
+        print(
+            f"✅ OOTP ratings synced from {files_loaded} file(s): "
+            f"{rows_loaded} rating rows, {updated} roster rows updated; "
+            f"{upserted}/{unrostered} FA rows refreshed."
+        )
         raise SystemExit(0)
 
     if args.apply_htd:
