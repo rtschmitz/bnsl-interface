@@ -589,6 +589,19 @@ def ensure_roster_decision_columns(conn: sqlite3.Connection) -> None:
             cur.execute(ddl)
 
 
+def ensure_roster_identifier_columns(conn: sqlite3.Connection) -> None:
+    """Add persistent player identifier columns used by CSV exports/syncs."""
+    cur = conn.cursor()
+    cur.execute("PRAGMA table_info(roster_players)")
+    cols = {row[1] for row in cur.fetchall()}
+    additions = {
+        "mlbam_id": "ALTER TABLE roster_players ADD COLUMN mlbam_id INTEGER",
+    }
+    for col, ddl in additions.items():
+        if col not in cols:
+            cur.execute(ddl)
+
+
 def row_service_time(row: sqlite3.Row) -> float:
     return as_float(row_value(row, "service_time"), 0.0)
 
@@ -1074,6 +1087,7 @@ def bootstrap_roster():
         cur.execute("ALTER TABLE roster_players ADD COLUMN def INTEGER")
 
     ensure_roster_decision_columns(conn)
+    ensure_roster_identifier_columns(conn)
     ensure_roster_draft_columns(conn)
     ensure_roster_rulev_columns(conn)
 
@@ -2085,7 +2099,10 @@ def _csv_response_for_table(conn: sqlite3.Connection, table: str, filename: str)
 
 @roster_bp.get("/export.csv")
 def export_roster_csv():
-    return _csv_response_for_table(get_conn(), "roster_players", "roster_players.csv")
+    conn = get_conn()
+    ensure_roster_identifier_columns(conn)
+    conn.commit()
+    return _csv_response_for_table(conn, "roster_players", "roster_players.csv")
 
 @roster_bp.get("/")
 def roster_index():

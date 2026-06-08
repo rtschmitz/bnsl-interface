@@ -1772,7 +1772,7 @@ def sync_free_agents_from_roster_db() -> tuple[int, int]:
                 SET name=?,
                     position=COALESCE(NULLIF(?, ''), position),
                     last_team=COALESCE(NULLIF(?, ''), last_team),
-                    mlbam_id=COALESCE(?, mlbam_id),
+                    mlbam_id=CASE WHEN ? IS NULL THEN mlbam_id ELSE ? END,
                     fangraphs_id=COALESCE(?, fangraphs_id),
                     ovr=?,
                     pot=?,
@@ -1784,7 +1784,7 @@ def sync_free_agents_from_roster_db() -> tuple[int, int]:
                     removed_from_roster_sync=NULL
                 WHERE id=?
             """, (
-                name, pos, last_team, mlbam_id, fg_id, ovr, pot, def_rating,
+                name, pos, last_team, mlbam_id, mlbam_id, fg_id, ovr, pot, def_rating,
                 roster_id, now_text, existing_id,
             ))
         upserted += 1
@@ -4033,7 +4033,13 @@ def _csv_response_for_table(conn: sqlite3.Connection, table: str, filename: str)
 
 @fa_bp.get("/export.csv")
 def export_free_agents_csv():
-    return _csv_response_for_table(get_conn(), "free_agents", "free_agents.csv")
+    init_db()
+    # Keep the FA CSV keyed to the live roster DB before export so mlbam_id
+    # mirrors roster_players.mlbam_id for roster-derived free agents.
+    sync_free_agents_from_roster_db()
+    conn = get_conn()
+    ensure_column(conn, "free_agents", "mlbam_id", "mlbam_id INTEGER")
+    return _csv_response_for_table(conn, "free_agents", "free_agents.csv")
 
 @fa_bp.route("/")
 def index():
