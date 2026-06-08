@@ -6,9 +6,9 @@ Single-file Flask app implementing:
 - Team/email login (same pattern as your draft app)
 - Free agent list (CSV import, plus demo iconic MLB names if missing)
 - Fixed-contract bidding (1–6 years + optional club option year, fixed AAV)
-- Minimum AAV rules by (years + option)
+- Minimum AAV rules by exact contract structure (years + optional club option)
 - Hometown multiplier (1.05x / 1.10x) applied to bid VALUE for hometown team bids
-- Outbid rule: new bid must be >= 10% higher bid value than the current high bid
+- Outbid rule: new bid must be >= 5% higher bid value than the current high bid
 - 48-hour timer resets on each new bid; auto-sign on expiry
 - Watchlist (bid directly from watchlist)
 - Bid history page (summary of all bids)
@@ -381,21 +381,44 @@ def _require_authed_team() -> str:
         abort(401, "Not logged in")
     return team
 
+BID_VALUE_MIN_INCREMENT = 1.05
+
 def min_aav_millions(years: int, has_option: bool) -> float:
     """
-    Minimum salary rules (AAV), in $M.
-    Map by total years where option adds one potential year.
+    Minimum salary rules (AAV), in $M, by exact contract structure.
+
+    User-facing rules:
+      1yr: $0.75M            1yr + option: $2.5M
+      2yr: $1.5M             2yr + option: $5M
+      3yr: $2.5M             3yr + option: $7M
+      4yr: $5M               4yr + option: $10M
+      5yr: $7M               5yr + option: $10M
+      6yr: $10M              6yr + option: not allowed
     """
-    total = min(6, years + (2 if has_option else 0))
-    mins = {
+    years = clamp_int(years, 1, 6, 1)
+    has_option = bool(has_option)
+
+    if has_option and years >= 6:
+        # Not offerable; callers should block 6yr+option separately.
+        return 999999.0
+
+    mins_no_option = {
         1: 0.75,
-        2: 1.25,
+        2: 1.50,
         3: 2.50,
         4: 5.00,
         5: 7.00,
         6: 10.00,
     }
-    return float(mins.get(total, 999999.0))
+    mins_with_option = {
+        1: 2.50,
+        2: 5.00,
+        3: 7.00,
+        4: 10.00,
+        5: 10.00,
+    }
+    mins = mins_with_option if has_option else mins_no_option
+    return float(mins.get(years, 999999.0))
 
 def hometown_multiplier(hometown_seasons: int) -> float:
     if hometown_seasons >= 2:
@@ -1804,7 +1827,37 @@ def player_snapshot_row(p: sqlite3.Row, roster_dob_map: dict[int, str] | None = 
         "expires_at": leader["expires_at"] if leader else None,
     }
 
-def fetch_free_agents(search: str = "", hide_signed: bool = False) -> List[Dict[str, Any]]:
+POSITION_FILTER_GROUPS = {
+    "P": ["P", "SP", "RP"],
+    "OF": ["OF", "LF", "CF", "RF"],
+}
+
+
+def _position_filter_clause(position: str) -> tuple[str, list[Any]]:
+    """
+    Build a token-aware SQLite position filter.
+
+    Supports exact position tokens and useful groups:
+      - P includes P/SP/RP
+      - OF includes OF/LF/CF/RF
+    It also handles simple multi-position strings like "2B/SS" or "LF, RF".
+    """
+    pos = str(position or "").strip().upper()
+    if not pos:
+        return "", []
+
+    allowed = {"P", "SP", "RP", "C", "1B", "2B", "3B", "SS", "LF", "CF", "RF", "OF", "DH"}
+    if pos not in allowed:
+        return "", []
+
+    tokens = POSITION_FILTER_GROUPS.get(pos, [pos])
+    norm_expr = "(' ' || UPPER(REPLACE(REPLACE(REPLACE(COALESCE(position, ''), '/', ' '), ',', ' '), ';', ' ')) || ' ')"
+    clause = "(" + " OR ".join(f"{norm_expr} LIKE ?" for _ in tokens) + ")"
+    params = [f"% {tok} %" for tok in tokens]
+    return clause, params
+
+
+def fetch_free_agents(search: str = "", hide_signed: bool = False, show_unrated: bool = False, position: str = "") -> List[Dict[str, Any]]:
     enforce_expirations()
     conn = get_conn()
     cur = conn.cursor()
@@ -1823,10 +1876,30 @@ def fetch_free_agents(search: str = "", hide_signed: bool = False) -> List[Dict[
     if hide_signed:
         clauses.append("(signed_team IS NULL OR signed_team='')")
 
+    pos_clause, pos_params = _position_filter_clause(position)
+    if pos_clause:
+        clauses.append(pos_clause)
+        params.extend(pos_params)
+
+    if not show_unrated:
+        clauses.append("""
+            (ovr IS NOT NULL
+             AND TRIM(CAST(ovr AS TEXT)) NOT IN ('', '-', '—')
+             AND CAST(ovr AS INTEGER) <> 20)
+        """)
+
     q = "SELECT * FROM free_agents"
     if clauses:
         q += " WHERE " + " AND ".join(clauses)
-    q += " ORDER BY unaccent(name) COLLATE NOCASE ASC"
+    q += """
+        ORDER BY
+          CASE
+            WHEN ovr IS NULL OR TRIM(CAST(ovr AS TEXT)) IN ('', '-', '—') THEN 1
+            ELSE 0
+          END ASC,
+          CAST(ovr AS INTEGER) DESC,
+          unaccent(name) COLLATE NOCASE ASC
+    """
 
     cur.execute(q, params)
     rows = cur.fetchall()
@@ -1893,7 +1966,7 @@ def compute_preview(team: str, pid: int, years: int, has_option: bool, aav_m: fl
     cur_val = float(leader["bid_value_m"]) if leader else None
     required = None
     if cur_val is not None:
-        required = cur_val * 1.10
+        required = cur_val * BID_VALUE_MIN_INCREMENT
 
     # validation booleans
     meets_min_aav = (aav_m >= min_aav - 1e-9)
@@ -1929,7 +2002,7 @@ def compute_preview(team: str, pid: int, years: int, has_option: bool, aav_m: fl
         "current_bid_team": (leader["team"] if leader else None),
         "current_expires_at": (leader["expires_at"] if leader else None),
 
-        "required_min_bid_value_m": required,  # this is the 10% rule threshold
+        "required_min_bid_value_m": required,  # 5% increment threshold over current high bid
 
         "fa_locked": fa_locked,
         "cap_summary": cap_summary,
@@ -1982,7 +2055,7 @@ def place_bid(team: str, pid: int, years: int, has_option: bool, aav_m: float, *
     if not prev["meets_outbid"]:
         need = prev["required_min_bid_value_m"]
         conn.close()
-        return (False, f"Bid must be at least 10% higher than the current high bid: need ≥ {fmt_money_m(need)} (1-year equiv).")
+        return (False, f"Bid must be at least 5% higher than the current high bid: need ≥ {fmt_money_m(need)} (1-year equiv).")
     if not prev.get("meets_cap", True):
         cap = prev.get("cap_summary") or {}
         conn.close()
@@ -2668,6 +2741,27 @@ INDEX_HTML = f"""
       <input type="checkbox" id="hide-signed" /> Hide signed
     </label>
 
+    <label class="pill">
+      <input type="checkbox" id="show-unrated" /> Show unrated
+    </label>
+
+    <label class="pill">Position:
+      <select id="position-filter" style="margin-left:8px; border:1px solid #ddd; padding:6px 8px; border-radius:6px;">
+        <option value="">All</option>
+        <option value="P">P</option>
+        <option value="C">C</option>
+        <option value="1B">1B</option>
+        <option value="2B">2B</option>
+        <option value="3B">3B</option>
+        <option value="SS">SS</option>
+        <option value="OF">OF</option>
+        <option value="LF">LF</option>
+        <option value="CF">CF</option>
+        <option value="RF">RF</option>
+        <option value="DH">DH</option>
+      </select>
+    </label>
+
     <div class="pill" style="margin-left:auto;">
       <span>Search:</span>
       <input id="search" type="text" placeholder="Type a player name…" style="border:1px solid #ddd; padding:6px 8px; border-radius:6px; min-width: 260px;" />
@@ -2733,10 +2827,12 @@ INDEX_HTML = f"""
         </div>
       </div>
 
+      <div class="kv"><span>Current high bidder</span><b id="cur-leader">—</b></div>
       <div class="kv"><span>Current bid value (1-yr equiv)</span><b id="cur-val">—</b></div>
-      <div class="kv"><span>Minimum required to submit (10% rule)</span><b id="min-required">—</b></div>
-      <div class="kv"><span>Minimum AAV allowed by rules</span><b id="min-aav">—</b></div>
+      <div class="kv"><span>Minimum bid value</span><b id="min-required">—</b></div>
+      <div class="kv"><span>Minimum AAV</span><b id="min-aav">—</b></div>
       <div class="kv"><span>Your bid value (1-yr equiv)</span><b id="my-val">—</b></div>
+      <div class="kv"><span>Available cap after active FA bids</span><b id="cap-avail">—</b></div>
       <div class="kv"><span>Hometown multiplier</span><b id="hm-mult">—</b></div>
 
       <div id="modal-warn" class="danger" style="display:none;"></div>
@@ -2754,6 +2850,8 @@ const loginBtn = document.getElementById('login-btn');
 const watchlistLink = document.getElementById('watchlist-link');
 const searchInput = document.getElementById('search');
 const hideSigned = document.getElementById('hide-signed');
+const showUnrated = document.getElementById('show-unrated');
+const positionFilter = document.getElementById('position-filter');
 const faLockPill = document.getElementById('fa-lock-pill');
 const capSpacePill = document.getElementById('cap-space-pill');
 const capSpaceStatus = document.getElementById('cap-space-status');
@@ -2784,6 +2882,8 @@ let state = {{
   capSummary: null,
   search: "",
   hideSigned: false,
+  showUnrated: false,
+  position: "",
   players: [],
   modalPlayer: null
 }};
@@ -2851,6 +2951,8 @@ async function fetchPlayers() {{
   const params = new URLSearchParams({{
     search: state.search,
     hide_signed: state.hideSigned ? '1' : '0',
+    show_unrated: state.showUnrated ? '1' : '0',
+    position: state.position || '',
   }});
   const res = await fetch('/fa/api/free_agents?' + params.toString());
   const data = await res.json();
@@ -2973,7 +3075,7 @@ async function previewBid() {{
   if (curLeader) curLeader.textContent = data.current_bid_team ? data.current_bid_team : '—';
   curVal.textContent = data.current_bid_value_m !== null ? moneyM(data.current_bid_value_m) : '—';
   minRequired.textContent = data.required_min_bid_value_m !== null ? moneyM(data.required_min_bid_value_m) : '—';
-  capAvail.textContent = data.cap_summary ? moneyM(data.cap_summary.available_cap_m) : '—';
+  if (capAvail) capAvail.textContent = data.cap_summary ? moneyM(data.cap_summary.available_cap_m) : '—';
   minAav.textContent = moneyM(data.min_aav_m) + '/yr';
   myVal.textContent = moneyM(data.my_bid_value_m);
   hmMult.textContent = data.is_hometown_bid ? `${{data.hometown_multiplier.toFixed(2)}}x (hometown)` : `${{data.hometown_multiplier.toFixed(2)}}x`;
@@ -2990,7 +3092,7 @@ async function previewBid() {{
     modalWarn.textContent = `AAV is below minimum for that structure (min ${{moneyM(data.min_aav_m)}}/yr).`;
     modalWarn.style.display = 'block';
   }} else if (!data.meets_outbid) {{
-    modalWarn.textContent = `Bid value must be at least 10% higher than the current high bid (need ≥ ${{moneyM(data.required_min_bid_value_m)}}).`;
+    modalWarn.textContent = `Bid value must be at least 5% higher than the current high bid (need ≥ ${{moneyM(data.required_min_bid_value_m)}}).`;
     modalWarn.style.display = 'block';
   }} else if (!data.meets_cap) {{
     modalWarn.textContent = `Bid would exceed your hard-cap space. Available after active FA bids: ${{moneyM(data.cap_summary?.available_cap_m || 0)}}.`;
@@ -3024,10 +3126,12 @@ yearsSel.onchange = () => {{
   previewBid();
 }};
 optSel.onchange = previewBid;
-aavInput.oninput = () => {{
-  // small debounce-ish behavior by letting the event loop breathe
+function queuePreviewBid() {{
   window.requestAnimationFrame(previewBid);
-}};
+}}
+aavInput.oninput = queuePreviewBid;
+aavInput.onchange = queuePreviewBid;
+aavInput.onkeyup = queuePreviewBid;
 
 submitBidBtn.onclick = async () => {{
   const p = state.modalPlayer;
@@ -3072,6 +3176,16 @@ searchInput.addEventListener('input', debounce(() => {{
 
 hideSigned.addEventListener('change', () => {{
   state.hideSigned = hideSigned.checked;
+  fetchPlayers();
+}});
+
+showUnrated.addEventListener('change', () => {{
+  state.showUnrated = showUnrated.checked;
+  fetchPlayers();
+}});
+
+positionFilter.addEventListener('change', () => {{
+  state.position = positionFilter.value || '';
   fetchPlayers();
 }});
 
@@ -3376,7 +3490,7 @@ async function previewBid() {{
   if (curLeader) curLeader.textContent = data.current_bid_team ? data.current_bid_team : '—';
   curVal.textContent = data.current_bid_value_m !== null ? moneyM(data.current_bid_value_m) : '—';
   minRequired.textContent = data.required_min_bid_value_m !== null ? moneyM(data.required_min_bid_value_m) : '—';
-  capAvail.textContent = data.cap_summary ? moneyM(data.cap_summary.available_cap_m) : '—';
+  if (capAvail) capAvail.textContent = data.cap_summary ? moneyM(data.cap_summary.available_cap_m) : '—';
   minAav.textContent = moneyM(data.min_aav_m) + '/yr';
   myVal.textContent = moneyM(data.my_bid_value_m);
   hmMult.textContent = data.is_hometown_bid ? `${{data.hometown_multiplier.toFixed(2)}}x (hometown)` : `${{data.hometown_multiplier.toFixed(2)}}x`;
@@ -3393,7 +3507,7 @@ async function previewBid() {{
     modalWarn.textContent = `AAV is below minimum for that structure (min ${{moneyM(data.min_aav_m)}}/yr).`;
     modalWarn.style.display = 'block';
   }} else if (!data.meets_outbid) {{
-    modalWarn.textContent = `Bid value must be at least 10% higher than the current high bid (need ≥ ${{moneyM(data.required_min_bid_value_m)}}).`;
+    modalWarn.textContent = `Bid value must be at least 5% higher than the current high bid (need ≥ ${{moneyM(data.required_min_bid_value_m)}}).`;
     modalWarn.style.display = 'block';
   }} else if (!data.meets_cap) {{
     modalWarn.textContent = `Bid would exceed your hard-cap space. Available after active FA bids: ${{moneyM(data.cap_summary?.available_cap_m || 0)}}.`;
@@ -3420,7 +3534,12 @@ function openBidModal(p) {{
 modalClose.onclick = () => modal.close();
 yearsSel.onchange = () => {{ normalizeOptionAvailability(); previewBid(); }};
 optSel.onchange = previewBid;
-aavInput.oninput = () => window.requestAnimationFrame(previewBid);
+function queuePreviewBid() {{
+  window.requestAnimationFrame(previewBid);
+}}
+aavInput.oninput = queuePreviewBid;
+aavInput.onchange = queuePreviewBid;
+aavInput.onkeyup = queuePreviewBid;
 
 submitBidBtn.onclick = async () => {{
   const p = state.modalPlayer;
@@ -3698,7 +3817,9 @@ def api_login_team():
 def api_free_agents():
     search = (request.args.get("search") or "").strip()
     hide_signed = (request.args.get("hide_signed") == "1")
-    players = fetch_free_agents(search=search, hide_signed=hide_signed)
+    show_unrated = (request.args.get("show_unrated") == "1")
+    position = (request.args.get("position") or "").strip()
+    players = fetch_free_agents(search=search, hide_signed=hide_signed, show_unrated=show_unrated, position=position)
 
     # Mark whether each player is in the current user's watchlist (if logged in)
     authed_team = session.get("authed_team", "") or ""
