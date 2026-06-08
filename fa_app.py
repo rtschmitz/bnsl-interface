@@ -3877,10 +3877,10 @@ HISTORY_HTML = f"""
 <div class="page">
   <div class="brand">
     <div>
-      <h1>WATCHLIST</h1>
-      <div class="sub">Quick bid from your tracked players</div>
+      <h1>BID HISTORY</h1>
+      <div class="sub">All FA bids, plus your current active bids and completed signings when logged in</div>
     </div>
-    <div class="right"><span class="badge">TRACKING</span></div>
+    <div class="right"><span class="badge">HISTORY</span></div>
   </div>
 
   <div class="panel pad">
@@ -3900,6 +3900,30 @@ HISTORY_HTML = f"""
     <button class="btn" id="assign-htd">Assign HTD</button>
     <span class="muted" id="htd-status"></span>
   </div>
+
+  <section id="team-summary-section" style="display:none; margin: 14px 0 22px 0;">
+    <div class="topbar" style="justify-content:space-between; padding-left:0; padding-right:0;">
+      <div>
+        <h2 style="margin:0; font-size:20px;" id="team-summary-title">Your FA Activity</h2>
+        <div class="sub" id="team-summary-sub">Active winning bids and players you have signed</div>
+      </div>
+      <span class="badge" id="team-summary-count">0</span>
+    </div>
+    <table data-sortable="true">
+      <thead>
+        <tr>
+          <th style="width:24%;">Player</th>
+          <th style="width:14%;">Status</th>
+          <th style="width:12%;">Contract</th>
+          <th style="width:12%;">AAV</th>
+          <th style="width:14%;">1-yr equiv</th>
+          <th style="width:16%;">Expires / Signed</th>
+          <th style="width:16%;">Last Action</th>
+        </tr>
+      </thead>
+      <tbody id="team-summary-body"></tbody>
+    </table>
+  </section>
 
   <table data-sortable="true">
     <thead>
@@ -3923,6 +3947,11 @@ const search = document.getElementById('search');
 const refreshBtn = document.getElementById('refresh');
 const assignHtdBtn = document.getElementById('assign-htd');
 const htdStatus = document.getElementById('htd-status');
+const teamSummarySection = document.getElementById('team-summary-section');
+const teamSummaryBody = document.getElementById('team-summary-body');
+const teamSummaryTitle = document.getElementById('team-summary-title');
+const teamSummarySub = document.getElementById('team-summary-sub');
+const teamSummaryCount = document.getElementById('team-summary-count');
 
 function moneyM(x) {{
   if (x === null || x === undefined) return "—";
@@ -3937,6 +3966,50 @@ function contractText(b) {{
   const opt = b.has_option ? "+opt" : "";
   return `${{y}}y${{opt}}`;
 }}
+function statusText(b) {{
+  if (b.status === 'ACTIVE') return 'Active bid';
+  if (b.status === 'SIGNED') return 'Signed';
+  return b.status || '—';
+}}
+function activityDate(b) {{
+  if (b.status === 'SIGNED') return b.signed_at || b.expires_at || b.created_at;
+  return b.expires_at || b.created_at;
+}}
+
+function renderTeamSummary(data) {{
+  const authedTeam = data.authed_team || '';
+  const rows = data.team_summary || [];
+  if (!authedTeam) {{
+    teamSummarySection.style.display = 'none';
+    return;
+  }}
+
+  teamSummarySection.style.display = 'block';
+  teamSummaryTitle.textContent = `Your FA Activity — ${{authedTeam}}`;
+  teamSummarySub.textContent = 'Active bids you currently lead, plus completed free-agent signings.';
+  teamSummaryCount.textContent = `${{rows.length}} item${{rows.length === 1 ? '' : 's'}}`;
+
+  teamSummaryBody.innerHTML = '';
+  if (!rows.length) {{
+    teamSummaryBody.innerHTML = '<tr><td colspan="7" class="muted">No active bids or signed players for your team yet.</td></tr>';
+    return;
+  }}
+
+  for (const b of rows) {{
+    const tr = document.createElement('tr');
+    tr.className = 'row-hover';
+    tr.innerHTML = `
+      <td><b>${{b.player_name}}</b></td>
+      <td>${{statusText(b)}}</td>
+      <td>${{contractText(b)}}</td>
+      <td>${{moneyM(b.aav_m)}}/yr</td>
+      <td>${{moneyM(b.bid_value_m)}}</td>
+      <td>${{fmtIso(activityDate(b))}}</td>
+      <td>${{fmtIso(b.created_at)}}</td>
+    `;
+    teamSummaryBody.appendChild(tr);
+  }}
+}}
 
 async function load() {{
   const params = new URLSearchParams({{
@@ -3944,6 +4017,7 @@ async function load() {{
   }});
   const res = await fetch('/fa/api/bid_history?' + params.toString());
   const data = await res.json();
+  renderTeamSummary(data);
   const rows = data.bids || [];
 
   body.innerHTML = '';
@@ -4212,18 +4286,60 @@ def api_assign_htd():
         return (f"HTD assignment failed: {exc}", 500)
 
 
+def _bid_history_json_row(r: sqlite3.Row) -> Dict[str, Any]:
+    return {
+        "id": int(r["id"]),
+        "player_id": int(r["player_id"]),
+        "player_name": r["player_name"],
+        "team": r["team"],
+        "years": int(r["years"]),
+        "has_option": bool(int(r["has_option"] or 0)),
+        "aav_m": float(r["aav_m"]),
+        "bid_value_m": float(r["bid_value_m"]),
+        "created_at": r["created_at"],
+        "expires_at": r["expires_at"],
+        "signed_at": r["signed_at"] if "signed_at" in r.keys() else None,
+        "status": r["status"],
+    }
+
+
 @fa_bp.get("/api/bid_history")
 def api_bid_history():
     enforce_expirations()
     search = (request.args.get("search") or "").strip().lower()
+    authed_team = session.get("authed_team", "") or ""
 
     conn = get_conn()
     cur = conn.cursor()
 
+    team_summary: List[Dict[str, Any]] = []
+    if authed_team:
+        team_variants = bid_team_variants(authed_team)
+        if team_variants:
+            placeholders = ",".join("?" for _ in team_variants)
+            cur.execute(f"""
+                SELECT
+                  b.*,
+                  p.name AS player_name,
+                  p.signed_at AS signed_at
+                FROM bids b
+                JOIN free_agents p ON p.id=b.player_id
+                WHERE b.team IN ({placeholders})
+                  AND (
+                    (b.status='ACTIVE' AND (p.signed_team IS NULL OR p.signed_team=''))
+                    OR b.status='SIGNED'
+                  )
+                ORDER BY
+                  CASE WHEN b.status='ACTIVE' THEN 0 ELSE 1 END,
+                  datetime(COALESCE(p.signed_at, b.expires_at, b.created_at)) DESC
+            """, team_variants)
+            team_summary = [_bid_history_json_row(r) for r in cur.fetchall()]
+
     q = """
         SELECT
           b.*,
-          p.name AS player_name
+          p.name AS player_name,
+          p.signed_at AS signed_at
         FROM bids b
         JOIN free_agents p ON p.id=b.player_id
     """
@@ -4238,22 +4354,12 @@ def api_bid_history():
     rows = cur.fetchall()
     conn.close()
 
-    out = []
-    for r in rows:
-        out.append({
-            "id": int(r["id"]),
-            "player_id": int(r["player_id"]),
-            "player_name": r["player_name"],
-            "team": r["team"],
-            "years": int(r["years"]),
-            "has_option": bool(int(r["has_option"] or 0)),
-            "aav_m": float(r["aav_m"]),
-            "bid_value_m": float(r["bid_value_m"]),
-            "created_at": r["created_at"],
-            "expires_at": r["expires_at"],
-            "status": r["status"],
-        })
-    return jsonify({"bids": out})
+    out = [_bid_history_json_row(r) for r in rows]
+    return jsonify({
+        "bids": out,
+        "authed_team": authed_team,
+        "team_summary": team_summary,
+    })
 
 @fa_bp.post("/tasks/enforce_expirations")
 def task_enforce_expirations():
