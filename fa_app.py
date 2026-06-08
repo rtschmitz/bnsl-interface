@@ -473,16 +473,59 @@ def compute_bid_value_1yr_equiv(aav_m: float, years: int, has_option: bool, hm_m
 def fmt_money_m(x: float) -> str:
     return f"${x:.2f}M"
 
-def notify_free_agent_signing(player_name: str, team: str, years: int, has_option: bool, aav_m: float) -> None:
-    """Notify the transactions channel when a bid expires into a signed FA contract."""
+
+def contract_length_text(years: int, has_option: bool) -> str:
     years = max(1, int(years or 1))
     option_text = " + club option" if has_option else ""
-    contract_text = f"{years} year{'s' if years != 1 else ''}{option_text} at {fmt_money_m(float(aav_m or 0.0))} AAV"
+    return f"{years} year{'s' if years != 1 else ''}{option_text}"
+
+
+def contract_value_text(years: int, has_option: bool, aav_m: float) -> str:
+    years = max(1, int(years or 1))
+    aav_m = float(aav_m or 0.0)
+    guaranteed_m = aav_m * years
+    if has_option:
+        max_total_m = aav_m * (years + 1)
+        return f"{fmt_money_m(guaranteed_m)} guaranteed ({fmt_money_m(aav_m)} AAV; {fmt_money_m(max_total_m)} including option)"
+    return f"{fmt_money_m(guaranteed_m)} total ({fmt_money_m(aav_m)} AAV)"
+
+
+def contract_details_text(years: int, has_option: bool, aav_m: float) -> str:
+    return f"{contract_length_text(years, has_option)}, {contract_value_text(years, has_option, aav_m)}"
+
+
+def notify_free_agent_bid(player_name: str, team: str, years: int, has_option: bool, aav_m: float, bid_value_m: float) -> None:
+    """Notify the transactions channel whenever a new active FA bid is placed."""
+    player_name = str(player_name or "Unknown player").strip()
+    team = normalize_bid_team(team)
+    contract_text = contract_details_text(years, has_option, aav_m)
+    send_discord_message(
+        "BNSL_DISCORD_TRANSACTIONS_WEBHOOK_URL",
+        f"**FA bid:** {player_name} — {team}, {contract_text}; equivalent 1-year value: {fmt_money_m(float(bid_value_m or 0.0))}.",
+        fallback_label="transactions",
+    )
+
+
+def notify_free_agent_signing(player_name: str, team: str, years: int, has_option: bool, aav_m: float) -> None:
+    """Notify the transactions channel when a bid expires into a signed FA contract."""
+    player_name = str(player_name or "Unknown player").strip()
+    team = normalize_bid_team(team)
+    contract_text = contract_details_text(years, has_option, aav_m)
     send_discord_message(
         "BNSL_DISCORD_TRANSACTIONS_WEBHOOK_URL",
         f"**Free agent signing:** {team} signed {player_name} — {contract_text}.",
         fallback_label="transactions",
     )
+
+
+def _log_discord_notification_exception(message: str) -> None:
+    try:
+        if has_app_context():
+            current_app.logger.exception(message)
+            return
+    except Exception:
+        pass
+    logging.exception(message)
 
 
 def clamp_int(x: Any, lo: int, hi: int, default: int) -> int:
@@ -1982,7 +2025,7 @@ def enforce_expirations():
                 item["aav_m"],
             )
         except Exception:
-            current_app.logger.exception("Failed to post FA signing Discord notification")
+            _log_discord_notification_exception("Failed to post FA signing Discord notification")
 
 def get_current_leader(pid: int) -> Optional[sqlite3.Row]:
     conn = get_conn()
@@ -2297,6 +2340,11 @@ def place_bid(team: str, pid: int, years: int, has_option: bool, aav_m: float, *
     # Calculate + insert
     now = utcnow()
     exp = None if is_fa_locked() else now + timedelta(hours=48)
+    player_name = str(p["name"] or "").strip() or f"player #{pid}"
+    bid_years = int(prev["years"])
+    bid_has_option = bool(prev["has_option"])
+    bid_aav_m = float(prev["aav_m"])
+    bid_value_m = float(prev["my_bid_value_m"])
 
     # Mark previous active as outbid, clear their expiry
     cur.execute("UPDATE bids SET status='OUTBID', expires_at=NULL WHERE player_id=? AND status='ACTIVE'", (pid,))
@@ -2306,10 +2354,10 @@ def place_bid(team: str, pid: int, years: int, has_option: bool, aav_m: float, *
         VALUES(?,?,?,?,?,?,?,?,?, 'ACTIVE')
     """, (
         pid, team,
-        int(prev["years"]),
-        1 if prev["has_option"] else 0,
-        float(prev["aav_m"]),
-        float(prev["my_bid_value_m"]),
+        bid_years,
+        1 if bid_has_option else 0,
+        bid_aav_m,
+        bid_value_m,
         float(prev["hometown_multiplier"]),
         iso(now),
         iso(exp) if exp else None,
@@ -2317,6 +2365,12 @@ def place_bid(team: str, pid: int, years: int, has_option: bool, aav_m: float, *
 
     conn.commit()
     conn.close()
+
+    try:
+        notify_free_agent_bid(player_name, team, bid_years, bid_has_option, bid_aav_m, bid_value_m)
+    except Exception:
+        _log_discord_notification_exception("Failed to post FA bid Discord notification")
+
     return (True, "")
 
 
