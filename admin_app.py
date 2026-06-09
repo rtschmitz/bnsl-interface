@@ -82,7 +82,8 @@ def get_admin_db_path() -> Path:
 def get_admin_conn() -> sqlite3.Connection:
     path = get_admin_db_path()
     path.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(str(path))
+    conn = sqlite3.connect(str(path), timeout=30)
+    conn.execute("PRAGMA busy_timeout=30000")
     conn.row_factory = sqlite3.Row
     ensure_admin_schema(conn)
     return conn
@@ -177,7 +178,8 @@ def redirect_with(
 
 
 def get_roster_conn() -> sqlite3.Connection:
-    conn = sqlite3.connect(current_app.config["ROSTER_DB_PATH"])
+    conn = sqlite3.connect(current_app.config["ROSTER_DB_PATH"], timeout=30)
+    conn.execute("PRAGMA busy_timeout=30000")
     conn.row_factory = sqlite3.Row
 
     def _unaccent(s: Any) -> str:
@@ -192,13 +194,15 @@ def get_roster_conn() -> sqlite3.Connection:
 
 
 def get_draft_conn() -> sqlite3.Connection:
-    conn = sqlite3.connect(current_app.config["DRAFT_DB_PATH"])
+    conn = sqlite3.connect(current_app.config["DRAFT_DB_PATH"], timeout=30)
+    conn.execute("PRAGMA busy_timeout=30000")
     conn.row_factory = sqlite3.Row
     return conn
 
 
 def get_rulev_conn() -> sqlite3.Connection:
-    conn = sqlite3.connect(current_app.config["RULEV_DB_PATH"])
+    conn = sqlite3.connect(current_app.config["RULEV_DB_PATH"], timeout=30)
+    conn.execute("PRAGMA busy_timeout=30000")
     conn.row_factory = sqlite3.Row
     return conn
 
@@ -625,7 +629,7 @@ def _update_player_fields(player_id: int, updates: dict[str, Any]) -> dict[str, 
 
     try:
         from roster_app import sync_after_roster_mutation
-        sync_after_roster_mutation()
+        sync_after_roster_mutation(player_id=player_id, sync_fa=True, sync_rulev=False)
     except Exception:
         current_app.logger.exception("Admin player update sync failed")
 
@@ -699,8 +703,7 @@ def _search_fa_players(q: str, limit: int = 25) -> list[dict[str, Any]]:
         if not unicodedata.combining(ch)
     )
     try:
-        from fa_app import get_conn as get_fa_conn, sync_free_agents_from_roster_if_needed
-        sync_free_agents_from_roster_if_needed(force=False)
+        from fa_app import get_conn as get_fa_conn
         conn = get_fa_conn()
         cur = conn.cursor()
         cur.execute(
@@ -710,7 +713,7 @@ def _search_fa_players(q: str, limit: int = 25) -> list[dict[str, Any]]:
               b.team AS current_bid_team, b.aav_m AS current_aav_m
             FROM free_agents p
             LEFT JOIN bids b ON b.player_id=p.id AND b.status='ACTIVE'
-            WHERE COALESCE(p.is_roster_unrostered,0)=1
+            WHERE (COALESCE(p.is_roster_unrostered,0)=1 OR p.roster_player_id IS NULL)
               AND (p.signed_team IS NULL OR p.signed_team='')
               AND (
                 LOWER(unaccent(p.name)) LIKE ?
@@ -738,6 +741,84 @@ def _search_fa_players(q: str, limit: int = 25) -> list[dict[str, Any]]:
         return rows
     except Exception:
         current_app.logger.exception("Unable to search FA choices for admin QO form")
+        return []
+
+
+def _search_fa_bid_players(q: str, limit: int = 25) -> list[dict[str, Any]]:
+    """Substring search over unsigned free agents that currently have an active bid."""
+    q = (q or "").strip()
+    if not q or (len(q) < 2 and not q.isdigit()):
+        return []
+    normalized = "".join(
+        ch for ch in unicodedata.normalize("NFKD", q.lower())
+        if not unicodedata.combining(ch)
+    )
+    try:
+        from fa_app import get_conn as get_fa_conn
+        conn = get_fa_conn()
+        cur = conn.cursor()
+        cur.execute(
+            """
+            SELECT
+              p.id, p.name, p.position, p.last_team,
+              b.id AS current_bid_id,
+              b.team AS current_bid_team,
+              b.years AS current_years,
+              b.has_option AS current_has_option,
+              b.aav_m AS current_aav_m,
+              b.bid_value_m AS current_bid_value_m,
+              b.created_at AS current_created_at,
+              b.expires_at AS current_expires_at,
+              (
+                SELECT pb.team
+                FROM bids pb
+                WHERE pb.player_id=p.id AND pb.status='OUTBID' AND pb.id<>b.id
+                ORDER BY datetime(pb.created_at) DESC, pb.id DESC
+                LIMIT 1
+              ) AS previous_bid_team,
+              (
+                SELECT pb.aav_m
+                FROM bids pb
+                WHERE pb.player_id=p.id AND pb.status='OUTBID' AND pb.id<>b.id
+                ORDER BY datetime(pb.created_at) DESC, pb.id DESC
+                LIMIT 1
+              ) AS previous_aav_m,
+              (
+                SELECT pb.bid_value_m
+                FROM bids pb
+                WHERE pb.player_id=p.id AND pb.status='OUTBID' AND pb.id<>b.id
+                ORDER BY datetime(pb.created_at) DESC, pb.id DESC
+                LIMIT 1
+              ) AS previous_bid_value_m
+            FROM free_agents p
+            JOIN bids b ON b.player_id=p.id AND b.status='ACTIVE'
+            WHERE (p.signed_team IS NULL OR p.signed_team='')
+              AND (
+                LOWER(unaccent(p.name)) LIKE ?
+                OR CAST(p.id AS TEXT)=?
+              )
+            ORDER BY
+              CASE
+                WHEN LOWER(unaccent(p.name))=? THEN 0
+                WHEN LOWER(unaccent(p.name)) LIKE ? THEN 1
+                ELSE 2
+              END,
+              unaccent(p.name) COLLATE NOCASE ASC
+            LIMIT ?
+            """,
+            (
+                f"%{normalized}%",
+                q,
+                normalized,
+                f"{normalized}%",
+                int(limit),
+            ),
+        )
+        rows = [dict(r) for r in cur.fetchall()]
+        conn.close()
+        return rows
+    except Exception:
+        current_app.logger.exception("Unable to search active FA bid choices for admin reset form")
         return []
 
 
@@ -840,6 +921,22 @@ ADMIN_HTML = """
         </div>
 
         <div class="card">
+          <h2>Manual Syncs</h2>
+          <p class="muted">These are intentionally not run during normal page loads or search. Use them only when you want a full maintenance refresh.</p>
+          <div class="controls">
+            <form method="post" action="sync-draft-roster" onsubmit="return confirm('Sync completed draft picks into roster.db now?');">
+              <button class="btn" type="submit">Sync draft → roster</button>
+            </form>
+            <form method="post" action="sync-rulev-roster" onsubmit="return confirm('Refresh Rule V eligible pool from roster.db now?');">
+              <button class="btn" type="submit">Sync Rule V pool</button>
+            </form>
+            <form method="post" action="sync-fa-roster" onsubmit="return confirm('Run full FA maintenance sync, including OOTP/rating imports?');">
+              <button class="btn" type="submit">Full FA maintenance sync</button>
+            </form>
+          </div>
+        </div>
+
+        <div class="card">
           <h2>Set QO</h2>
           <p class="muted">Creates a standard one-year qualifying-offer FA bid at <b>$22.773M</b>. If FA is locked, the bid is created immediately but will not start its 48-hour clock until FA is unlocked.</p>
           <form method="post" action="set-qo">
@@ -858,9 +955,26 @@ ADMIN_HTML = """
           </form>
         </div>
 
+        <div class="card">
+          <h2>Reset FA Bid</h2>
+          <p class="muted">Use this when the current high FA bid was entered incorrectly. The current active bid is marked <b>VOIDED</b>. If there was a previous bid, it becomes the new active high bid with a fresh 48-hour clock; otherwise bidding is cleared for that player.</p>
+          <form method="post" action="reset-fa-bid" onsubmit="return confirm('Void the current active FA bid for this player and restore the previous high bid if one exists?');">
+            <label>Search active FA bid
+              <input id="reset-fa-player-search" placeholder="Type at least 2 characters of a player with an active bid">
+              <input id="reset-fa-player-id" name="player_id" type="hidden">
+            </label>
+            <div id="reset-fa-player-selected" class="muted" style="margin-top:8px;">No active bid selected.</div>
+            <div id="reset-fa-player-results" class="search-results muted" style="margin:8px 0 12px;">Type at least 2 characters to search active FA bids.</div>
+            <label>Admin note / reason
+              <input name="note" placeholder="Example: Entered $15M instead of $1.5M">
+            </label>
+            <div style="margin-top:12px;"><button id="reset-fa-submit" class="btn primary" type="submit" disabled>Reset active bid</button></div>
+          </form>
+        </div>
+
         <div class="card wide">
           <h2>Modify Player</h2>
-          <p class="muted">Search by name, click “Use”, then change franchise and contract/roster fields. These changes write directly to roster.db and refresh Financials, Rosters, FA/Rule V syncs, and active waiver snapshots.</p>
+          <p class="muted">Search by name, click “Use”, then change franchise and contract/roster fields. These changes write directly to roster.db, refresh Financials/Rosters, and lightly refresh that player’s FA row when applicable. Full Draft/Rule V/FA maintenance syncs are manual below.</p>
           <div class="row">
             <label>Search player
               <input id="player-search" placeholder="Type a player name or id">
@@ -1074,6 +1188,59 @@ if (qoSearchBox) {
   });
 }
 
+const resetFaSearchBox = document.getElementById('reset-fa-player-search');
+const resetFaResults = document.getElementById('reset-fa-player-results');
+const resetFaSelected = document.getElementById('reset-fa-player-selected');
+const resetFaPlayerId = document.getElementById('reset-fa-player-id');
+const resetFaSubmit = document.getElementById('reset-fa-submit');
+let resetFaPlayersById = {};
+let resetFaTimer = null;
+function resetFaSelection(message){
+  if (resetFaPlayerId) resetFaPlayerId.value = '';
+  if (resetFaSelected) resetFaSelected.textContent = message || 'No active bid selected.';
+  if (resetFaSubmit) resetFaSubmit.disabled = true;
+}
+function resetFaContract(p){
+  const y = Number(p.current_years || 1);
+  const opt = Number(p.current_has_option || 0) ? '+opt' : '';
+  return `${y}y${opt}`;
+}
+function resetFaPlayerSummary(p){
+  const bits = [`#${esc(p.id)}`];
+  if (p.position) bits.push(esc(p.position));
+  if (p.current_bid_team) bits.push(`void: ${esc(p.current_bid_team)} ${resetFaContract(p)} $${Number(p.current_aav_m || 0).toFixed(3)}M`);
+  if (p.previous_bid_team) bits.push(`restore: ${esc(p.previous_bid_team)} $${Number(p.previous_aav_m || 0).toFixed(3)}M`);
+  else bits.push('restore: none; clears bidding');
+  return bits.join(' • ');
+}
+if (resetFaSearchBox) {
+  resetFaSearchBox.addEventListener('input', () => {
+    clearTimeout(resetFaTimer);
+    const q = resetFaSearchBox.value.trim();
+    resetFaSelection('No active bid selected.');
+    if (q.length < 2 && !/^[0-9]+$/.test(q)) {
+      resetFaResults.textContent = 'Type at least 2 characters to search active FA bids.';
+      return;
+    }
+    resetFaTimer = setTimeout(async () => {
+      const res = await fetch('api/fa-bid-players?q=' + encodeURIComponent(q));
+      if (!res.ok) { resetFaResults.textContent = 'Search failed.'; return; }
+      const data = await res.json();
+      resetFaPlayersById = Object.fromEntries((data.players || []).map(p => [String(p.id), p]));
+      if (!data.players.length) { resetFaResults.textContent = 'No matching active FA bids.'; return; }
+      resetFaResults.innerHTML = data.players.map(p => `<div><button class="btn" type="button" data-reset-fa-id="${p.id}">Use</button> <b>${esc(p.name)}</b> <span class="muted">${resetFaPlayerSummary(p)}</span></div>`).join('');
+      resetFaResults.querySelectorAll('button[data-reset-fa-id]').forEach(btn => btn.onclick = () => {
+        const p = resetFaPlayersById[String(btn.dataset.resetFaId)] || {};
+        resetFaPlayerId.value = p.id || '';
+        resetFaSearchBox.value = p.name || '';
+        resetFaSelected.innerHTML = `Selected: <b>${esc(p.name || '')}</b> <span class="muted">${resetFaPlayerSummary(p)}</span>`;
+        resetFaSubmit.disabled = !resetFaPlayerId.value;
+      });
+    }, 200);
+  });
+}
+
+
 const draftTimeChoices = {{ draft_time_choices|tojson }};
 const draftTimeKind = document.getElementById('draft-time-kind');
 const draftTimePick = document.getElementById('draft-time-pick');
@@ -1183,6 +1350,13 @@ def api_fa_players():
     require_admin()
     q = request.args.get("q", "")
     return jsonify({"players": _search_fa_players(q)})
+
+
+@admin_bp.get("/api/fa-bid-players")
+def api_fa_bid_players():
+    require_admin()
+    q = request.args.get("q", "")
+    return jsonify({"players": _search_fa_bid_players(q)})
 
 
 @admin_bp.post("/bonus-payment")
@@ -1338,6 +1512,53 @@ def toggle_fa_lock():
         return redirect_with(error=str(e))
 
 
+@admin_bp.post("/sync-draft-roster")
+def sync_draft_roster():
+    require_admin()
+    try:
+        from roster_app import sync_drafted_players_from_draft_db
+        seen, inserted, updated = sync_drafted_players_from_draft_db()
+        log_action(
+            "sync_draft_roster",
+            f"Synced draft picks into roster: {seen} seen, {inserted} inserted, {updated} updated",
+            {"seen": seen, "inserted": inserted, "updated": updated},
+        )
+        return redirect_with(f"Draft → roster sync complete: {seen} seen, {inserted} inserted, {updated} updated.", refresh="roster")
+    except Exception as e:
+        current_app.logger.exception("Manual draft → roster sync failed")
+        return redirect_with(error=str(e))
+
+
+@admin_bp.post("/sync-rulev-roster")
+def sync_rulev_roster():
+    require_admin()
+    try:
+        from rulev_app import sync_rulev_from_roster_db
+        eligible, upserted, hidden = sync_rulev_from_roster_db()
+        log_action(
+            "sync_rulev_roster",
+            f"Synced Rule V pool: {eligible} eligible, {upserted} upserted, {hidden} hidden/stale",
+            {"eligible": eligible, "upserted": upserted, "hidden": hidden},
+        )
+        return redirect_with(f"Rule V pool sync complete: {eligible} eligible, {upserted} upserted, {hidden} hidden/stale.", refresh="rulev")
+    except Exception as e:
+        current_app.logger.exception("Manual Rule V roster sync failed")
+        return redirect_with(error=str(e))
+
+
+@admin_bp.post("/sync-fa-roster")
+def sync_fa_roster():
+    require_admin()
+    try:
+        from fa_app import sync_free_agents_from_roster_if_needed
+        sync_free_agents_from_roster_if_needed(force=True)
+        log_action("sync_fa_roster", "Ran full FA maintenance sync", {})
+        return redirect_with("Full FA maintenance sync complete.", refresh=["fa", "financials"])
+    except Exception as e:
+        current_app.logger.exception("Manual FA roster sync failed")
+        return redirect_with(error=str(e))
+
+
 @admin_bp.post("/set-qo")
 def set_qo():
     require_admin()
@@ -1362,6 +1583,40 @@ def set_qo():
         )
     except Exception as e:
         current_app.logger.exception("Admin QO creation failed")
+        return redirect_with(error=str(e))
+
+
+@admin_bp.post("/reset-fa-bid")
+def reset_fa_bid():
+    require_admin()
+    try:
+        player_id = int(request.form.get("player_id") or 0)
+        if player_id <= 0:
+            raise ValueError("Select a valid free agent with an active bid")
+        note = (request.form.get("note") or "").strip()
+        from fa_app import reset_active_bid_for_player, fmt_money_m
+        result = reset_active_bid_for_player(player_id)
+        if note:
+            result["note"] = note
+        voided = result.get("voided_bid") or {}
+        restored = result.get("restored_bid") or {}
+        if restored:
+            summary = (
+                f"Voided active FA bid for {result['player_name']} "
+                f"({voided.get('team')} {fmt_money_m(float(voided.get('aav_m') or 0.0))}/yr); "
+                f"restored {restored.get('team')} {fmt_money_m(float(restored.get('aav_m') or 0.0))}/yr as active high bid"
+            )
+            user_msg = f"Reset bid for {result['player_name']}; restored previous high bid by {restored.get('team')}."
+        else:
+            summary = (
+                f"Voided only active FA bid for {result['player_name']} "
+                f"({voided.get('team')} {fmt_money_m(float(voided.get('aav_m') or 0.0))}/yr); no previous bid to restore"
+            )
+            user_msg = f"Reset bid for {result['player_name']}; no previous bid existed, so bidding is now clear."
+        log_action("reset_fa_bid", summary, result)
+        return redirect_with(user_msg, refresh=["fa", "financials"])
+    except Exception as e:
+        current_app.logger.exception("Admin FA bid reset failed")
         return redirect_with(error=str(e))
 
 

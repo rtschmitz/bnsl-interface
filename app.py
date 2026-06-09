@@ -59,7 +59,7 @@ def create_app():
         # roster.db must exist before FA/Rule V syncs use it as the source of truth.
         roster_app.bootstrap_roster()
         waivers_app.bootstrap_waivers()
-        rulev_app.bootstrap_rulev()
+        rulev_app.bootstrap_rulev(sync_roster=False)
         fa_app.bootstrap_fa()
         trades_app.bootstrap_trades()
         admin_app.bootstrap_admin()

@@ -274,7 +274,8 @@ def get_db_path() -> Path:
 
 
 def get_conn() -> sqlite3.Connection:
-    conn = sqlite3.connect(str(get_db_path()))
+    conn = sqlite3.connect(str(get_db_path()), timeout=30)
+    conn.execute("PRAGMA busy_timeout=30000")
     conn.row_factory = sqlite3.Row
     return conn
 
@@ -574,16 +575,12 @@ def apply_rulev_pick_to_roster(rulev_player_id: int, picking_team_abbr: str, dra
 
 
 def sync_after_rulev_roster_mutation() -> None:
-    try:
-        sync_rulev_from_roster_db()
-    except Exception:
-        current_app.logger.exception("Rule V sync failed after Rule V roster mutation")
-
-    try:
-        from fa_app import sync_free_agents_from_roster_db
-        sync_free_agents_from_roster_db()
-    except Exception:
-        current_app.logger.exception("FA sync failed after Rule V roster mutation")
+    """
+    Rule V picks already update the selected player and draft order directly.
+    Do not run a full eligible-pool or FA sync here; those are explicit admin
+    maintenance actions now.
+    """
+    return None
 
 
 def _infer_two_digit_birth_year(yy: int) -> int:
@@ -793,10 +790,11 @@ def sync_rulev_from_roster_db() -> tuple[int, int, int]:
     return (len(eligible_rows), upserted, hidden)
 
 
-def bootstrap_rulev(sync_roster: bool = True) -> None:
+def bootstrap_rulev(sync_roster: bool = False) -> None:
     """
-    Call from app.py after bootstrap_roster().  This initializes schema, keeps
-    the order table available, and refreshes the eligible player pool once.
+    Call from app.py after bootstrap_roster().  This initializes schema and keeps
+    the order table available. The expensive eligible-pool refresh is manual by
+    default; pass sync_roster=True or use the admin button/CLI when needed.
     """
     init_db()
     seed_default_order_if_empty()

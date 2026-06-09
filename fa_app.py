@@ -190,7 +190,8 @@ def parse_iso(s: str) -> datetime:
     return datetime.fromisoformat(s)
 
 def get_conn() -> sqlite3.Connection:
-    conn = sqlite3.connect(str(get_db_path()))
+    conn = sqlite3.connect(str(get_db_path()), timeout=30)
+    conn.execute("PRAGMA busy_timeout=30000")
     conn.row_factory = sqlite3.Row
 
     def _unaccent(s):
@@ -912,7 +913,8 @@ def get_hometown_discounts_db_path() -> Path:
 
 
 def get_roster_conn() -> sqlite3.Connection:
-    conn = sqlite3.connect(str(get_roster_db_path()))
+    conn = sqlite3.connect(str(get_roster_db_path()), timeout=30)
+    conn.execute("PRAGMA busy_timeout=30000")
     conn.row_factory = sqlite3.Row
     return conn
 
@@ -1686,6 +1688,142 @@ def _find_existing_free_agent_id(
     return None
 
 
+def sync_free_agent_from_roster_player_id(player_id: int, *, last_team_abbr: str = "") -> dict[str, Any]:
+    """
+    Lightweight roster->FA mirror for one player.
+
+    Use this from roster/admin release-style actions instead of the full FA
+    maintenance sync. It reads exactly one roster_players row and either upserts
+    that player into free_agents when he is currently unrostered, or marks the
+    existing FA row as no longer roster-unrostered if he is back on a roster.
+    It deliberately does not import OOTP FA rows, ratings, draft rows, or Rule V.
+    """
+    rid = int(player_id or 0)
+    if rid <= 0:
+        raise ValueError("Missing roster player id")
+
+    roster_path = get_roster_db_path()
+    if not roster_path.exists():
+        return {"roster_player_id": rid, "changed": False, "reason": "roster.db missing"}
+
+    now_text = iso(utcnow())
+    rconn = get_roster_conn()
+    rcur = rconn.cursor()
+    ensure_roster_fa_import_columns(rconn)
+    rcur.execute("SELECT * FROM roster_players WHERE id=?", (rid,))
+    r = rcur.fetchone()
+    rconn.close()
+    if not r:
+        return {"roster_player_id": rid, "changed": False, "reason": "roster player not found"}
+
+    conn = get_conn()
+    cur = conn.cursor()
+    try:
+        if not _roster_db_row_is_unrostered(r):
+            cur.execute(
+                """
+                UPDATE free_agents
+                SET is_roster_unrostered=0,
+                    removed_from_roster_sync=?
+                WHERE roster_player_id=?
+                  AND roster_source IN ('roster_db', 'roster_csv', 'ootp27')
+                """,
+                (now_text, rid),
+            )
+            changed = int(cur.rowcount or 0)
+            conn.commit()
+            return {
+                "roster_player_id": rid,
+                "free_agent_id": None,
+                "changed": bool(changed),
+                "is_free_agent": False,
+                "action": "marked_not_unrostered",
+            }
+
+        mlbam_id = _parse_positive_int(r["mlbam_id"] if "mlbam_id" in r.keys() else None)
+        fg_id = _parse_positive_int(r["fangraphs_id"] if "fangraphs_id" in r.keys() else None)
+        name = str(r["name"] or "").strip()
+        if not name:
+            return {"roster_player_id": rid, "changed": False, "reason": "blank roster player name"}
+        pos = str(r["position"] or "").strip()
+        roster_last_team = roster_code_to_team(r["franchise"] if "franchise" in r.keys() else "")
+        explicit_last_team = roster_code_to_team(last_team_abbr) if last_team_abbr else ""
+        last_team = explicit_last_team or roster_last_team
+        ovr = _optional_int(r["ovr"] if "ovr" in r.keys() else None)
+        pot = _optional_int(r["pot"] if "pot" in r.keys() else None)
+        def_rating = _optional_int(r["def"] if "def" in r.keys() else None)
+
+        existing_id = _find_existing_free_agent_id(
+            cur, rid, mlbam_id, fg_id, name,
+            allow_name_fallback=True,
+        )
+        if existing_id is None:
+            cur.execute(
+                """
+                INSERT INTO free_agents(
+                    name, position, last_team,
+                    hometown_team, hometown_seasons, seed_qo,
+                    mlbam_id, fangraphs_id, ovr, pot, def,
+                    roster_player_id, roster_source, is_roster_unrostered,
+                    last_seen_roster_sync, removed_from_roster_sync
+                )
+                VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                """,
+                (
+                    name, pos, last_team,
+                    "", 0, 0,
+                    mlbam_id, fg_id, ovr, pot, def_rating,
+                    rid, "roster_db", 1,
+                    now_text, None,
+                ),
+            )
+            free_agent_id = int(cur.lastrowid)
+            action = "inserted"
+        else:
+            cur.execute(
+                """
+                UPDATE free_agents
+                SET name=?,
+                    position=COALESCE(NULLIF(?, ''), position),
+                    last_team=COALESCE(NULLIF(?, ''), last_team),
+                    mlbam_id=CASE WHEN ? IS NULL THEN mlbam_id ELSE ? END,
+                    fangraphs_id=COALESCE(?, fangraphs_id),
+                    ovr=COALESCE(?, ovr),
+                    pot=COALESCE(?, pot),
+                    def=COALESCE(?, def),
+                    roster_player_id=?,
+                    roster_source='roster_db',
+                    is_roster_unrostered=1,
+                    last_seen_roster_sync=?,
+                    removed_from_roster_sync=NULL,
+                    signed_team=NULL,
+                    signed_at=NULL
+                WHERE id=?
+                """,
+                (
+                    name, pos, last_team, mlbam_id, mlbam_id, fg_id,
+                    ovr, pot, def_rating, rid, now_text, existing_id,
+                ),
+            )
+            free_agent_id = int(existing_id)
+            action = "updated"
+
+        conn.commit()
+        try:
+            assign_hometown_discounts_now(clear_missing=False)
+        except Exception:
+            logging.exception("Unable to refresh HTD assignment after single-player FA sync")
+        return {
+            "roster_player_id": rid,
+            "free_agent_id": free_agent_id,
+            "changed": True,
+            "is_free_agent": True,
+            "action": action,
+            "player_name": name,
+        }
+    finally:
+        conn.close()
+
 def sync_free_agents_from_roster_db() -> tuple[int, int]:
     """
     Mirror currently unrostered roster.db players into fa.db/free_agents.
@@ -1839,15 +1977,19 @@ def update_roster_db_for_fa_signing(roster_player_id: int | None, team: str, yea
 
 def sync_free_agents_from_roster_if_needed(force: bool = False) -> None:
     """
-    Explicit maintenance sync:
-      1) import missing unsigned OOTP export players into roster.db,
-      2) mirror live unrostered roster.db players into fa.db.
+    Explicit maintenance sync.
 
-    Do not call this from normal FA page/API reads. It scans thousands of
-    players and may update roster.db metadata, so it belongs at startup, in a
-    CLI maintenance command, or in a future roster release/do-not-renew action.
+    This is intentionally force-only now. Normal page loads, search endpoints,
+    and admin autocomplete must not run it: it scans thousands of players and
+    writes roster.db/fa.db, which can create SQLite lock contention and noisy
+    repeated OOTP/rating/Rule V refreshes. Use force=True from an explicit admin
+    maintenance action or CLI command. For ordinary releases/non-tenders, call
+    sync_free_agent_from_roster_player_id(player_id) instead.
     """
     global _last_roster_sync_signature, _last_roster_sync_checked_at
+
+    if not force:
+        return
 
     roster_path = get_roster_db_path()
     if not roster_path.exists():
@@ -1876,7 +2018,7 @@ def sync_free_agents_from_roster_if_needed(force: bool = False) -> None:
     ttl_expired = (ROSTER_DB_SYNC_TTL_SECONDS <= 0) or ((now - _last_roster_sync_checked_at) >= ROSTER_DB_SYNC_TTL_SECONDS)
     changed = (_last_roster_sync_signature is None) or (signature != _last_roster_sync_signature)
 
-    if force or changed or ttl_expired:
+    if force:
         if ootp_path.exists():
             import_ootp_free_agents_into_roster_db(ootp_path)
         update_roster_db_ratings_from_exports()
@@ -2413,6 +2555,130 @@ def set_qualifying_offer(team: str, player_id: int, qo_aav_m: float = QO_AAV_M) 
     }
 
 
+def reset_active_bid_for_player(player_id: int, *, reset_hours: int = 48) -> dict[str, Any]:
+    """
+    Admin helper for accidental FA bids.
+
+    Voids the current ACTIVE bid for an unsigned free agent. If there is a
+    previous OUTBID bid, that bid is restored as ACTIVE and gets a fresh timer.
+    If there is no previous bid, the player is left with no active bidding.
+
+    The voided bid is preserved with status='VOIDED' for audit/history instead
+    of being deleted. It will not count toward active bid commitments.
+    """
+    pid = int(player_id or 0)
+    if pid <= 0:
+        raise ValueError("Select a valid free agent")
+
+    now = utcnow()
+    reset_hours = clamp_int(reset_hours, 1, 24 * 14, 48)
+    new_exp = None if is_fa_locked() else iso(now + timedelta(hours=reset_hours))
+
+    conn = get_conn()
+    cur = conn.cursor()
+    try:
+        cur.execute("BEGIN IMMEDIATE")
+
+        cur.execute("SELECT * FROM free_agents WHERE id=?", (pid,))
+        player = cur.fetchone()
+        if not player:
+            raise ValueError("Player not found")
+        if (player["signed_team"] or "").strip():
+            raise ValueError("Player is already signed; this tool only resets active unsigned-player bidding")
+
+        cur.execute(
+            """
+            SELECT *
+            FROM bids
+            WHERE player_id=? AND status='ACTIVE'
+            ORDER BY datetime(created_at) DESC, id DESC
+            LIMIT 1
+            """,
+            (pid,),
+        )
+        current = cur.fetchone()
+        if not current:
+            raise ValueError("This player does not currently have an active bid to reset")
+
+        current_id = int(current["id"])
+        cur.execute(
+            """
+            SELECT *
+            FROM bids
+            WHERE player_id=? AND status='OUTBID' AND id<>?
+            ORDER BY datetime(created_at) DESC, id DESC
+            LIMIT 1
+            """,
+            (pid, current_id),
+        )
+        previous = cur.fetchone()
+
+        cur.execute(
+            "UPDATE bids SET status='VOIDED', expires_at=NULL WHERE id=?",
+            (current_id,),
+        )
+
+        restored_payload: dict[str, Any] | None = None
+        action = "cleared"
+        if previous:
+            previous_id = int(previous["id"])
+            cur.execute(
+                """
+                UPDATE bids
+                SET status='OUTBID', expires_at=NULL
+                WHERE player_id=? AND status='ACTIVE' AND id<>?
+                """,
+                (pid, previous_id),
+            )
+            cur.execute(
+                "UPDATE bids SET status='ACTIVE', expires_at=? WHERE id=?",
+                (new_exp, previous_id),
+            )
+            action = "restored_previous"
+            restored_payload = {
+                "id": previous_id,
+                "team": previous["team"],
+                "years": int(previous["years"] or 1),
+                "has_option": bool(int(previous["has_option"] or 0)),
+                "aav_m": float(previous["aav_m"] or 0.0),
+                "bid_value_m": float(previous["bid_value_m"] or 0.0),
+                "created_at": previous["created_at"],
+                "expires_at": new_exp,
+            }
+
+        cur.execute(
+            "UPDATE free_agents SET signed_team=NULL, signed_at=NULL WHERE id=?",
+            (pid,),
+        )
+
+        conn.commit()
+
+        voided_payload = {
+            "id": current_id,
+            "team": current["team"],
+            "years": int(current["years"] or 1),
+            "has_option": bool(int(current["has_option"] or 0)),
+            "aav_m": float(current["aav_m"] or 0.0),
+            "bid_value_m": float(current["bid_value_m"] or 0.0),
+            "created_at": current["created_at"],
+            "expires_at": current["expires_at"],
+        }
+        return {
+            "player_id": pid,
+            "player_name": player["name"],
+            "action": action,
+            "voided_bid": voided_payload,
+            "restored_bid": restored_payload,
+            "timer_reset_hours": reset_hours if restored_payload and new_exp else None,
+            "fa_locked": is_fa_locked(),
+        }
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+
 def bootstrap_fa():
     """
     Call this from app.py AFTER roster_app.bootstrap_roster() has run.
@@ -2422,7 +2688,8 @@ def bootstrap_fa():
     only by syncing current unrostered players from roster.db.
     """
     init_db()
-    sync_free_agents_from_roster_if_needed(force=True)
+    if os.environ.get("BNSL_BOOTSTRAP_SYNC_FA", "0").strip().lower() in {"1", "true", "yes", "on"}:
+        sync_free_agents_from_roster_if_needed(force=True)
     seed_qualifying_offers(qo_aav_m=QO_AAV_M)
 
 # ---------- UI (templates) ----------
@@ -3256,7 +3523,8 @@ function renderPlayers() {{
     const imgTag = p.mlbam_id ? `<img class="pimg" src="${{img}}" loading="lazy" />` : '';
 
     const val = p.current_bid_value_m !== null ? moneyM(p.current_bid_value_m) : '—';
-    const exp = p.expires_at ? fmtIso(p.expires_at) : '—';
+    const expSort = p.signed_at || p.expires_at || '';
+    const exp = expSort ? fmtIso(expSort) : '—';
 
     const status = p.signed_team ? `Signed: ${{p.signed_team}}` : (state.faLocked ? (p.current_bid_team ? 'Bid frozen' : 'FA locked') : (p.current_bid_team ? 'Bidding open' : 'No bids'));
 
@@ -3309,7 +3577,7 @@ tr.innerHTML = `
   <td>${{rating(p.pot)}}</td>
   <td>${{rating(p.def)}}</td>
   <td>${{val}}</td>
-  <td>${{exp}}</td>
+  <td data-sort="${{expSort}}">${{exp}}</td>
   <td>${{status}}</td>
 `;
 
@@ -3675,7 +3943,8 @@ function render() {{
     const tr = document.createElement('tr');
     tr.className = 'row-hover' + (p.signed_team ? ' signed' : '');
     const val = p.current_bid_value_m !== null ? moneyM(p.current_bid_value_m) : '—';
-    const exp = p.expires_at ? fmtIso(p.expires_at) : '—';
+    const expSort = p.signed_at || p.expires_at || '';
+    const exp = expSort ? fmtIso(expSort) : '—';
     const status = p.signed_team ? `Signed: ${{p.signed_team}}` : (state.faLocked ? (p.current_bid_team ? 'Bid frozen' : 'FA locked') : (p.current_bid_team ? 'Bidding open' : 'No bids'));
     const img = p.mlbam_id ? `/fa/player_image/${{p.mlbam_id}}.png` : '';
     const imgTag = p.mlbam_id ? `<img class="pimg" src="${{img}}" loading="lazy" />` : '';
@@ -3724,7 +3993,7 @@ tr.innerHTML = `
   <td>${{rating(p.pot)}}</td>
   <td>${{rating(p.def)}}</td>
   <td>${{val}}</td>
-  <td>${{exp}}</td>
+  <td data-sort="${{expSort}}">${{exp}}</td>
   <td>${{status}}</td>
 `;
 
@@ -4004,8 +4273,8 @@ function renderTeamSummary(data) {{
       <td>${{contractText(b)}}</td>
       <td>${{moneyM(b.aav_m)}}/yr</td>
       <td>${{moneyM(b.bid_value_m)}}</td>
-      <td>${{fmtIso(activityDate(b))}}</td>
-      <td>${{fmtIso(b.created_at)}}</td>
+      <td data-sort="${{activityDate(b) || ''}}">${{fmtIso(activityDate(b))}}</td>
+      <td data-sort="${{b.created_at || ''}}">${{fmtIso(b.created_at)}}</td>
     `;
     teamSummaryBody.appendChild(tr);
   }}
@@ -4029,14 +4298,15 @@ async function load() {{
   for (const b of rows) {{
     const tr = document.createElement('tr');
     tr.className = 'row-hover';
+    const expOrSigned = b.signed_at || b.expires_at || '';
     tr.innerHTML = `
-      <td>${{fmtIso(b.created_at)}}</td>
+      <td data-sort="${{b.created_at || ''}}">${{fmtIso(b.created_at)}}</td>
       <td><b>${{b.player_name}}</b></td>
       <td>${{b.team}}</td>
       <td>${{contractText(b)}}</td>
       <td>${{moneyM(b.aav_m)}}/yr</td>
       <td>${{moneyM(b.bid_value_m)}}</td>
-      <td>${{fmtIso(b.expires_at)}}</td>
+      <td data-sort="${{expOrSigned}}">${{fmtIso(expOrSigned)}}</td>
       <td>${{b.status}}</td>
     `;
     body.appendChild(tr);
@@ -4108,9 +4378,8 @@ def _csv_response_for_table(conn: sqlite3.Connection, table: str, filename: str)
 @fa_bp.get("/export.csv")
 def export_free_agents_csv():
     init_db()
-    # Keep the FA CSV keyed to the live roster DB before export so mlbam_id
-    # mirrors roster_players.mlbam_id for roster-derived free agents.
-    sync_free_agents_from_roster_db()
+    # Export is read-only now. Run the admin/CLI FA maintenance sync first if
+    # you intentionally want to refresh the whole FA table before exporting.
     conn = get_conn()
     ensure_column(conn, "free_agents", "mlbam_id", "mlbam_id INTEGER")
     return _csv_response_for_table(conn, "free_agents", "free_agents.csv")

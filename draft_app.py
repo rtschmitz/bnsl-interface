@@ -568,7 +568,8 @@ def send_email(to_addr: str, subject: str, body: str):
         s.send_message(msg)
 
 def get_conn() -> sqlite3.Connection:
-    conn = sqlite3.connect(str(get_db_path()))
+    conn = sqlite3.connect(str(get_db_path()), timeout=30)
+    conn.execute("PRAGMA busy_timeout=30000")
     conn.row_factory = sqlite3.Row
 
     # Register unaccent(text) for accent-insensitive search/sort

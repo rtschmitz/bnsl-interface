@@ -367,7 +367,8 @@ def is_current_free_agent_csv(r: Dict[str, Any]) -> bool:
 
 def get_conn():
     db_path = current_app.config["ROSTER_DB_PATH"]
-    conn = sqlite3.connect(db_path)
+    conn = sqlite3.connect(db_path, timeout=30)
+    conn.execute("PRAGMA busy_timeout=30000")
     conn.row_factory = sqlite3.Row
 
     def _unaccent(s):
@@ -651,18 +652,38 @@ def pending_arbitration_decision(row: sqlite3.Row) -> bool:
     )
 
 
-def sync_after_roster_mutation() -> None:
-    try:
-        from rulev_app import sync_rulev_from_roster_db
-        sync_rulev_from_roster_db()
-    except Exception:
-        current_app.logger.exception("Rule V sync failed after roster mutation")
+def sync_after_roster_mutation(
+    player_id: int | None = None,
+    *,
+    sync_fa: bool = False,
+    sync_rulev: bool = False,
+) -> None:
+    """
+    Lightweight post-mutation hook.
 
-    try:
-        from fa_app import sync_free_agents_from_roster_db
-        sync_free_agents_from_roster_db()
-    except Exception:
-        current_app.logger.exception("FA sync failed after roster mutation")
+    Historically this ran full Draft/Rule V/FA syncs after many ordinary roster
+    edits. That caused repeated OOTP/rating imports and SQLite lock contention.
+    Normal roster actions should either do nothing here or mirror exactly the
+    affected player into fa.db when a release/non-tender/option decline creates
+    a free agent. Full Rule V/FA maintenance refreshes are now explicit admin
+    actions.
+    """
+    if sync_rulev:
+        try:
+            from rulev_app import sync_rulev_from_roster_db
+            sync_rulev_from_roster_db()
+        except Exception:
+            current_app.logger.exception("Rule V sync failed after roster mutation")
+
+    if sync_fa:
+        if player_id is None:
+            current_app.logger.warning("FA single-player sync requested without player_id; skipped")
+            return
+        try:
+            from fa_app import sync_free_agent_from_roster_player_id
+            sync_free_agent_from_roster_player_id(int(player_id))
+        except Exception:
+            current_app.logger.exception("FA single-player sync failed after roster mutation")
 
 
 def set_player_free_agent(
@@ -1274,8 +1295,10 @@ def bootstrap_roster():
                     WHERE id=?
                 """, (CURRENT_FA_CLASS, player_id))
 
-    # Bring completed 2025 draft picks into roster.db as reserve-roster rookies.
-    sync_drafted_players_from_draft_db(conn)
+    # Completed draft picks are no longer re-synced on every app startup.
+    # Use the admin manual sync button, or the event-driven draft-pick hook.
+    if os.environ.get("BNSL_BOOTSTRAP_SYNC_DRAFT_TO_ROSTER", "0").strip().lower() in {"1", "true", "yes", "on"}:
+        sync_drafted_players_from_draft_db(conn)
 
     # Keep arbitration status in sync with service-time rules for existing DBs.
     normalize_roster_contract_types(conn)
@@ -1680,7 +1703,7 @@ def api_player_action():
             )
         except Exception:
             current_app.logger.exception("Failed to post option buyout")
-        sync_after_roster_mutation()
+        sync_after_roster_mutation(player_id=player_id, sync_fa=True)
         update_fa_last_team(player_id, old_team)
         try:
             notify_roster_transaction(team, player_name, f"declined club option and released to free agency; buyout posted: ${buyout:,.0f}.")
@@ -1711,7 +1734,7 @@ def api_player_action():
     conn.commit()
     conn.close()
 
-    sync_after_roster_mutation()
+    sync_after_roster_mutation(player_id=player_id, sync_fa=action in {"release", "decline_arbitration"})
     if action in {"release", "decline_arbitration"}:
         update_fa_last_team(player_id, old_team)
 
