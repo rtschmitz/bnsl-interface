@@ -375,19 +375,26 @@ def get_team_cap_summary(team: Any, excluding_player_id: int | None = None) -> d
         return None
     row = rows[0]
     committed = active_bid_commitments_for_team(team, excluding_player_id=excluding_player_id)
+    hard_cap = float(row.get("hard_cap") or 0.0)
     cap_space = float(row.get("cap_space") or 0.0)
+    surplus = float(row.get("surplus") or 0.0)
     available = cap_space - committed
+    remaining_surplus = surplus - committed
     return {
         "team": normalize_bid_team(team),
         "abbr": abbr,
-        "hard_cap": float(row.get("hard_cap") or 0.0),
+        "hard_cap": hard_cap,
         "cap_space": cap_space,
+        "surplus": surplus,
         "active_bid_commitments": committed,
         "available_cap": available,
-        "hard_cap_m": float(row.get("hard_cap") or 0.0) / 1000000.0,
+        "remaining_surplus": remaining_surplus,
+        "hard_cap_m": hard_cap / 1000000.0,
         "cap_space_m": cap_space / 1000000.0,
+        "surplus_m": surplus / 1000000.0,
         "active_bid_commitments_m": committed / 1000000.0,
         "available_cap_m": available / 1000000.0,
+        "remaining_surplus_m": remaining_surplus / 1000000.0,
     }
 
 def _require_authed_team() -> str:
@@ -3329,7 +3336,7 @@ INDEX_HTML = f"""
     </div>
     <div class="pill" id="fa-lock-pill">FA status: Loading…</div>
     <div class="pill" id="cap-space-pill" style="display:none;">
-      <span id="cap-space-status">Available cap: —</span>
+      <span id="cap-space-status">Financials: —</span>
     </div>
   </div>
 
@@ -3444,7 +3451,10 @@ let state = {{
 
 function moneyM(x) {{
   if (x === null || x === undefined) return "—";
-  return `$${{Number(x).toFixed(2)}}M`;
+  const n = Number(x);
+  if (!Number.isFinite(n)) return "—";
+  const sign = n < 0 ? "-" : "";
+  return `${{sign}}$${{Math.abs(n).toFixed(2)}}M`;
 }}
 
 function fmtIso(isoStr) {{
@@ -3483,7 +3493,7 @@ async function fetchStatus() {{
   if (capSpacePill && capSpaceStatus) {{
     if (state.authed && state.capSummary) {{
       capSpacePill.style.display = 'inline-flex';
-      capSpaceStatus.textContent = `Available cap: ${{moneyM(state.capSummary.available_cap_m)}} (active FA bids: ${{moneyM(state.capSummary.active_bid_commitments_m)}})`;
+      capSpaceStatus.textContent = `Hard-cap room: ${{moneyM(state.capSummary.available_cap_m)}} | Remaining surplus: ${{moneyM(state.capSummary.remaining_surplus_m)}} (active FA bids: ${{moneyM(state.capSummary.active_bid_commitments_m)}})`;
     }} else {{
       capSpacePill.style.display = 'none';
     }}
@@ -3821,7 +3831,7 @@ WATCHLIST_HTML = f"""
       <span id="login-status">Loading…</span>
     </div>
     <div class="pill" id="fa-lock-pill">FA status: Loading…</div>
-    <div class="pill" id="cap-space-pill" style="display:none;"><span id="cap-space-status">Available cap: —</span></div>
+    <div class="pill" id="cap-space-pill" style="display:none;"><span id="cap-space-status">Financials: —</span></div>
   </div>
 
   <table data-sortable="true">
@@ -3885,7 +3895,10 @@ let state = {{
 
 function moneyM(x) {{
   if (x === null || x === undefined) return "—";
-  return `$${{Number(x).toFixed(2)}}M`;
+  const n = Number(x);
+  if (!Number.isFinite(n)) return "—";
+  const sign = n < 0 ? "-" : "";
+  return `${{sign}}$${{Math.abs(n).toFixed(2)}}M`;
 }}
 function fmtIso(isoStr) {{
   if (!isoStr) return "—";
@@ -3909,7 +3922,7 @@ async function fetchStatus() {{
   if (capSpacePill && capSpaceStatus) {{
     if (state.authed && state.capSummary) {{
       capSpacePill.style.display = 'inline-flex';
-      capSpaceStatus.textContent = `Available cap: ${{moneyM(state.capSummary.available_cap_m)}} (active FA bids: ${{moneyM(state.capSummary.active_bid_commitments_m)}})`;
+      capSpaceStatus.textContent = `Hard-cap room: ${{moneyM(state.capSummary.available_cap_m)}} | Remaining surplus: ${{moneyM(state.capSummary.remaining_surplus_m)}} (active FA bids: ${{moneyM(state.capSummary.active_bid_commitments_m)}})`;
     }} else {{
       capSpacePill.style.display = 'none';
     }}
@@ -4224,7 +4237,10 @@ const teamSummaryCount = document.getElementById('team-summary-count');
 
 function moneyM(x) {{
   if (x === null || x === undefined) return "—";
-  return `$${{Number(x).toFixed(2)}}M`;
+  const n = Number(x);
+  if (!Number.isFinite(n)) return "—";
+  const sign = n < 0 ? "-" : "";
+  return `${{sign}}$${{Math.abs(n).toFixed(2)}}M`;
 }}
 function fmtIso(isoStr) {{
   if (!isoStr) return "—";
