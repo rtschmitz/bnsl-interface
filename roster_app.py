@@ -1903,7 +1903,10 @@ function actionHtml(p) {
   return bits.filter(Boolean).join(" ") || `<span class="muted">—</span>`;
 }
 
+let playersRequestSeq = 0;
+
 async function fetchPlayers() {
+  const requestSeq = ++playersRequestSeq;
   const params = new URLSearchParams({
     search: state.search,
     team: state.team,
@@ -1917,6 +1920,10 @@ async function fetchPlayers() {
 
   const res = await fetch("api/players?" + params.toString());
   const data = await res.json();
+
+  // Ignore stale responses from earlier searches/filters that finished late.
+  if (requestSeq !== playersRequestSeq) return;
+
   state.rosterLocked = !!data.roster_locked;
   rosterLockStatus.textContent = state.rosterLocked ? "Roster locked" : "";
   rosterLockStatus.style.display = state.rosterLocked ? "inline-block" : "none";

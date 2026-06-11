@@ -3511,7 +3511,10 @@ async function fetchStatus() {{
   loginBtn.disabled = !teamSelect.value;
 }}
 
+let playersRequestSeq = 0;
+
 async function fetchPlayers() {{
+  const requestSeq = ++playersRequestSeq;
   const params = new URLSearchParams({{
     search: state.search,
     hide_signed: state.hideSigned ? '1' : '0',
@@ -3520,6 +3523,10 @@ async function fetchPlayers() {{
   }});
   const res = await fetch('/fa/api/free_agents?' + params.toString());
   const data = await res.json();
+
+  // Ignore stale responses from earlier searches/filters that finished late.
+  if (requestSeq !== playersRequestSeq) return;
+
   state.players = data.players || [];
   renderPlayers();
 }}
@@ -4296,12 +4303,19 @@ function renderTeamSummary(data) {{
   }}
 }}
 
+let bidHistoryRequestSeq = 0;
+
 async function load() {{
+  const requestSeq = ++bidHistoryRequestSeq;
   const params = new URLSearchParams({{
     search: search.value || ""
   }});
   const res = await fetch('/fa/api/bid_history?' + params.toString());
   const data = await res.json();
+
+  // Ignore stale responses from earlier bid-history searches that finished late.
+  if (requestSeq !== bidHistoryRequestSeq) return;
+
   renderTeamSummary(data);
   const rows = data.bids || [];
 
