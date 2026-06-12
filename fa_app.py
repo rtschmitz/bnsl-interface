@@ -9,7 +9,7 @@ Single-file Flask app implementing:
 - Minimum AAV rules by exact contract structure (years + optional club option)
 - Hometown multiplier (1.05x / 1.10x) applied to bid VALUE for hometown team bids
 - Outbid rule: new bid must be >= 5% higher bid value than the current high bid
-- 48-hour timer resets on each new bid; auto-sign on expiry
+- 48-hour timer resets on each new bid; Friday/Saturday bids get +24h; auto-sign on expiry
 - Watchlist (bid directly from watchlist)
 - Bid history page (summary of all bids)
 - Modal bid UI with live preview (no chained browser prompts)
@@ -189,6 +189,26 @@ def iso(dt: datetime) -> str:
 def parse_iso(s: str) -> datetime:
     return datetime.fromisoformat(s)
 
+
+def bid_expiration_at(start: datetime, base_hours: int = 48) -> datetime:
+    """
+    Return the FA bid deadline for a clock that starts at ``start``.
+
+    Standard FA bids run for 48 hours.  To keep bid deadlines from falling on
+    Sunday, any clock started on Friday or Saturday gets an extra 24 hours.
+    Sunday starts use the normal clock.
+
+    Weekday calculation follows the app's stored timestamps, which are UTC.
+    """
+    hours = int(base_hours or 48)
+    if start.weekday() in (4, 5):  # Friday=4, Saturday=5
+        hours += 24
+    return start + timedelta(hours=hours)
+
+
+def bid_expiration_iso(start: datetime, base_hours: int = 48) -> str:
+    return iso(bid_expiration_at(start, base_hours=base_hours))
+
 def get_conn() -> sqlite3.Connection:
     conn = sqlite3.connect(str(get_db_path()), timeout=30)
     conn.execute("PRAGMA busy_timeout=30000")
@@ -248,7 +268,7 @@ def set_fa_locked(locked: bool) -> dict[str, Any]:
     Lock/unlock free agency.
 
     Locked: public FA bids are blocked and active bids have no signing deadline.
-    Unlocked: every active, unsigned bid receives a fresh 48-hour signing clock.
+    Unlocked: every active, unsigned bid receives a fresh signing clock; Friday/Saturday unlocks get +24h.
     """
     conn = get_conn()
     ensure_fa_meta_schema(conn)
@@ -275,7 +295,7 @@ def set_fa_locked(locked: bool) -> dict[str, Any]:
             """
         )
     else:
-        unlock_exp = iso(now + timedelta(hours=48))
+        unlock_exp = bid_expiration_iso(now)
         cur.execute(
             """
             UPDATE bids
@@ -2061,10 +2081,10 @@ def seed_qualifying_offers(qo_aav_m: float = QO_AAV_M):
     - no option
     - AAV = qo_aav_m
     - bidder team = last_team (or hometown_team if last_team missing)
-    - 48-hour timer starts immediately
+    - 48-hour timer starts immediately; Friday/Saturday starts get +24h
     """
     now = utcnow()
-    exp = None if is_fa_locked() else now + timedelta(hours=48)
+    exp = None if is_fa_locked() else bid_expiration_at(now)
 
     conn = get_conn()
     cur = conn.cursor()
@@ -2488,7 +2508,7 @@ def place_bid(team: str, pid: int, years: int, has_option: bool, aav_m: float, *
 
     # Calculate + insert
     now = utcnow()
-    exp = None if is_fa_locked() else now + timedelta(hours=48)
+    exp = None if is_fa_locked() else bid_expiration_at(now)
     player_name = str(p["name"] or "").strip() or f"player #{pid}"
     bid_years = int(prev["years"])
     bid_has_option = bool(prev["has_option"])
@@ -2579,7 +2599,7 @@ def reset_active_bid_for_player(player_id: int, *, reset_hours: int = 48) -> dic
 
     now = utcnow()
     reset_hours = clamp_int(reset_hours, 1, 24 * 14, 48)
-    new_exp = None if is_fa_locked() else iso(now + timedelta(hours=reset_hours))
+    new_exp = None if is_fa_locked() else bid_expiration_iso(now, base_hours=reset_hours)
 
     conn = get_conn()
     cur = conn.cursor()
@@ -3281,7 +3301,7 @@ INDEX_HTML = f"""
     <div class="brand">
       <div>
         <h1>FREE AGENCY</h1>
-        <div class="sub">Contract bids • 48h clock • Hometown bonus baked into value</div>
+        <div class="sub">Contract bids • 48h clock (Fri/Sat +24h) • Hometown bonus baked into value</div>
       </div>
     </div>
 
@@ -3488,7 +3508,7 @@ async function fetchStatus() {{
   if (faLockPill) {{
     faLockPill.textContent = state.faLocked
       ? '🔒 FA locked — bids are frozen'
-      : '🔓 FA unlocked — active bids sign after 48h';
+      : '🔓 FA unlocked — active bids sign after 48h (Fri/Sat +24h)';
   }}
   if (capSpacePill && capSpaceStatus) {{
     if (state.authed && state.capSummary) {{
@@ -3924,7 +3944,7 @@ async function fetchStatus() {{
   if (faLockPill) {{
     faLockPill.textContent = state.faLocked
       ? '🔒 FA locked — bids are frozen'
-      : '🔓 FA unlocked — active bids sign after 48h';
+      : '🔓 FA unlocked — active bids sign after 48h (Fri/Sat +24h)';
   }}
   if (capSpacePill && capSpaceStatus) {{
     if (state.authed && state.capSummary) {{
