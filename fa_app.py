@@ -38,6 +38,7 @@ Notes
 from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 import csv
@@ -121,6 +122,12 @@ CURRENT_FA_CLASS = str(CURRENT_SEASON + 1)
 QO_AAV_M = 22.773
 FA_LOCK_META_KEY = "fa_locked"
 
+# FA bidding deadlines are stored in UTC, but the league rule about Sunday
+# processing is defined in US Eastern time.  Keep this as an IANA timezone so
+# DST is handled correctly.
+FA_BID_TIMEZONE_NAME = os.environ.get("BNSL_FA_TIMEZONE", "America/New_York")
+FA_BID_TZ = ZoneInfo(FA_BID_TIMEZONE_NAME)
+
 
 # To avoid reparsing a large roster on every request, sync if the file mtime changed
 # or after this TTL. Set to 0 if you want every request to check the roster file.
@@ -187,23 +194,49 @@ def iso(dt: datetime) -> str:
     return dt.astimezone(timezone.utc).isoformat(timespec="seconds")
 
 def parse_iso(s: str) -> datetime:
-    return datetime.fromisoformat(s)
+    """Parse an ISO timestamp and return an aware UTC datetime."""
+    text = str(s or "").strip()
+    if text.endswith("Z"):
+        text = text[:-1] + "+00:00"
+    dt = datetime.fromisoformat(text)
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
+
+
+def as_utc(dt: datetime) -> datetime:
+    """Treat naive app timestamps as UTC and normalize aware timestamps to UTC."""
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
+
+
+def is_fa_sunday(dt: datetime) -> bool:
+    """Return True when a stored UTC deadline lands on Sunday in FA league time."""
+    return as_utc(dt).astimezone(FA_BID_TZ).weekday() == 6
 
 
 def bid_expiration_at(start: datetime, base_hours: int = 48) -> datetime:
     """
     Return the FA bid deadline for a clock that starts at ``start``.
 
-    Standard FA bids run for 48 hours.  To keep bid deadlines from falling on
-    Sunday, any clock started on Friday or Saturday gets an extra 24 hours.
-    Sunday starts use the normal clock.
+    Standard FA bids run for 48 hours.  The league does not process FA bid
+    expirations on Sundays, and "Sunday" is defined in US Eastern time
+    (``America/New_York``), not UTC/GMT.
 
-    Weekday calculation follows the app's stored timestamps, which are UTC.
+    Friday/Saturday Eastern starts still get the existing +24h extension.  As a
+    final guard for admin-reset/custom timers, any computed deadline that lands
+    on an Eastern Sunday is pushed forward another 24 hours.
     """
+    start_utc = as_utc(start)
     hours = int(base_hours or 48)
-    if start.weekday() in (4, 5):  # Friday=4, Saturday=5
+    if start_utc.astimezone(FA_BID_TZ).weekday() in (4, 5):  # Friday=4, Saturday=5 in ET
         hours += 24
-    return start + timedelta(hours=hours)
+
+    expires_at = start_utc + timedelta(hours=hours)
+    if is_fa_sunday(expires_at):
+        expires_at += timedelta(hours=24)
+    return expires_at
 
 
 def bid_expiration_iso(start: datetime, base_hours: int = 48) -> str:
@@ -268,7 +301,7 @@ def set_fa_locked(locked: bool) -> dict[str, Any]:
     Lock/unlock free agency.
 
     Locked: public FA bids are blocked and active bids have no signing deadline.
-    Unlocked: every active, unsigned bid receives a fresh signing clock; Friday/Saturday unlocks get +24h.
+    Unlocked: every active, unsigned bid receives a fresh signing clock; Friday/Saturday Eastern unlocks get +24h.
     """
     conn = get_conn()
     ensure_fa_meta_schema(conn)
