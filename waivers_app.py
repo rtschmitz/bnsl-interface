@@ -296,17 +296,17 @@ def get_roster_conn() -> sqlite3.Connection:
 
 
 def next_waiver_run_at(dt: datetime | None = None) -> datetime:
-    """Sunday 12:00 America/New_York waiver run for a newly waived player.
+    """Return the waiver run for a newly waived player.
 
-    Newly waived players must be on waivers more than 48 hours before the
-    Sunday noon ET deadline.  If the next deadline is within 48 hours, they
-    roll to the following Sunday's run.  An admin-set custom run date overrides
-    this default while that custom run remains in the future.
+    The normal run is Sunday 12:00 PM America/New_York.  A player waived
+    within 48 hours of that normal deadline (Friday 12:00 PM ET through
+    Sunday 12:00 PM ET) is not eligible for the current week's run and rolls
+    to the following Sunday.
+
+    Admin-set custom run dates may postpone/align the eligible run, but they
+    must not pull a newly waived player earlier than the normal 48-hour cutoff
+    would allow.
     """
-    custom = get_custom_next_waiver_run_at(dt)
-    if custom is not None:
-        return custom
-
     now_et = (dt or utcnow()).astimezone(EASTERN)
     days_until_sunday = (6 - now_et.weekday()) % 7  # Monday=0, Sunday=6
     run_et = (now_et + timedelta(days=days_until_sunday)).replace(
@@ -320,7 +320,13 @@ def next_waiver_run_at(dt: datetime | None = None) -> datetime:
     if run_et - now_et <= timedelta(hours=48):
         run_et = run_et + timedelta(days=7)
 
-    return run_et.astimezone(timezone.utc)
+    eligible_regular_run = run_et.astimezone(timezone.utc)
+
+    custom = get_custom_next_waiver_run_at(dt)
+    if custom is not None and custom >= eligible_regular_run:
+        return custom
+
+    return eligible_regular_run
 
 
 def format_et(value: str | None) -> str:
