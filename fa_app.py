@@ -642,6 +642,11 @@ def init_db():
     ensure_column(conn, "free_agents", "is_roster_unrostered", "is_roster_unrostered INTEGER NOT NULL DEFAULT 0")
     ensure_column(conn, "free_agents", "last_seen_roster_sync", "last_seen_roster_sync TEXT")
     ensure_column(conn, "free_agents", "removed_from_roster_sync", "removed_from_roster_sync TEXT")
+
+    # --- admin blacklist: players hidden from FA pool/watchlists/QOs without deleting their roster identity ---
+    ensure_column(conn, "free_agents", "is_blacklisted", "is_blacklisted INTEGER NOT NULL DEFAULT 0")
+    ensure_column(conn, "free_agents", "blacklisted_at", "blacklisted_at TEXT")
+    ensure_column(conn, "free_agents", "blacklist_note", "blacklist_note TEXT")
     cur.execute("""
         CREATE TABLE IF NOT EXISTS player_meta (
             mlbam_id INTEGER PRIMARY KEY,
@@ -665,6 +670,10 @@ def init_db():
     cur.execute("""
         CREATE INDEX IF NOT EXISTS free_agents_roster_unrostered_idx
         ON free_agents(is_roster_unrostered)
+    """)
+    cur.execute("""
+        CREATE INDEX IF NOT EXISTS free_agents_blacklisted_idx
+        ON free_agents(is_blacklisted)
     """)
 
 
@@ -705,6 +714,22 @@ def init_db():
 
     conn.commit()
     conn.close()
+
+def ensure_fa_blacklist_schema() -> None:
+    """Ensure blacklist columns exist before admin-only helpers touch older FA DBs."""
+    conn = get_conn()
+    try:
+        ensure_column(conn, "free_agents", "is_blacklisted", "is_blacklisted INTEGER NOT NULL DEFAULT 0")
+        ensure_column(conn, "free_agents", "blacklisted_at", "blacklisted_at TEXT")
+        ensure_column(conn, "free_agents", "blacklist_note", "blacklist_note TEXT")
+        conn.execute("""
+            CREATE INDEX IF NOT EXISTS free_agents_blacklisted_idx
+            ON free_agents(is_blacklisted)
+        """)
+        conn.commit()
+    finally:
+        conn.close()
+
 
 def db_is_empty() -> bool:
     conn = get_conn()
@@ -2180,6 +2205,7 @@ def enforce_expirations():
         WHERE b.status='ACTIVE'
           AND b.expires_at IS NOT NULL
           AND (p.signed_team IS NULL OR p.signed_team='')
+          AND COALESCE(p.is_blacklisted,0)=0
     """)
     rows = cur.fetchall()
 
@@ -2300,6 +2326,9 @@ def player_snapshot_row(p: sqlite3.Row, roster_dob_map: dict[int, str] | None = 
         "hometown_seasons": int(p["hometown_seasons"] or 0),
         "signed_team": p["signed_team"],
         "signed_at": p["signed_at"],
+        "is_blacklisted": bool(int(p["is_blacklisted"] or 0)) if "is_blacklisted" in p.keys() else False,
+        "blacklisted_at": p["blacklisted_at"] if "blacklisted_at" in p.keys() else None,
+        "blacklist_note": p["blacklist_note"] if "blacklist_note" in p.keys() else None,
         "current_bid_value_m": float(leader["bid_value_m"]) if leader else None,
         "current_bid_team": leader["team"] if leader else None,
         "expires_at": leader["expires_at"] if leader else None,
@@ -2344,6 +2373,7 @@ def fetch_free_agents(search: str = "", hide_signed: bool = False, show_unrated:
     params: List[Any] = []
 
     clauses.append("COALESCE(is_roster_unrostered,0)=1")
+    clauses.append("COALESCE(is_blacklisted,0)=0")
 
     if search.strip():
         s = search.strip().lower()
@@ -2399,6 +2429,7 @@ def fetch_watchlist(team: str) -> List[Dict[str, Any]]:
         JOIN free_agents p ON p.id=w.player_id
         WHERE w.team=?
           AND COALESCE(p.is_roster_unrostered,0)=1
+          AND COALESCE(p.is_blacklisted,0)=0
         ORDER BY datetime(w.created_at) DESC
     """, (team,))
     rows = cur.fetchall()
@@ -2431,6 +2462,7 @@ def compute_preview(team: str, pid: int, years: int, has_option: bool, aav_m: fl
         raise ValueError("player not found")
 
     signed = bool((p["signed_team"] or "").strip())
+    blacklisted = bool(int(p["is_blacklisted"] or 0)) if "is_blacklisted" in p.keys() else False
     leader = get_current_leader(pid)
 
     # Hometown multiplier if this team is hometown_team
@@ -2463,6 +2495,7 @@ def compute_preview(team: str, pid: int, years: int, has_option: bool, aav_m: fl
         "player_id": pid,
         "team": team,
         "signed": signed,
+        "blacklisted": blacklisted,
 
         "years": years,
         "has_option": has_option,
@@ -2489,7 +2522,7 @@ def compute_preview(team: str, pid: int, years: int, has_option: bool, aav_m: fl
 
         "meets_min_aav": meets_min_aav,
         "meets_outbid": meets_outbid,
-        "ok_to_submit": (ignore_lock or not fa_locked) and (not signed) and meets_min_aav and meets_outbid and meets_cap,
+        "ok_to_submit": (ignore_lock or not fa_locked) and (not signed) and (not blacklisted) and meets_min_aav and meets_outbid and meets_cap,
     }
 
 def place_bid(team: str, pid: int, years: int, has_option: bool, aav_m: float, *, allow_when_locked: bool = False) -> Tuple[bool, str]:
@@ -2516,6 +2549,9 @@ def place_bid(team: str, pid: int, years: int, has_option: bool, aav_m: float, *
     if (p["signed_team"] or "").strip():
         conn.close()
         return (False, "Player already signed.")
+    if "is_blacklisted" in p.keys() and int(p["is_blacklisted"] or 0) == 1:
+        conn.close()
+        return (False, "Player is blacklisted from free agency.")
     if "is_roster_unrostered" in p.keys() and int(p["is_roster_unrostered"] or 0) != 1:
         conn.close()
         return (False, "Player is no longer an eligible free agent.")
@@ -2574,6 +2610,129 @@ def place_bid(team: str, pid: int, years: int, has_option: bool, aav_m: float, *
         _log_discord_notification_exception("Failed to post FA bid Discord notification")
 
     return (True, "")
+
+
+def list_blacklisted_free_agents(limit: int = 100) -> list[dict[str, Any]]:
+    """Return active FA blacklist rows for the admin page."""
+    ensure_fa_blacklist_schema()
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute(
+        """
+        SELECT
+          p.id, p.name, p.position, p.last_team, p.roster_player_id,
+          p.blacklisted_at, p.blacklist_note,
+          COUNT(b.id) AS bid_rows
+        FROM free_agents p
+        LEFT JOIN bids b ON b.player_id=p.id
+        WHERE COALESCE(p.is_blacklisted,0)=1
+        GROUP BY p.id
+        ORDER BY datetime(COALESCE(p.blacklisted_at, '1900-01-01')) DESC,
+                 unaccent(p.name) COLLATE NOCASE ASC
+        LIMIT ?
+        """,
+        (int(limit),),
+    )
+    rows = [dict(r) for r in cur.fetchall()]
+    conn.close()
+    return rows
+
+
+def blacklist_free_agent(player_id: int, note: str = "") -> dict[str, Any]:
+    """
+    Admin helper: hide an unsigned FA from the FA pool and clear bid/watchlist state.
+
+    Existing bid rows are preserved for audit but changed to VOIDED and no longer
+    count as active commitments or signing timers.
+    """
+    ensure_fa_blacklist_schema()
+    pid = int(player_id or 0)
+    if pid <= 0:
+        raise ValueError("Select a valid free agent")
+
+    conn = get_conn()
+    cur = conn.cursor()
+    try:
+        cur.execute("BEGIN IMMEDIATE")
+        cur.execute("SELECT * FROM free_agents WHERE id=?", (pid,))
+        player = cur.fetchone()
+        if not player:
+            raise ValueError("Player not found")
+        if (player["signed_team"] or "").strip():
+            raise ValueError("Player is already signed; remove them from the roster instead of blacklisting their FA row")
+
+        now_text = iso(utcnow())
+        cur.execute(
+            """
+            UPDATE bids
+            SET status='VOIDED', expires_at=NULL
+            WHERE player_id=? AND status IN ('ACTIVE','OUTBID')
+            """,
+            (pid,),
+        )
+        bids_voided = int(cur.rowcount or 0)
+        cur.execute("DELETE FROM watchlist WHERE player_id=?", (pid,))
+        watchlist_removed = int(cur.rowcount or 0)
+        cur.execute(
+            """
+            UPDATE free_agents
+            SET is_blacklisted=1,
+                blacklisted_at=?,
+                blacklist_note=?,
+                signed_team=NULL,
+                signed_at=NULL
+            WHERE id=?
+            """,
+            (now_text, str(note or "").strip(), pid),
+        )
+        conn.commit()
+        return {
+            "player_id": pid,
+            "player_name": player["name"],
+            "blacklisted_at": now_text,
+            "blacklist_note": str(note or "").strip(),
+            "bids_voided": bids_voided,
+            "watchlist_removed": watchlist_removed,
+        }
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+
+def unblacklist_free_agent(player_id: int) -> dict[str, Any]:
+    """Admin helper: restore a previously blacklisted player to normal FA eligibility."""
+    ensure_fa_blacklist_schema()
+    pid = int(player_id or 0)
+    if pid <= 0:
+        raise ValueError("Select a valid free agent")
+
+    conn = get_conn()
+    cur = conn.cursor()
+    try:
+        cur.execute("BEGIN IMMEDIATE")
+        cur.execute("SELECT * FROM free_agents WHERE id=?", (pid,))
+        player = cur.fetchone()
+        if not player:
+            raise ValueError("Player not found")
+        cur.execute(
+            """
+            UPDATE free_agents
+            SET is_blacklisted=0,
+                blacklisted_at=NULL,
+                blacklist_note=NULL
+            WHERE id=?
+            """,
+            (pid,),
+        )
+        conn.commit()
+        return {"player_id": pid, "player_name": player["name"]}
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
 
 
 def set_qualifying_offer(team: str, player_id: int, qo_aav_m: float = QO_AAV_M) -> dict[str, Any]:
@@ -3520,6 +3679,26 @@ function fmtIso(isoStr) {{
   }}
 }}
 function rating(x) {{ return (x === null || x === undefined || x === '') ? '—' : String(x); }}
+function bidConfirmationText(p, payload) {{
+  const years = Number(payload.years || 1);
+  const optionText = payload.has_option ? ' + club option' : '';
+  const aav = Number(payload.aav_m || 0);
+  const guaranteed = years * aav;
+  const maxTotal = payload.has_option ? (years + 1) * aav : guaranteed;
+  const lines = [
+    `Place this FA bid on ${{p?.name || 'this player'}}?`,
+    '',
+    `Team: ${{state.team || 'your team'}}`,
+    `Contract: ${{years}} year${{years === 1 ? '' : 's'}}${{optionText}}`,
+    `AAV: ${{moneyM(aav)}}`,
+    payload.has_option
+      ? `Guaranteed/max value: ${{moneyM(guaranteed)}} guaranteed; ${{moneyM(maxTotal)}} including option`
+      : `Total value: ${{moneyM(guaranteed)}}`,
+  ];
+  if (p?.current_bid_team) lines.push(`Current high bidder: ${{p.current_bid_team}}`);
+  lines.push('', 'Submit this bid?');
+  return lines.join('\\n');
+}}
 
 function setTeams(teams) {{
   teamSelect.innerHTML = '<option value="">— Select Team —</option>' +
@@ -3710,6 +3889,9 @@ async function previewBid() {{
   if (data.fa_locked) {{
     modalWarn.textContent = "Free agency is locked. Admin QOs can be entered, but public FA bids are frozen.";
     modalWarn.style.display = 'block';
+  }} else if (data.blacklisted) {{
+    modalWarn.textContent = "This player has been removed from the free-agent pool by an admin.";
+    modalWarn.style.display = 'block';
   }} else if (data.signed) {{
     modalWarn.textContent = "This player is already signed.";
     modalWarn.style.display = 'block';
@@ -3768,6 +3950,8 @@ submitBidBtn.onclick = async () => {{
     has_option: (optSel.value === "1"),
     aav_m: Number(aavInput.value || 0),
   }};
+
+  if (!confirm(bidConfirmationText(p, payload))) return;
 
   submitBidBtn.disabled = true;
   const resp = await fetch('/fa/api/bid', {{
@@ -3965,6 +4149,26 @@ function fmtIso(isoStr) {{
   try {{ return new Date(isoStr).toLocaleString(); }} catch {{ return isoStr; }}
 }}
 function rating(x) {{ return (x === null || x === undefined || x === '') ? '—' : String(x); }}
+function bidConfirmationText(p, payload) {{
+  const years = Number(payload.years || 1);
+  const optionText = payload.has_option ? ' + club option' : '';
+  const aav = Number(payload.aav_m || 0);
+  const guaranteed = years * aav;
+  const maxTotal = payload.has_option ? (years + 1) * aav : guaranteed;
+  const lines = [
+    `Place this FA bid on ${{p?.name || 'this player'}}?`,
+    '',
+    `Team: ${{state.team || 'your team'}}`,
+    `Contract: ${{years}} year${{years === 1 ? '' : 's'}}${{optionText}}`,
+    `AAV: ${{moneyM(aav)}}`,
+    payload.has_option
+      ? `Guaranteed/max value: ${{moneyM(guaranteed)}} guaranteed; ${{moneyM(maxTotal)}} including option`
+      : `Total value: ${{moneyM(guaranteed)}}`,
+  ];
+  if (p?.current_bid_team) lines.push(`Current high bidder: ${{p.current_bid_team}}`);
+  lines.push('', 'Submit this bid?');
+  return lines.join('\\n');
+}}
 
 async function fetchStatus() {{
   const res = await fetch('/fa/api/fa_status');
@@ -4129,6 +4333,9 @@ async function previewBid() {{
   if (data.fa_locked) {{
     modalWarn.textContent = "Free agency is locked. Admin QOs can be entered, but public FA bids are frozen.";
     modalWarn.style.display = 'block';
+  }} else if (data.blacklisted) {{
+    modalWarn.textContent = "This player has been removed from the free-agent pool by an admin.";
+    modalWarn.style.display = 'block';
   }} else if (data.signed) {{
     modalWarn.textContent = "This player is already signed.";
     modalWarn.style.display = 'block';
@@ -4179,6 +4386,8 @@ submitBidBtn.onclick = async () => {{
     has_option: (optSel.value === "1"),
     aav_m: Number(aavInput.value || 0),
   }};
+  if (!confirm(bidConfirmationText(p, payload))) return;
+
   submitBidBtn.disabled = true;
   const resp = await fetch('/fa/api/bid', {{
     method:'POST',
@@ -4485,6 +4694,7 @@ def history_page():
 # ---------- APIs ----------
 @fa_bp.get("/api/fa_status")
 def api_fa_status():
+    init_db()
     enforce_expirations()
     selected_team = session.get("selected_team", "") or ""
     authed_team = session.get("authed_team", "") or ""
@@ -4534,6 +4744,7 @@ def api_login_team():
 
 @fa_bp.get("/api/free_agents")
 def api_free_agents():
+    init_db()
     search = (request.args.get("search") or "").strip()
     hide_signed = (request.args.get("hide_signed") == "1")
     show_unrated = (request.args.get("show_unrated") == "1")
@@ -4567,12 +4778,14 @@ def player_image(mlbam_id: int):
 
 @fa_bp.get("/api/watchlist")
 def api_watchlist_get():
+    init_db()
     team = _require_authed_team()
     players = fetch_watchlist(team)
     return jsonify({"players": players})
 
 @fa_bp.post("/api/watchlist/add")
 def api_watchlist_add():
+    init_db()
     team = _require_authed_team()
     data = request.get_json(force=True, silent=True) or {}
     pid = int(data.get("player_id") or 0)
@@ -4581,6 +4794,20 @@ def api_watchlist_add():
 
     conn = get_conn()
     cur = conn.cursor()
+    cur.execute(
+        """
+        SELECT 1
+        FROM free_agents
+        WHERE id=?
+          AND COALESCE(is_roster_unrostered,0)=1
+          AND COALESCE(is_blacklisted,0)=0
+          AND (signed_team IS NULL OR signed_team='')
+        """,
+        (pid,),
+    )
+    if not cur.fetchone():
+        conn.close()
+        return ("Player is not an eligible free agent.", 409)
     cur.execute("INSERT OR IGNORE INTO watchlist(team, player_id, created_at) VALUES(?,?,?)",
                 (team, pid, iso(utcnow())))
     conn.commit()
@@ -4601,6 +4828,7 @@ def api_watchlist_remove():
 
 @fa_bp.get("/api/bid_preview")
 def api_bid_preview():
+    init_db()
     # Must be logged in to preview because hometown multiplier depends on bidding team identity
     team = _require_authed_team()
     pid = int(request.args.get("player_id") or 0)
@@ -4615,6 +4843,7 @@ def api_bid_preview():
 
 @fa_bp.post("/api/bid")
 def api_bid():
+    init_db()
     team = _require_authed_team()
     data = request.get_json(force=True, silent=True) or {}
     pid = int(data.get("player_id") or 0)

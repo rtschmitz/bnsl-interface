@@ -589,8 +589,16 @@ def _update_player_fields(player_id: int, updates: dict[str, Any]) -> dict[str, 
         clean["franchise"] = team
         clean["signed"] = 1 if team else 0
 
+    release_to_fa = "franchise" in clean and not clean["franchise"]
+
     if "contract_type" in updates:
-        clean["contract_type"] = _normalize_contract_type(updates.get("contract_type"))
+        # A blank contract type is only valid when explicitly releasing the
+        # player to the unrostered/FA pool.  Otherwise keep the normal admin
+        # validation strict.
+        if release_to_fa and not str(updates.get("contract_type") or "").strip():
+            clean["contract_type"] = ""
+        else:
+            clean["contract_type"] = _normalize_contract_type(updates.get("contract_type"))
     if "salary" in updates:
         clean["salary"] = _parse_nonnegative_money(updates.get("salary"), default=float(row["salary"] or 0.0))
     if "service_time" in updates:
@@ -606,11 +614,42 @@ def _update_player_fields(player_id: int, updates: dict[str, Any]) -> dict[str, 
         clean["roster_status"] = status
         clean["active_roster"] = 1 if status == "Active" else 0
 
+    # Empty franchise means explicitly unrostered/free agent.  Treat this like
+    # a release, not just a franchise edit: remove team ownership, clear salary
+    # and contract metadata, clear option fields, and keep the player off any
+    # active roster counts.
+    if release_to_fa:
+        clean["signed"] = 0
+        if "active_roster" in row.keys():
+            clean["active_roster"] = 0
+        if "roster_status" in row.keys():
+            clean["roster_status"] = "Reserve"
+        if "contract_type" in row.keys():
+            clean["contract_type"] = ""
+        if "salary" in row.keys():
+            clean["salary"] = 0.0
+        if "contract_initial_season" in row.keys():
+            clean["contract_initial_season"] = None
+        if "contract_length" in row.keys():
+            clean["contract_length"] = None
+        if "contract_option" in row.keys():
+            clean["contract_option"] = 0
+        if "contract_expires" in row.keys():
+            clean["contract_expires"] = ""
+        if "options_remaining" in row.keys():
+            clean["options_remaining"] = 0
+        if "option_decision" in row.keys():
+            clean["option_decision"] = ""
+        if "option_decision_at" in row.keys():
+            clean["option_decision_at"] = ""
+        if "fa_class" in row.keys():
+            clean["fa_class"] = ""
+
     if not clean:
         conn.close()
         raise ValueError("No player fields were supplied")
 
-    if "fa_class" in row.keys():
+    if "fa_class" in row.keys() and not release_to_fa:
         clean["fa_class"] = _compute_fa_class(row, clean)
 
     assignments = ", ".join(f"{field}=?" for field in clean)
@@ -703,7 +742,8 @@ def _search_fa_players(q: str, limit: int = 25) -> list[dict[str, Any]]:
         if not unicodedata.combining(ch)
     )
     try:
-        from fa_app import get_conn as get_fa_conn
+        from fa_app import ensure_fa_blacklist_schema, get_conn as get_fa_conn
+        ensure_fa_blacklist_schema()
         conn = get_fa_conn()
         cur = conn.cursor()
         cur.execute(
@@ -714,6 +754,7 @@ def _search_fa_players(q: str, limit: int = 25) -> list[dict[str, Any]]:
             FROM free_agents p
             LEFT JOIN bids b ON b.player_id=p.id AND b.status='ACTIVE'
             WHERE (COALESCE(p.is_roster_unrostered,0)=1 OR p.roster_player_id IS NULL)
+              AND COALESCE(p.is_blacklisted,0)=0
               AND (p.signed_team IS NULL OR p.signed_team='')
               AND (
                 LOWER(unaccent(p.name)) LIKE ?
@@ -754,7 +795,8 @@ def _search_fa_bid_players(q: str, limit: int = 25) -> list[dict[str, Any]]:
         if not unicodedata.combining(ch)
     )
     try:
-        from fa_app import get_conn as get_fa_conn
+        from fa_app import ensure_fa_blacklist_schema, get_conn as get_fa_conn
+        ensure_fa_blacklist_schema()
         conn = get_fa_conn()
         cur = conn.cursor()
         cur.execute(
@@ -793,6 +835,7 @@ def _search_fa_bid_players(q: str, limit: int = 25) -> list[dict[str, Any]]:
             FROM free_agents p
             JOIN bids b ON b.player_id=p.id AND b.status='ACTIVE'
             WHERE (p.signed_team IS NULL OR p.signed_team='')
+              AND COALESCE(p.is_blacklisted,0)=0
               AND (
                 LOWER(unaccent(p.name)) LIKE ?
                 OR CAST(p.id AS TEXT)=?
@@ -819,6 +862,67 @@ def _search_fa_bid_players(q: str, limit: int = 25) -> list[dict[str, Any]]:
         return rows
     except Exception:
         current_app.logger.exception("Unable to search active FA bid choices for admin reset form")
+        return []
+
+def _search_fa_blacklist_candidates(q: str, limit: int = 25) -> list[dict[str, Any]]:
+    """Substring search over unsigned, unblacklisted FA rows for the admin blacklist form."""
+    q = (q or "").strip()
+    if not q or (len(q) < 2 and not q.isdigit()):
+        return []
+    normalized = "".join(
+        ch for ch in unicodedata.normalize("NFKD", q.lower())
+        if not unicodedata.combining(ch)
+    )
+    try:
+        from fa_app import ensure_fa_blacklist_schema, get_conn as get_fa_conn
+        ensure_fa_blacklist_schema()
+        conn = get_fa_conn()
+        cur = conn.cursor()
+        cur.execute(
+            """
+            SELECT
+              p.id, p.name, p.position, p.last_team,
+              b.team AS current_bid_team, b.aav_m AS current_aav_m
+            FROM free_agents p
+            LEFT JOIN bids b ON b.player_id=p.id AND b.status='ACTIVE'
+            WHERE (COALESCE(p.is_roster_unrostered,0)=1 OR p.roster_player_id IS NULL)
+              AND COALESCE(p.is_blacklisted,0)=0
+              AND (p.signed_team IS NULL OR p.signed_team='')
+              AND (
+                LOWER(unaccent(p.name)) LIKE ?
+                OR CAST(p.id AS TEXT)=?
+              )
+            ORDER BY
+              CASE
+                WHEN LOWER(unaccent(p.name))=? THEN 0
+                WHEN LOWER(unaccent(p.name)) LIKE ? THEN 1
+                ELSE 2
+              END,
+              unaccent(p.name) COLLATE NOCASE ASC
+            LIMIT ?
+            """,
+            (
+                f"%{normalized}%",
+                q,
+                normalized,
+                f"{normalized}%",
+                int(limit),
+            ),
+        )
+        rows = [dict(r) for r in cur.fetchall()]
+        conn.close()
+        return rows
+    except Exception:
+        current_app.logger.exception("Unable to search FA blacklist candidates")
+        return []
+
+
+def _active_blacklisted_fa_players(limit: int = 100) -> list[dict[str, Any]]:
+    try:
+        from fa_app import list_blacklisted_free_agents
+        return list_blacklisted_free_agents(limit=limit)
+    except Exception:
+        current_app.logger.exception("Unable to load FA blacklist rows")
         return []
 
 
@@ -972,6 +1076,48 @@ ADMIN_HTML = """
           </form>
         </div>
 
+        <div class="card">
+          <h2>FA Blacklist</h2>
+          <p class="muted">Use this for players who should be removed from the public FA pool. Blacklisting hides them from the FA page and watchlists, blocks new bids/QOs, and voids any existing active/outbid FA bids.</p>
+          <form method="post" action="blacklist-fa-player" onsubmit="return confirm('Blacklist this player, hide them from FA, and void their existing FA bids?');">
+            <label>Search free agent
+              <input id="blacklist-fa-player-search" placeholder="Type at least 2 characters of a free agent name">
+              <input id="blacklist-fa-player-id" name="player_id" type="hidden">
+            </label>
+            <div id="blacklist-fa-player-selected" class="muted" style="margin-top:8px;">No free agent selected.</div>
+            <div id="blacklist-fa-player-results" class="search-results muted" style="margin:8px 0 12px;">Type at least 2 characters to search unsigned free agents.</div>
+            <label>Reason / note
+              <input name="note" placeholder="Optional reason shown in admin log">
+            </label>
+            <div style="margin-top:12px;"><button id="blacklist-fa-submit" class="btn primary" type="submit" disabled>Blacklist free agent</button></div>
+          </form>
+
+          <h3 style="margin-top:18px;">Currently blacklisted</h3>
+          <div class="table-wrap">
+            <table>
+              <thead><tr><th>Player</th><th>Pos</th><th>Blacklisted</th><th>Note</th><th>Bids</th><th></th></tr></thead>
+              <tbody>
+                {% for p in blacklisted_fa_players %}
+                <tr>
+                  <td><b>{{ p.name }}</b><div class="muted">#{{ p.id }}{% if p.roster_player_id %} • roster #{{ p.roster_player_id }}{% endif %}</div></td>
+                  <td>{{ p.position or '—' }}</td>
+                  <td>{{ p.blacklisted_at or '—' }}</td>
+                  <td>{{ p.blacklist_note or '—' }}</td>
+                  <td>{{ p.bid_rows or 0 }}</td>
+                  <td>
+                    <form method="post" action="unblacklist-fa-player" onsubmit="return confirm('Restore this player to normal FA eligibility?');">
+                      <input type="hidden" name="player_id" value="{{ p.id }}">
+                      <button class="btn" type="submit">Remove</button>
+                    </form>
+                  </td>
+                </tr>
+                {% endfor %}
+                {% if not blacklisted_fa_players %}<tr><td colspan="6" class="muted">No players are currently blacklisted.</td></tr>{% endif %}
+              </tbody>
+            </table>
+          </div>
+        </div>
+
         <div class="card wide">
           <h2>Modify Player</h2>
           <p class="muted">Search by name, click “Use”, then change franchise and contract/roster fields. These changes write directly to roster.db, refresh Financials/Rosters, and lightly refresh that player’s FA row when applicable. Full Draft/Rule V/FA maintenance syncs are manual below.</p>
@@ -987,10 +1133,10 @@ ADMIN_HTML = """
           <form id="player-form" method="post" action="update-player">
             <div class="row3">
               <label>Franchise
-                <select id="player-franchise" name="team">{% for t in teams %}<option value="{{ t }}">{{ team_label(t) }}</option>{% endfor %}</select>
+                <select id="player-franchise" name="team"><option value="">Unrostered / FA</option>{% for t in teams %}<option value="{{ t }}">{{ team_label(t) }}</option>{% endfor %}</select>
               </label>
               <label>Contract type
-                <select id="player-contract-type" name="contract_type">{% for c in contract_types %}<option value="{{ c }}">{{ c }}</option>{% endfor %}</select>
+                <select id="player-contract-type" name="contract_type"><option value="">—</option>{% for c in contract_types %}<option value="{{ c }}">{{ c }}</option>{% endfor %}</select>
               </label>
               <label>Roster status
                 <select id="player-roster-status" name="roster_status">{% for s in roster_statuses %}<option value="{{ s }}">{{ s }}</option>{% endfor %}</select>
@@ -1113,6 +1259,19 @@ function setSelectValue(select, value){
   const wanted = String(value || '');
   for (const opt of select.options) { if (opt.value === wanted) { select.value = wanted; return; } }
 }
+function clearContractFieldsForUnrostered(){
+  setSelectValue(playerContractType, '');
+  setSelectValue(playerRosterStatus, 'Reserve');
+  if (playerSalary) playerSalary.value = '';
+  if (playerOptions) playerOptions.value = '';
+  if (playerExpires) playerExpires.value = '';
+  if (playerContractOption) playerContractOption.checked = false;
+}
+if (playerFranchise) {
+  playerFranchise.addEventListener('change', () => {
+    if (!playerFranchise.value) clearContractFieldsForUnrostered();
+  });
+}
 let playersById = {};
 let timer = null;
 searchBox.addEventListener('input', () => {
@@ -1125,18 +1284,22 @@ searchBox.addEventListener('input', () => {
     const data = await res.json();
     playersById = Object.fromEntries((data.players || []).map(p => [String(p.id), p]));
     if (!data.players.length) { results.textContent = 'No matching players.'; return; }
-    results.innerHTML = data.players.map(p => `<div><button class="btn" type="button" data-id="${p.id}">Use</button> <b>${esc(p.name)}</b> <span class="muted">#${p.id} • ${esc(p.position || '')} • ${esc(p.franchise || 'FA')} • ${esc(p.roster_status || '')} • ${esc(p.contract_type || '')} • svc ${Number(p.service_time || 0).toFixed(2)} • $${Number(p.salary || 0).toLocaleString()}</span></div>`).join('');
+    results.innerHTML = data.players.map(p => `<div><button class="btn" type="button" data-id="${p.id}">Use</button> <b>${esc(p.name)}</b> <span class="muted">#${p.id} • ${esc(p.position || '')} • ${esc(p.franchise || 'Unrostered')} • ${esc(p.roster_status || '')} • ${esc(p.contract_type || '')} • svc ${Number(p.service_time || 0).toFixed(2)} • $${Number(p.salary || 0).toLocaleString()}</span></div>`).join('');
     results.querySelectorAll('button[data-id]').forEach(btn => btn.onclick = () => {
       const p = playersById[String(btn.dataset.id)] || {};
       playerId.value = p.id || '';
       setSelectValue(playerFranchise, p.franchise || '');
-      setSelectValue(playerContractType, p.contract_type || 'R');
-      setSelectValue(playerRosterStatus, p.roster_status || 'Reserve');
-      playerSalary.value = p.salary ?? 0;
-      playerOptions.value = p.options_remaining ?? 0;
-      playerExpires.value = p.contract_expires || '';
+      if (!p.franchise) {
+        clearContractFieldsForUnrostered();
+      } else {
+        setSelectValue(playerContractType, p.contract_type || 'R');
+        setSelectValue(playerRosterStatus, p.roster_status || 'Reserve');
+        playerSalary.value = p.salary ?? 0;
+        playerOptions.value = p.options_remaining ?? 0;
+        playerExpires.value = p.contract_expires || '';
+        playerContractOption.checked = !!Number(p.contract_option || 0);
+      }
       playerServiceTime.value = Number(p.service_time || 0).toFixed(2);
-      playerContractOption.checked = !!Number(p.contract_option || 0);
     });
   }, 200);
 });
@@ -1241,6 +1404,53 @@ if (resetFaSearchBox) {
 }
 
 
+const blacklistFaSearchBox = document.getElementById('blacklist-fa-player-search');
+const blacklistFaResults = document.getElementById('blacklist-fa-player-results');
+const blacklistFaSelected = document.getElementById('blacklist-fa-player-selected');
+const blacklistFaPlayerId = document.getElementById('blacklist-fa-player-id');
+const blacklistFaSubmit = document.getElementById('blacklist-fa-submit');
+let blacklistFaPlayersById = {};
+let blacklistFaTimer = null;
+function resetBlacklistFaSelection(message){
+  if (blacklistFaPlayerId) blacklistFaPlayerId.value = '';
+  if (blacklistFaSelected) blacklistFaSelected.textContent = message || 'No free agent selected.';
+  if (blacklistFaSubmit) blacklistFaSubmit.disabled = true;
+}
+function blacklistFaPlayerSummary(p){
+  const bits = [`#${esc(p.id)}`];
+  if (p.position) bits.push(esc(p.position));
+  if (p.last_team) bits.push(`last: ${esc(p.last_team)}`);
+  if (p.current_bid_team) bits.push(`active bid: ${esc(p.current_bid_team)} $${Number(p.current_aav_m || 0).toFixed(3)}M`);
+  return bits.join(' • ');
+}
+if (blacklistFaSearchBox) {
+  blacklistFaSearchBox.addEventListener('input', () => {
+    clearTimeout(blacklistFaTimer);
+    const q = blacklistFaSearchBox.value.trim();
+    resetBlacklistFaSelection('No free agent selected.');
+    if (q.length < 2 && !/^[0-9]+$/.test(q)) {
+      blacklistFaResults.textContent = 'Type at least 2 characters to search unsigned free agents.';
+      return;
+    }
+    blacklistFaTimer = setTimeout(async () => {
+      const res = await fetch('api/fa-blacklist-candidates?q=' + encodeURIComponent(q));
+      if (!res.ok) { blacklistFaResults.textContent = 'Search failed.'; return; }
+      const data = await res.json();
+      blacklistFaPlayersById = Object.fromEntries((data.players || []).map(p => [String(p.id), p]));
+      if (!data.players.length) { blacklistFaResults.textContent = 'No matching unblacklisted free agents.'; return; }
+      blacklistFaResults.innerHTML = data.players.map(p => `<div><button class="btn" type="button" data-blacklist-fa-id="${p.id}">Use</button> <b>${esc(p.name)}</b> <span class="muted">${blacklistFaPlayerSummary(p)}</span></div>`).join('');
+      blacklistFaResults.querySelectorAll('button[data-blacklist-fa-id]').forEach(btn => btn.onclick = () => {
+        const p = blacklistFaPlayersById[String(btn.dataset.blacklistFaId)] || {};
+        blacklistFaPlayerId.value = p.id || '';
+        blacklistFaSearchBox.value = p.name || '';
+        blacklistFaSelected.innerHTML = `Selected: <b>${esc(p.name || '')}</b> <span class="muted">${blacklistFaPlayerSummary(p)}</span>`;
+        blacklistFaSubmit.disabled = !blacklistFaPlayerId.value;
+      });
+    }, 200);
+  });
+}
+
+
 const draftTimeChoices = {{ draft_time_choices|tojson }};
 const draftTimeKind = document.getElementById('draft-time-kind');
 const draftTimePick = document.getElementById('draft-time-pick');
@@ -1315,6 +1525,7 @@ def index():
         roster_locked=_is_roster_locked() if is_admin_authed() else False,
         fa_locked=_fa_locked() if is_admin_authed() else False,
         draft_time_choices=_draft_pick_choices() if is_admin_authed() else {"draft": [], "rulev": []},
+        blacklisted_fa_players=_active_blacklisted_fa_players() if is_admin_authed() else [],
         logs=admin_logs() if is_admin_authed() else [],
         msg=request.args.get("msg", ""),
         err=request.args.get("err", ""),
@@ -1357,6 +1568,13 @@ def api_fa_bid_players():
     require_admin()
     q = request.args.get("q", "")
     return jsonify({"players": _search_fa_bid_players(q)})
+
+
+@admin_bp.get("/api/fa-blacklist-candidates")
+def api_fa_blacklist_candidates():
+    require_admin()
+    q = request.args.get("q", "")
+    return jsonify({"players": _search_fa_blacklist_candidates(q)})
 
 
 @admin_bp.post("/bonus-payment")
@@ -1617,6 +1835,51 @@ def reset_fa_bid():
         return redirect_with(user_msg, refresh=["fa", "financials"])
     except Exception as e:
         current_app.logger.exception("Admin FA bid reset failed")
+        return redirect_with(error=str(e))
+
+
+
+@admin_bp.post("/blacklist-fa-player")
+def blacklist_fa_player():
+    require_admin()
+    try:
+        player_id = int(request.form.get("player_id") or 0)
+        if player_id <= 0:
+            raise ValueError("Select a valid free agent")
+        note = (request.form.get("note") or "").strip()
+        from fa_app import blacklist_free_agent
+        result = blacklist_free_agent(player_id, note=note)
+        log_action(
+            "blacklist_fa_player",
+            f"Blacklisted {result['player_name']} #{player_id}; voided {result.get('bids_voided', 0)} FA bids",
+            result,
+        )
+        return redirect_with(
+            f"Blacklisted {result['player_name']} and voided {result.get('bids_voided', 0)} FA bids.",
+            refresh=["fa", "financials"],
+        )
+    except Exception as e:
+        current_app.logger.exception("Admin FA blacklist failed")
+        return redirect_with(error=str(e))
+
+
+@admin_bp.post("/unblacklist-fa-player")
+def unblacklist_fa_player():
+    require_admin()
+    try:
+        player_id = int(request.form.get("player_id") or 0)
+        if player_id <= 0:
+            raise ValueError("Select a valid free agent")
+        from fa_app import unblacklist_free_agent
+        result = unblacklist_free_agent(player_id)
+        log_action(
+            "unblacklist_fa_player",
+            f"Removed {result['player_name']} #{player_id} from FA blacklist",
+            result,
+        )
+        return redirect_with(f"Removed {result['player_name']} from the FA blacklist.", refresh=["fa"])
+    except Exception as e:
+        current_app.logger.exception("Admin FA unblacklist failed")
         return redirect_with(error=str(e))
 
 
