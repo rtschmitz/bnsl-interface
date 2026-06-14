@@ -1001,6 +1001,16 @@ def get_roster_conn() -> sqlite3.Connection:
     conn = sqlite3.connect(str(get_roster_db_path()), timeout=30)
     conn.execute("PRAGMA busy_timeout=30000")
     conn.row_factory = sqlite3.Row
+
+    def _unaccent(s):
+        if s is None:
+            return ""
+        return "".join(
+            ch for ch in unicodedata.normalize("NFKD", str(s))
+            if not unicodedata.combining(ch)
+        )
+
+    conn.create_function("unaccent", 1, _unaccent)
     return conn
 
 
@@ -2018,46 +2028,240 @@ def sync_free_agents_from_roster_db() -> tuple[int, int]:
     return (len(roster_rows), upserted)
 
 
-def update_roster_db_for_fa_signing(roster_player_id: int | None, team: str, years: int, has_option: bool, aav_m: float) -> None:
-    if not roster_player_id:
-        return
+def update_roster_db_for_fa_signing(
+    roster_player_id: int | None,
+    team: str,
+    years: int,
+    has_option: bool,
+    aav_m: float,
+    *,
+    player_name: str = "",
+    mlbam_id: int | None = None,
+    fangraphs_id: int | None = None,
+) -> dict[str, Any]:
+    """
+    Apply an official FA signing to roster.db.
 
-    team_abbr = TEAM_TO_ABBR.get(team, team)
+    The FA app stores the bid/signing state in fa.db, while roster pages and
+    financials read ownership and salary from roster.db.  This function is the
+    handoff point: when an ACTIVE bid expires into SIGNED, the linked roster row
+    must be assigned to the winning franchise with the negotiated contract.
+
+    roster_player_id is still the primary identity key, but older FA rows can
+    miss it.  In that case, fall back to stable IDs and finally an exact
+    unaccented name match so a signing is not silently left off the roster.
+    """
+    roster_path = get_roster_db_path()
+    if not roster_path.exists():
+        return {"updated": False, "reason": f"roster DB missing: {roster_path}"}
+
+    team_abbr = team_to_abbr_for_financials(team) or TEAM_TO_ABBR.get(team, str(team or "").strip())
+    if not team_abbr:
+        return {"updated": False, "reason": "missing team"}
+
     start_year = int(CURRENT_FA_CLASS)
-    total_years = max(1, int(years)) + (1 if has_option else 0)
+    guaranteed_years = max(1, int(years or 1))
+    total_years = guaranteed_years + (1 if has_option else 0)
     contract_expires = start_year + total_years - 1
     new_fa_class = str(contract_expires + 1)
 
     conn = get_roster_conn()
     cur = conn.cursor()
-    ensure_roster_fa_import_columns(conn)
-    cur.execute("""
-        UPDATE roster_players
-        SET signed=1,
-            contract_type='FA',
-            salary=?,
-            contract_initial_season=?,
-            contract_length=?,
-            contract_option=?,
-            contract_expires=?,
-            franchise=?,
-            affiliate_team='',
-            roster_status='Reserve',
-            active_roster=0,
-            fa_class=?
-        WHERE id=?
-    """, (
-        float(aav_m) * 1_000_000.0,
-        start_year,
-        total_years,
-        1 if has_option else 0,
-        str(contract_expires),
-        team_abbr,
-        new_fa_class,
-        int(roster_player_id),
-    ))
-    conn.commit()
-    conn.close()
+    try:
+        ensure_roster_fa_import_columns(conn)
+
+        resolved_id: int | None = int(roster_player_id) if roster_player_id else None
+        if resolved_id:
+            cur.execute("SELECT id FROM roster_players WHERE id=?", (resolved_id,))
+            if not cur.fetchone():
+                resolved_id = None
+
+        if resolved_id is None and mlbam_id:
+            cur.execute(
+                """
+                SELECT id
+                FROM roster_players
+                WHERE mlbam_id=?
+                ORDER BY CASE WHEN COALESCE(franchise,'')='' THEN 0 ELSE 1 END, id
+                LIMIT 1
+                """,
+                (int(mlbam_id),),
+            )
+            row = cur.fetchone()
+            if row:
+                resolved_id = int(row["id"])
+
+        if resolved_id is None and fangraphs_id:
+            cur.execute(
+                """
+                SELECT id
+                FROM roster_players
+                WHERE CAST(fangraphs_id AS TEXT)=CAST(? AS TEXT)
+                ORDER BY CASE WHEN COALESCE(franchise,'')='' THEN 0 ELSE 1 END, id
+                LIMIT 1
+                """,
+                (str(fangraphs_id),),
+            )
+            row = cur.fetchone()
+            if row:
+                resolved_id = int(row["id"])
+
+        clean_name = str(player_name or "").strip()
+        if resolved_id is None and clean_name:
+            cur.execute(
+                """
+                SELECT id
+                FROM roster_players
+                WHERE LOWER(unaccent(name)) = LOWER(unaccent(?))
+                ORDER BY CASE WHEN COALESCE(franchise,'')='' THEN 0 ELSE 1 END, id
+                LIMIT 1
+                """,
+                (clean_name,),
+            )
+            row = cur.fetchone()
+            if row:
+                resolved_id = int(row["id"])
+
+        if resolved_id is None:
+            return {"updated": False, "reason": "no matching roster player", "roster_player_id": None}
+
+        salary = float(aav_m or 0.0) * 1_000_000.0
+        cur.execute("SELECT * FROM roster_players WHERE id=?", (resolved_id,))
+        existing = cur.fetchone()
+        existing_status = str(existing["roster_status"] or "") if existing else ""
+        existing_active = int(existing["active_roster"] or 0) if existing else 0
+        already_on_matching_contract = bool(
+            existing
+            and str(existing["franchise"] or "") == team_abbr
+            and int(existing["signed"] or 0) == 1
+            and str(existing["contract_type"] or "").strip().upper() == "FA"
+            and abs(float(existing["salary"] or 0.0) - salary) < 0.5
+            and int(existing["contract_initial_season"] or 0) == start_year
+            and int(existing["contract_length"] or 0) == total_years
+            and int(existing["contract_option"] or 0) == (1 if has_option else 0)
+            and str(existing["contract_expires"] or "") == str(contract_expires)
+            and str(existing["fa_class"] or "") == new_fa_class
+            and existing_status in {"Active", "40-man", "Reserve"}
+        )
+        roster_status = existing_status if already_on_matching_contract else "Reserve"
+        active_roster = existing_active if already_on_matching_contract and existing_status == "Active" else 0
+
+        cur.execute(
+            """
+            UPDATE roster_players
+            SET signed=1,
+                contract_type='FA',
+                salary=?,
+                contract_initial_season=?,
+                contract_length=?,
+                contract_option=?,
+                contract_expires=?,
+                franchise=?,
+                affiliate_team='',
+                roster_status=?,
+                active_roster=?,
+                fa_class=?,
+                rulev_status=0,
+                rulev_original_team=NULL,
+                rulev_selected_by=NULL,
+                rulev_selected_at=NULL
+            WHERE id=?
+            """,
+            (
+                salary,
+                start_year,
+                total_years,
+                1 if has_option else 0,
+                str(contract_expires),
+                team_abbr,
+                roster_status,
+                active_roster,
+                new_fa_class,
+                resolved_id,
+            ),
+        )
+        conn.commit()
+        return {
+            "updated": bool(cur.rowcount),
+            "roster_player_id": resolved_id,
+            "team_abbr": team_abbr,
+            "salary": float(aav_m or 0.0) * 1_000_000.0,
+            "contract_initial_season": start_year,
+            "contract_length": total_years,
+            "contract_option": 1 if has_option else 0,
+            "contract_expires": str(contract_expires),
+            "fa_class": new_fa_class,
+        }
+    finally:
+        conn.close()
+
+
+def reconcile_signed_free_agents_to_roster() -> dict[str, Any]:
+    """
+    Backfill/repair roster.db from already-signed FA rows.
+
+    This is intentionally cheap relative to the full roster sync: it only scans
+    signed FA rows and their one SIGNED bid.  Running it on bootstrap protects
+    against older deployments where fa.db recorded a signing but roster.db was
+    not updated, which would also make financials miss the salary.
+    """
+    if not get_roster_db_path().exists():
+        return {"checked": 0, "updated": 0, "missing": 0, "reason": "roster DB missing"}
+
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute(
+        """
+        SELECT
+            p.id AS fa_id, p.name, p.roster_player_id, p.signed_team,
+            p.mlbam_id, p.fangraphs_id,
+            b.years, b.has_option, b.aav_m
+        FROM free_agents p
+        JOIN bids b ON b.player_id=p.id AND b.status='SIGNED'
+        WHERE COALESCE(p.signed_team,'')<>''
+        ORDER BY datetime(COALESCE(p.signed_at, b.expires_at, b.created_at)) ASC
+        """
+    )
+    rows = cur.fetchall()
+
+    updated = 0
+    missing: list[str] = []
+    stamp = iso(utcnow())
+
+    try:
+        for r in rows:
+            result = update_roster_db_for_fa_signing(
+                int(r["roster_player_id"] or 0) if r["roster_player_id"] else None,
+                r["signed_team"],
+                int(r["years"] or 1),
+                bool(int(r["has_option"] or 0)),
+                float(r["aav_m"] or 0.0),
+                player_name=str(r["name"] or ""),
+                mlbam_id=int(r["mlbam_id"] or 0) if r["mlbam_id"] else None,
+                fangraphs_id=int(r["fangraphs_id"] or 0) if r["fangraphs_id"] else None,
+            )
+            if result.get("updated"):
+                updated += 1
+                resolved_id = result.get("roster_player_id")
+                cur.execute(
+                    """
+                    UPDATE free_agents
+                    SET roster_player_id=COALESCE(?, roster_player_id),
+                        is_roster_unrostered=0,
+                        removed_from_roster_sync=?
+                    WHERE id=?
+                    """,
+                    (resolved_id, stamp, int(r["fa_id"])),
+                )
+            else:
+                missing.append(str(r["name"] or f"FA #{r['fa_id']}"))
+        conn.commit()
+    finally:
+        conn.close()
+
+    if missing:
+        logging.warning("Signed FA roster reconciliation could not match: %s", ", ".join(missing[:20]))
+    return {"checked": len(rows), "updated": updated, "missing": len(missing), "missing_players": missing}
 
 
 def sync_free_agents_from_roster_if_needed(force: bool = False) -> None:
@@ -2199,7 +2403,7 @@ def enforce_expirations():
         SELECT
           b.id AS bid_id, b.player_id, b.team, b.expires_at,
           b.years, b.has_option, b.aav_m,
-          p.name AS player_name, p.roster_player_id
+          p.name AS player_name, p.roster_player_id, p.mlbam_id, p.fangraphs_id
         FROM bids b
         JOIN free_agents p ON p.id=b.player_id
         WHERE b.status='ACTIVE'
@@ -2222,23 +2426,46 @@ def enforce_expirations():
                 "aav_m": float(r["aav_m"] or 0.0),
                 "player_name": str(r["player_name"] or "").strip(),
                 "roster_player_id": int(r["roster_player_id"] or 0) if r["roster_player_id"] else None,
+                "mlbam_id": int(r["mlbam_id"] or 0) if r["mlbam_id"] else None,
+                "fangraphs_id": int(r["fangraphs_id"] or 0) if r["fangraphs_id"] else None,
             })
 
     for item in to_sign:
         bid_id = item["bid_id"]
         pid = item["player_id"]
         team = item["team"]
-        cur.execute("UPDATE free_agents SET signed_team=?, signed_at=? WHERE id=?", (team, iso(now), pid))
-        cur.execute("UPDATE bids SET status='SIGNED' WHERE id=?", (bid_id,))
-        # clear any other actives (should be none)
-        cur.execute("UPDATE bids SET status='OUTBID', expires_at=NULL WHERE player_id=? AND status='ACTIVE' AND id<>?", (pid, bid_id))
-        update_roster_db_for_fa_signing(
+        roster_result = update_roster_db_for_fa_signing(
             item["roster_player_id"],
             team,
             item["years"],
             item["has_option"],
             item["aav_m"],
+            player_name=item.get("player_name", ""),
+            mlbam_id=item.get("mlbam_id"),
+            fangraphs_id=item.get("fangraphs_id"),
         )
+        resolved_roster_id = roster_result.get("roster_player_id") or item["roster_player_id"]
+        if not roster_result.get("updated"):
+            logging.warning(
+                "FA signing recorded but roster update did not complete for %s: %s",
+                item.get("player_name") or pid,
+                roster_result.get("reason", "unknown reason"),
+            )
+        cur.execute(
+            """
+            UPDATE free_agents
+            SET signed_team=?,
+                signed_at=?,
+                roster_player_id=COALESCE(?, roster_player_id),
+                is_roster_unrostered=0,
+                removed_from_roster_sync=?
+            WHERE id=?
+            """,
+            (team, iso(now), resolved_roster_id, iso(now), pid),
+        )
+        cur.execute("UPDATE bids SET status='SIGNED' WHERE id=?", (bid_id,))
+        # clear any other actives (should be none)
+        cur.execute("UPDATE bids SET status='OUTBID', expires_at=NULL WHERE player_id=? AND status='ACTIVE' AND id<>?", (pid, bid_id))
 
     conn.commit()
     conn.close()
@@ -2909,6 +3136,10 @@ def bootstrap_fa():
     init_db()
     if os.environ.get("BNSL_BOOTSTRAP_SYNC_FA", "0").strip().lower() in {"1", "true", "yes", "on"}:
         sync_free_agents_from_roster_if_needed(force=True)
+    try:
+        reconcile_signed_free_agents_to_roster()
+    except Exception:
+        logging.exception("Unable to reconcile signed FAs into roster.db during FA bootstrap")
     seed_qualifying_offers(qo_aav_m=QO_AAV_M)
 
 # ---------- UI (templates) ----------
@@ -4961,8 +5192,15 @@ if __name__ == "__main__":
     ap.add_argument("--sync-roster", action="store_true", help="Import/refresh free agents from live roster.db and OOTP FA export")
     ap.add_argument("--sync-ratings", action="store_true", help="Import/refresh OOTP ratings from the merged main + FA ratings CSVs into roster.db")
     ap.add_argument("--apply-htd", action="store_true", help="Apply hometown discounts from hometown_discounts.db to current free agents")
+    ap.add_argument("--sync-signed-fa-rosters", action="store_true", help="Repair roster.db from fa.db SIGNED free-agent bids")
     ap.add_argument("--prefetch-headshots", action="store_true", help="Download headshots for all players with mlbam_id")
     args = ap.parse_args()
+
+    if args.sync_signed_fa_rosters:
+        init_db()
+        summary = reconcile_signed_free_agents_to_roster()
+        print(f"✅ Signed FA roster reconciliation complete: {summary}")
+        raise SystemExit(0)
 
     if args.sync_roster:
         init_db()

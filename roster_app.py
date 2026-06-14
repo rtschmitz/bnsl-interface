@@ -1293,7 +1293,13 @@ def bootstrap_roster():
                         rulev_selected_by=NULL,
                         rulev_selected_at=NULL
                     WHERE id=?
-                """, (CURRENT_FA_CLASS, player_id))
+                      AND NOT (
+                        COALESCE(franchise, '') != ''
+                        AND COALESCE(signed, 0) = 1
+                        AND UPPER(COALESCE(contract_type, '')) = 'FA'
+                        AND COALESCE(contract_initial_season, 0) >= ?
+                      )
+                """, (CURRENT_FA_CLASS, player_id, int(CURRENT_FA_CLASS)))
 
     # Completed draft picks are no longer re-synced on every app startup.
     # Use the admin manual sync button, or the event-driven draft-pick hook.
