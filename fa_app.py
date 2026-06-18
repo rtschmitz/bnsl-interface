@@ -1131,6 +1131,30 @@ def _strip_trailing_name_suffixes(words: list[str]) -> list[str]:
     return out
 
 
+def _compact_suffix_stripped_tokens(token: str) -> list[str]:
+    """Return suffix-stripped forms for already-normalized compact tokens.
+
+    The hometown-discount key table stores tokens after punctuation has already
+    been removed, so "Leiter Jr." may appear as "leiterjr" rather than
+    as separable words.  Keep this as aliases rather than replacing the exact
+    key, and let caller-side duplicate handling avoid unsafe collisions.
+    """
+    tok = _norm_token(token)
+    if not tok:
+        return []
+
+    # Jr./Sr. are the main pain point and are reasonably safe to strip when
+    # compacted.  Roman numerals are more collision-prone as ordinary word
+    # endings, so only strip those when they were separated before normalization.
+    out: list[str] = []
+    for suffix in ("jr", "sr"):
+        if tok.endswith(suffix) and len(tok) > len(suffix) + 1:
+            base = tok[:-len(suffix)]
+            if base and base not in out:
+                out.append(base)
+    return out
+
+
 def _canonical_last_name_tokens(value: Any) -> list[str]:
     """Return last-name match tokens with generational suffixes removed.
 
@@ -1154,8 +1178,9 @@ def _canonical_last_name_tokens(value: Any) -> list[str]:
     out: list[str] = []
     for cand in candidates:
         tok = _norm_token(cand)
-        if tok and tok not in NAME_SUFFIX_TOKENS and tok not in out:
-            out.append(tok)
+        for alias in [tok, *_compact_suffix_stripped_tokens(tok)]:
+            if alias and alias not in NAME_SUFFIX_TOKENS and alias not in out:
+                out.append(alias)
     return out
 
 
@@ -1279,7 +1304,7 @@ def _htd_row_value(row: sqlite3.Row | None, key: str, default: Any = "") -> Any:
 
 
 def _htd_candidate_keys(fa_row: sqlite3.Row, roster_row: sqlite3.Row | None) -> list[str]:
-    """Build match keys for a free_agents row against hometown_discounts.db."""
+    """Build suffix-tolerant match keys for a free_agents row against hometown_discounts.db."""
     name = str(_htd_row_value(roster_row, "name") or fa_row["name"] or "").strip()
     first = str(_htd_row_value(roster_row, "first_name") or "").strip()
     last = str(_htd_row_value(roster_row, "last_name") or "").strip()
@@ -1289,8 +1314,8 @@ def _htd_candidate_keys(fa_row: sqlite3.Row, roster_row: sqlite3.Row | None) -> 
         last = l2 if (not last or _is_name_suffix(last)) else last
 
     first_n = _norm_token(first)
-    last_n = _canonical_last_name_token(last)
-    if not last_n:
+    last_tokens = _canonical_last_name_tokens(last)
+    if not last_tokens:
         return []
 
     keys: list[str] = []
@@ -1299,44 +1324,89 @@ def _htd_candidate_keys(fa_row: sqlite3.Row, roster_row: sqlite3.Row | None) -> 
         if key and key not in keys:
             keys.append(key)
 
-    # Exact/cross aliases for bbref-ish IDs.  The BNSL/OOTP files sometimes put
-    # the same string under bbref_id, bbrefminors_id, or OOTP pID labels.
-    for raw in (
-        _htd_row_value(roster_row, "bbref_id"),
-        _htd_row_value(roster_row, "bbrefminors_id"),
-    ):
-        val = _norm_token(raw)
-        if val:
-            add(f"bbref:{val}:{last_n}")
-            add(f"bbrefminors:{val}:{last_n}")
+    for last_n in last_tokens:
+        # Exact/cross aliases for bbref-ish IDs.  The BNSL/OOTP files sometimes put
+        # the same string under bbref_id, bbrefminors_id, or OOTP pID labels.
+        for raw in (
+            _htd_row_value(roster_row, "bbref_id"),
+            _htd_row_value(roster_row, "bbrefminors_id"),
+        ):
+            val = _norm_token(raw)
+            if val:
+                add(f"bbref:{val}:{last_n}")
+                add(f"bbrefminors:{val}:{last_n}")
 
-    for raw in (
-        _htd_row_value(roster_row, "ootp_id"),
-        _htd_row_value(roster_row, "bbrefminors_id"),
-    ):
-        val = _norm_token(raw)
-        if val:
-            add(f"ootp:{val}:{last_n}")
+        for raw in (
+            _htd_row_value(roster_row, "ootp_id"),
+            _htd_row_value(roster_row, "bbrefminors_id"),
+        ):
+            val = _norm_token(raw)
+            if val:
+                add(f"ootp:{val}:{last_n}")
 
-    # Team-based key is a fallback.  It helps if the row still has last_team or
-    # franchise populated, but current FAs may have those cleared by roster import.
-    team_candidates = []
-    if "last_team" in fa_row.keys():
-        team_candidates.append(fa_row["last_team"])
-    team_candidates.append(_htd_row_value(roster_row, "franchise"))
-    for team_value in team_candidates:
-        team_text = roster_code_to_team(team_value)
-        team_norm = _norm_token(team_text)
-        raw_norm = _norm_token(team_value)
-        if first_n and team_norm:
-            add(f"first_last_team:{first_n}:{last_n}:{team_norm}")
-        if first_n and raw_norm:
-            add(f"first_last_team:{first_n}:{last_n}:{raw_norm}")
+        # Team-based key is a fallback.  It helps if the row still has last_team or
+        # franchise populated, but current FAs may have those cleared by roster import.
+        team_candidates = []
+        if "last_team" in fa_row.keys():
+            team_candidates.append(fa_row["last_team"])
+        team_candidates.append(_htd_row_value(roster_row, "franchise"))
+        for team_value in team_candidates:
+            team_text = roster_code_to_team(team_value)
+            team_norm = _norm_token(team_text)
+            raw_norm = _norm_token(team_value)
+            if first_n and team_norm:
+                add(f"first_last_team:{first_n}:{last_n}:{team_norm}")
+            if first_n and raw_norm:
+                add(f"first_last_team:{first_n}:{last_n}:{raw_norm}")
 
-    if first_n:
-        add(f"first_last:{first_n}:{last_n}")
+        if first_n:
+            add(f"first_last:{first_n}:{last_n}")
 
     return keys
+
+
+def _hometown_discount_key_aliases(key: Any) -> list[str]:
+    """Return suffix-tolerant aliases for stored hometown-discount keys.
+
+    hometown_discounts.db is generated before the FA app applies current name
+    cleanup, so its key table may contain last-name tokens like ``leiterjr``.
+    The FA-side candidate keys now prefer ``leiter``.  Expanding the loaded key
+    map here lets old/generated HTD keys match without forcing a rebuild.
+    """
+    raw = str(key or "").strip()
+    if not raw:
+        return []
+
+    parts = raw.split(":")
+    aliases: list[str] = []
+
+    def add(value: str) -> None:
+        if value and value not in aliases:
+            aliases.append(value)
+
+    add(raw)
+
+    # Identify the component that represents last name for each key family.
+    last_idx_by_prefix = {
+        "bbref": 2,
+        "bbrefminors": 2,
+        "ootp": 2,
+        "first_last_team": 2,
+        "first_last_dob": 2,
+        "last_dob": 1,
+        "first_last": 2,
+    }
+    idx = last_idx_by_prefix.get(parts[0])
+    if idx is None or idx >= len(parts):
+        return aliases
+
+    last_aliases = _canonical_last_name_tokens(parts[idx])
+    for last_alias in last_aliases:
+        new_parts = list(parts)
+        new_parts[idx] = last_alias
+        add(":".join(new_parts))
+
+    return aliases
 
 
 def _load_hometown_discount_key_map(path: Path) -> dict[str, dict[str, Any]]:
@@ -1352,9 +1422,35 @@ def _load_hometown_discount_key_map(path: Path) -> dict[str, dict[str, Any]]:
         FROM hometown_discount_keys k
         JOIN hometown_discounts d ON d.id = k.discount_id
     """)
-    rows = {str(r["key"]): dict(r) for r in cur.fetchall()}
+
+    # Exact stored keys always win.  Generated suffix aliases are added only
+    # when they do not conflict with another discount claim.  That prevents an
+    # unsafe first_last alias from assigning a discount when both Jr./Sr. rows
+    # exist and only a stronger DOB/team/ID key should decide the match.
+    rows = [dict(r) for r in cur.fetchall()]
     conn.close()
-    return rows
+
+    key_map: dict[str, dict[str, Any]] = {}
+    ambiguous_aliases: set[str] = set()
+
+    for rec in rows:
+        raw_key = str(rec.get("key") or "")
+        if raw_key:
+            key_map[raw_key] = rec
+
+    for rec in rows:
+        raw_key = str(rec.get("key") or "")
+        for alias in _hometown_discount_key_aliases(raw_key):
+            if alias == raw_key or alias in ambiguous_aliases:
+                continue
+            existing = key_map.get(alias)
+            if existing is not None and existing.get("discount_id") != rec.get("discount_id"):
+                key_map.pop(alias, None)
+                ambiguous_aliases.add(alias)
+                continue
+            key_map[alias] = rec
+
+    return key_map
 
 
 def apply_hometown_discounts_to_free_agents(clear_missing: bool = True) -> tuple[int, int, int]:
