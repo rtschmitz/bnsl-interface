@@ -1109,8 +1109,72 @@ def _norm_token(value: Any) -> str:
     return re.sub(r"[^a-z0-9]", "", text)
 
 
+NAME_SUFFIX_TOKENS = {
+    "jr", "junior", "sr", "senior",
+    "ii", "iii", "iv", "v", "vi", "vii", "viii", "ix", "x",
+}
+
+
+def _is_name_suffix(value: Any) -> bool:
+    return _norm_token(value) in NAME_SUFFIX_TOKENS
+
+
+def _name_words(value: Any) -> list[str]:
+    # Keep the displayed name untouched elsewhere, but tokenize loosely for matching.
+    return [b.strip(".,;:()[]{}") for b in re.split(r"\s+", str(value or "").strip()) if b.strip(".,;:()[]{}")]
+
+
+def _strip_trailing_name_suffixes(words: list[str]) -> list[str]:
+    out = list(words or [])
+    while out and _is_name_suffix(out[-1]):
+        out.pop()
+    return out
+
+
+def _canonical_last_name_tokens(value: Any) -> list[str]:
+    """Return last-name match tokens with generational suffixes removed.
+
+    This lets rows like "Mark Leiter" and "Mark Leiter Jr." line up
+    even when one export puts the suffix in the name and the other does not.
+    For multi-word last names, keep both the compact full last name and the
+    terminal token as fallbacks, while preserving duplicate-key protection.
+    """
+    words = _name_words(value)
+    stripped = _strip_trailing_name_suffixes(words)
+
+    candidates: list[str] = []
+    if stripped:
+        candidates.append(" ".join(stripped))
+        candidates.append(stripped[-1])
+
+    # Keep the raw token as a low-priority fallback only when it is not just a suffix.
+    if words and not _is_name_suffix(" ".join(words)):
+        candidates.append(" ".join(words))
+
+    out: list[str] = []
+    for cand in candidates:
+        tok = _norm_token(cand)
+        if tok and tok not in NAME_SUFFIX_TOKENS and tok not in out:
+            out.append(tok)
+    return out
+
+
+def _canonical_last_name_token(value: Any) -> str:
+    tokens = _canonical_last_name_tokens(value)
+    return tokens[0] if tokens else ""
+
+
+def _canonical_player_name_key(value: Any) -> str:
+    first, last = _split_name(str(value or ""))
+    last_token = _canonical_last_name_token(last)
+    first_token = _norm_token(first)
+    if first_token and last_token:
+        return f"{first_token}:{last_token}"
+    return last_token
+
+
 def _split_name(name: str) -> tuple[str, str]:
-    bits = [b for b in re.split(r"\s+", (name or "").strip()) if b]
+    bits = _strip_trailing_name_suffixes(_name_words(name))
     if not bits:
         return "", ""
     if len(bits) == 1:
@@ -1153,41 +1217,47 @@ def _player_match_keys(
       7. firstnameLASTNAME
     """
     first = _norm_token(first_name)
-    last = _norm_token(last_name)
+    last_tokens = _canonical_last_name_tokens(last_name)
     birth = _norm_token(dob)
     tm = _norm_token(team)
     bbref = _norm_token(bbref_id)
     bbrefm = _norm_token(bbrefminors_id)
     oid = _norm_token(ootp_id)
 
-    if not last:
+    if not last_tokens:
         return []
 
     keys: list[str] = []
-    if bbref:
-        keys.append(f"bbref:{bbref}:{last}")
-    if bbrefm:
-        keys.append(f"bbrefminors:{bbrefm}:{last}")
-    if oid:
-        keys.append(f"ootp:{oid}:{last}")
-    if first and tm:
-        keys.append(f"first_last_team:{first}:{last}:{tm}")
-    if first and birth:
-        keys.append(f"first_last_dob:{first}:{last}:{birth}")
-    if birth:
-        keys.append(f"last_dob:{last}:{birth}")
-    if first:
-        keys.append(f"first_last:{first}:{last}")
+
+    def add(key: str) -> None:
+        if key and key not in keys:
+            keys.append(key)
+
+    for last in last_tokens:
+        if bbref:
+            add(f"bbref:{bbref}:{last}")
+        if bbrefm:
+            add(f"bbrefminors:{bbrefm}:{last}")
+        if oid:
+            add(f"ootp:{oid}:{last}")
+        if first and tm:
+            add(f"first_last_team:{first}:{last}:{tm}")
+        if first and birth:
+            add(f"first_last_dob:{first}:{last}:{birth}")
+        if birth:
+            add(f"last_dob:{last}:{birth}")
+        if first:
+            add(f"first_last:{first}:{last}")
     return keys
 
 
 def _roster_row_match_keys(row: sqlite3.Row) -> list[str]:
     first = row["first_name"] if "first_name" in row.keys() else ""
     last = row["last_name"] if "last_name" in row.keys() else ""
-    if not first or not last:
+    if not first or not last or _is_name_suffix(last):
         f2, l2 = _split_name(row["name"] if "name" in row.keys() else "")
         first = first or f2
-        last = last or l2
+        last = l2 if (not last or _is_name_suffix(last)) else last
     bbref = row["bbref_id"] if "bbref_id" in row.keys() else ""
     bbrefm = row["bbrefminors_id"] if "bbrefminors_id" in row.keys() else ""
     ootp_id = row["ootp_id"] if "ootp_id" in row.keys() else (row["id"] if "id" in row.keys() else "")
@@ -1213,13 +1283,13 @@ def _htd_candidate_keys(fa_row: sqlite3.Row, roster_row: sqlite3.Row | None) -> 
     name = str(_htd_row_value(roster_row, "name") or fa_row["name"] or "").strip()
     first = str(_htd_row_value(roster_row, "first_name") or "").strip()
     last = str(_htd_row_value(roster_row, "last_name") or "").strip()
-    if not first or not last:
+    if not first or not last or _is_name_suffix(last):
         f2, l2 = _split_name(name)
         first = first or f2
-        last = last or l2
+        last = l2 if (not last or _is_name_suffix(last)) else last
 
     first_n = _norm_token(first)
-    last_n = _norm_token(last)
+    last_n = _canonical_last_name_token(last)
     if not last_n:
         return []
 
@@ -1585,10 +1655,10 @@ def _rating_row_match_keys(row: dict[str, str]) -> list[str]:
     name = _row_get_ci(row, "Name", "player")
     first = _row_get_ci(row, "First Name", "FirstName", "first_name")
     last = _row_get_ci(row, "Last Name", "LastName", "last_name")
-    if not first or not last:
+    if not first or not last or _is_name_suffix(last):
         f2, l2 = _split_name(name)
         first = first or f2
-        last = last or l2
+        last = l2 if (not last or _is_name_suffix(last)) else last
     dob = _normalize_rating_dob(_row_get_ci(row, "DOB", "date_of_birth", "birth_date"))
     team = _row_get_ci(row, "TM", "Team", "Team Name", "franchise")
     ootp_id = _row_get_ci(row, "ID", "id", "ootp_id")
@@ -1640,7 +1710,8 @@ def _load_combined_ootp_rating_map(paths: list[Path]) -> tuple[dict[str, dict[st
 
             dob = _normalize_rating_dob(_row_get_ci(row, "DOB", "date_of_birth", "birth_date"))
             ootp_id = _row_get_ci(row, "ID", "id", "ootp_id")
-            signature = _norm_token(ootp_id) or f"{_norm_token(first)}:{_norm_token(last)}:{_norm_token(dob)}"
+            signature_last = _canonical_last_name_token(last)
+            signature = _norm_token(ootp_id) or f"{_norm_token(first)}:{signature_last}:{_norm_token(dob)}"
             if not signature:
                 continue
 
@@ -1779,6 +1850,24 @@ def _find_existing_free_agent_id(
         r = cur.fetchone()
         if r:
             return int(r["id"])
+
+        # Suffix-insensitive fallback for legacy rows with names like
+        # "Mark Leiter" vs "Mark Leiter Jr." and no stable ID yet.
+        target_name_key = _canonical_player_name_key(name)
+        if target_name_key:
+            cur.execute("""
+                SELECT id, name
+                FROM free_agents
+                WHERE (roster_player_id IS NULL OR roster_player_id='')
+                ORDER BY id ASC
+            """)
+            matches = [
+                int(row["id"])
+                for row in cur.fetchall()
+                if _canonical_player_name_key(row["name"]) == target_name_key
+            ]
+            if len(matches) == 1:
+                return matches[0]
 
     return None
 
@@ -1947,7 +2036,7 @@ def sync_free_agents_from_roster_db() -> tuple[int, int]:
     # place and keep their bids/watchlist state.
     roster_name_counts: dict[str, int] = {}
     for rr in roster_rows:
-        key = _norm_token(rr["name"] if "name" in rr.keys() else "")
+        key = _canonical_player_name_key(rr["name"] if "name" in rr.keys() else "")
         if key:
             roster_name_counts[key] = roster_name_counts.get(key, 0) + 1
 
@@ -1975,7 +2064,7 @@ def sync_free_agents_from_roster_db() -> tuple[int, int]:
         pot = _optional_int(r["pot"] if "pot" in r.keys() else None)
         def_rating = _optional_int(r["def"] if "def" in r.keys() else None)
 
-        name_key = _norm_token(name)
+        name_key = _canonical_player_name_key(name)
         allow_name_fallback = bool(name_key and roster_name_counts.get(name_key, 0) == 1)
         existing_id = _find_existing_free_agent_id(
             cur, roster_id, mlbam_id, fg_id, name,
@@ -2618,9 +2707,17 @@ def fetch_free_agents(search: str = "", hide_signed: bool = False, show_unrated:
 
     if not show_unrated:
         clauses.append("""
-            (ovr IS NOT NULL
-             AND TRIM(CAST(ovr AS TEXT)) NOT IN ('', '-', '—')
-             AND CAST(ovr AS INTEGER) <> 20)
+            (
+              (ovr IS NOT NULL
+               AND TRIM(CAST(ovr AS TEXT)) NOT IN ('', '-', '—')
+               AND CAST(ovr AS INTEGER) <> 20)
+              OR EXISTS (
+                SELECT 1
+                FROM bids b_pending
+                WHERE b_pending.player_id = free_agents.id
+                  AND b_pending.status = 'ACTIVE'
+              )
+            )
         """)
 
     q = "SELECT * FROM free_agents"
