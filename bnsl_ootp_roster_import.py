@@ -14,13 +14,18 @@ Outputs
    and options used overwritten for successfully matched BNSL players.
 2) BNSL id -> OOTP id mapping CSV for future runs.
 3) Audit CSV listing low-quality matches, ambiguous matches, duplicate targets,
-   missing franchises/affiliates, and bad service/options inputs.
+   missing franchises/affiliates, bad service/options inputs, and OOTP players
+   cleared from franchises because they were not matched to any BNSL player.
 
 Matching model
 --------------
 Hard-way matching compares five normalized qualities:
   first_name, last_name-with-suffix-removed, DOB, bbref_id, bbrefminors_id.
-A unique candidate with match_score >= MATCH_THRESHOLD is accepted.
+A unique candidate with match_score >= MATCH_THRESHOLD is accepted. Low-score or ambiguous candidates can also be rescued by BNSL/OOTP id + exact normalized first+last, and ambiguous ties are resolved by a unique normalized first+last match.
+
+After matching and updating successful BNSL players, any OOTP player row that still has
+team_id > 0 but was not successfully matched to a BNSL player is cleared to team_id=0
+by default. Use --no-clear-unmatched-franchised to disable that cleanup.
 
 Future id-map mode can be enabled either by setting USE_ID_MAP=True below or
 by passing --use-id-map. It will use --input-id-map if supplied, otherwise it
@@ -315,6 +320,14 @@ def candidate_indices_for_bns(bns: PlayerIdentity, indexes: Dict[str, Dict[objec
     return sorted(candidates)
 
 
+def same_normalized_full_name(bns: PlayerIdentity, ootp: PlayerIdentity) -> bool:
+    return bool(bns.first and bns.last and bns.first == ootp.first and bns.last == ootp.last)
+
+
+def same_source_id(bns: PlayerIdentity, ootp: PlayerIdentity) -> bool:
+    return bool(bns.player_id and ootp.player_id and bns.player_id == ootp.player_id)
+
+
 def hard_match_player(
     bns: PlayerIdentity,
     ootp_players: List[PlayerIdentity],
@@ -333,7 +346,32 @@ def hard_match_player(
     best_score, best_idx, best_feat = scored[0]
     best_player = ootp_players[best_idx]
 
+    def id_plus_name_rescue(pool: List[Tuple[int, FeatureScore]]) -> Optional[Tuple[int, FeatureScore]]:
+        hits = [
+            (idx, feat)
+            for idx, feat in pool
+            if same_source_id(bns, ootp_players[idx]) and same_normalized_full_name(bns, ootp_players[idx])
+        ]
+        if len(hits) == 1:
+            return hits[0]
+        return None
+
     if best_score < threshold:
+        # Low-score rescue: if one potential match has exact normalized first+last
+        # AND BNSL id == OOTP id, accept it despite the low feature score.
+        rescued = id_plus_name_rescue([(idx, feat) for _, idx, feat in scored])
+        if rescued is not None:
+            idx, feat = rescued
+            player = ootp_players[idx]
+            return MatchResult(
+                bns=bns,
+                ootp=player,
+                features=feat,
+                success=True,
+                code="MATCHED_LOW_SCORE_BY_ID_AND_NAME_TIEBREAK",
+                detail=f"Low-score candidate accepted by BNSL id == OOTP id plus normalized first+last match; identity score {feat.score}/5 among {len(scored)} candidates",
+            )
+
         top = "; ".join(
             f"{ootp_players[idx].player_id}:{ootp_players[idx].display_name}:score={score}"
             for score, idx, _ in scored[:5]
@@ -349,7 +387,46 @@ def hard_match_player(
 
     tied_best = [(idx, feat) for score, idx, feat in scored if score == best_score]
     if len(tied_best) > 1:
+        # Ambiguity rescue 1: if one of the tied candidates has exact normalized
+        # first+last AND BNSL id == OOTP id, accept it.
+        rescued = id_plus_name_rescue(tied_best)
+        if rescued is not None:
+            idx, feat = rescued
+            player = ootp_players[idx]
+            return MatchResult(
+                bns=bns,
+                ootp=player,
+                features=feat,
+                success=True,
+                code="MATCHED_AMBIGUOUS_BY_ID_AND_NAME_TIEBREAK",
+                detail=f"Ambiguous tie accepted by BNSL id == OOTP id plus normalized first+last match; identity score {feat.score}/5 among {len(tied_best)} tied candidates",
+            )
+
+        # Ambiguity rescue 2: otherwise, prefer the uniquely tied candidate whose
+        # normalized first+last exactly matches the BNSL player.
+        tied_name_matches = [(idx, feat) for idx, feat in tied_best if same_normalized_full_name(bns, ootp_players[idx])]
+        if len(tied_name_matches) == 1:
+            idx, feat = tied_name_matches[0]
+            player = ootp_players[idx]
+            return MatchResult(
+                bns=bns,
+                ootp=player,
+                features=feat,
+                success=True,
+                code="MATCHED_BY_NAME_TIEBREAK",
+                detail=f"Accepted unique normalized first+last match among {len(tied_best)} candidates tied at score {best_score}/5",
+            )
+
         tied = "; ".join(f"{ootp_players[idx].player_id}:{ootp_players[idx].display_name}" for idx, _ in tied_best[:10])
+        if len(tied_name_matches) > 1:
+            return MatchResult(
+                bns=bns,
+                ootp=ootp_players[tied_name_matches[0][0]],
+                features=tied_name_matches[0][1],
+                success=False,
+                code="AMBIGUOUS_NAME_TIEBREAK",
+                detail=f"Multiple tied candidates also share normalized first+last at score {best_score}/{5}: {tied}",
+            )
         return MatchResult(
             bns=bns,
             ootp=best_player,
@@ -367,7 +444,6 @@ def hard_match_player(
         code="MATCHED",
         detail=f"Unique best score {best_score}/5 among {len(scored)} candidates",
     )
-
 
 def load_id_map(path: Optional[Path]) -> Dict[str, str]:
     if path is None:
@@ -645,6 +721,23 @@ def audit_row(m: MatchResult, severity: str, code: Optional[str] = None, detail:
     }
 
 
+def audit_unmatched_ootp_clear_row(ootp: PlayerIdentity, original_team_id: str) -> Dict[str, str]:
+    return {
+        "severity": "WARN",
+        "code": "OOTP_UNMATCHED_FRANCHISE_PLAYER_CLEARED",
+        "bns_id": "",
+        "bns_name": "",
+        "ootp_id": ootp.player_id,
+        "ootp_name": ootp.display_name,
+        "match_mode": "ootp_unmatched_cleanup",
+        "match_score": "",
+        "franchise": "",
+        "roster_status": "",
+        "target_team_id": "0",
+        "details": f"OOTP player had team_id={original_team_id} but was not successfully matched to any BNSL player; cleared to team_id=0",
+    }
+
+
 def main(argv: Optional[List[str]] = None) -> int:
     parser = argparse.ArgumentParser(description="Create an OOTP roster import from a BNSL roster export.")
     parser.add_argument("--ootp-export", default="mlb_rosters.csv", type=Path)
@@ -657,6 +750,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser.add_argument("--use-id-map", action="store_true", default=USE_ID_MAP)
     parser.add_argument("--match-threshold", default=MATCH_THRESHOLD, type=int)
     parser.add_argument("--dry-run", action="store_true", help="write map/audit only; do not write updated OOTP import")
+    parser.add_argument("--no-clear-unmatched-franchised", dest="clear_unmatched_franchised", action="store_false", default=True, help="do not clear OOTP players with team_id>0 who were not matched to BNSL")
     args = parser.parse_args(argv)
 
     ootp_rows = read_csv_rows(args.ootp_export)
@@ -745,8 +839,9 @@ def main(argv: Optional[List[str]] = None) -> int:
                 m.detail = f"OOTP id {m.ootp.player_id} was matched by multiple BNSL players; no update applied"
                 audit.append(audit_row(m, "ERROR"))
 
-    # Apply successful updates.
+    # Apply successful BNSL-driven updates.
     updated_count = 0
+    matched_ootp_ids = {m.ootp.player_id for m in matches if m.success and m.ootp and m.ootp.player_id}
     for m in matches:
         if not (m.success and m.ootp):
             continue
@@ -758,6 +853,23 @@ def main(argv: Optional[List[str]] = None) -> int:
         set_row_value(row, colmap, "options used", m.options_used, width)
         updated_count += 1
 
+    # Cleanup step: remove OOTP players from organizations if BNSL did not claim them.
+    # This happens after successful updates, so BNSL matches remain assigned as requested,
+    # while every still-franchised non-match is moved to team_id=0.
+    cleared_unmatched_count = 0
+    if args.clear_unmatched_franchised:
+        for p in ootp_players:
+            if p.player_id in matched_ootp_ids:
+                continue
+            row_number = p.source_row_number
+            row = ootp_rows[row_number]
+            current_team_id = row_to_ootp_dict(row, colmap, width).get("team_id", "").strip()
+            team_id_int = parse_int(current_team_id, default=0)
+            if team_id_int is not None and team_id_int > 0:
+                set_row_value(row, colmap, "team_id", "0", width)
+                audit.append(audit_unmatched_ootp_clear_row(p, current_team_id))
+                cleared_unmatched_count += 1
+
     write_map(args.id_map_output, matches)
     write_audit(args.audit_output, audit)
     if not args.dry_run:
@@ -767,6 +879,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     print(f"BNSL player rows read: {len(bns_players)}")
     print(f"Parsed MLB franchises from XML: {len(franchises)}")
     print(f"Successful updates applied: {updated_count}")
+    print(f"Unmatched franchised OOTP players cleared: {cleared_unmatched_count}")
     print(f"Audit rows written: {len(audit)} -> {args.audit_output}")
     print(f"ID map written: {args.id_map_output}")
     if not args.dry_run:
