@@ -3,10 +3,14 @@ from __future__ import annotations
 from datetime import date, datetime, time, timezone
 from pathlib import Path
 from typing import Any
+import contextlib
+import csv
+import io
 import json
 import os
 import re
 import sqlite3
+import tempfile
 import unicodedata
 
 from flask import (
@@ -192,6 +196,125 @@ def get_roster_conn() -> sqlite3.Connection:
     conn.create_function("unaccent", 1, _unaccent)
     return conn
 
+
+
+
+def _ootp27_dir() -> Path:
+    """Directory containing fixed OOTP27 input files for the BNSL import."""
+    cfg = current_app.config.get("OOTP27_DIR") or current_app.config.get("BNSL_OOTP27_DIR")
+    if cfg:
+        return Path(cfg)
+    roster_db = Path(current_app.config["ROSTER_DB_PATH"])
+    return roster_db.parent / "ootp27"
+
+
+def _require_ootp_input(path: Path, label: str) -> None:
+    if not path.exists():
+        raise FileNotFoundError(f"{label} not found at {path}")
+    if not path.is_file():
+        raise FileNotFoundError(f"{label} is not a regular file: {path}")
+
+
+def _write_roster_players_export_csv(output_path: Path) -> dict[str, Any]:
+    """
+    Write the same raw roster_players CSV produced by the roster app's
+    /roster/export.csv endpoint, but to a server-side temporary path.
+    """
+    conn = get_roster_conn()
+    try:
+        try:
+            from roster_app import ensure_roster_identifier_columns
+            ensure_roster_identifier_columns(conn)
+            conn.commit()
+        except Exception:
+            current_app.logger.exception("Could not ensure roster identifier columns before OOTP export")
+            raise
+
+        cur = conn.cursor()
+        cur.execute("PRAGMA table_info(roster_players)")
+        columns = [row[1] for row in cur.fetchall()]
+        if not columns:
+            raise RuntimeError("roster_players table was not found in roster.db")
+
+        order_clause = " ORDER BY id" if "id" in columns else ""
+        cur.execute(f"SELECT * FROM roster_players{order_clause}")
+        rows = cur.fetchall()
+
+        with output_path.open("w", newline="", encoding="utf-8") as f:
+            writer = csv.writer(f)
+            writer.writerow(columns)
+            for row in rows:
+                writer.writerow([row[col] for col in columns])
+
+        return {"row_count": len(rows), "columns": columns}
+    finally:
+        conn.close()
+
+
+def _build_bnsl_ootp_import_download() -> dict[str, Any]:
+    """Run bnsl_ootp_roster_import.py from fixed server-side inputs."""
+    ootp_dir = _ootp27_dir()
+    input_id_map = ootp_dir / "bns_ootp_id_map.csv"
+    ootp_export = ootp_dir / "mlb_rosters.csv"
+    league_structure = ootp_dir / "league_structure.xml"
+
+    _require_ootp_input(input_id_map, "BNS/OOTP id map")
+    _require_ootp_input(ootp_export, "OOTP roster export")
+    _require_ootp_input(league_structure, "OOTP league structure XML")
+
+    try:
+        from bnsl_ootp_roster_import import main as ootp_import_main
+    except Exception as exc:
+        raise RuntimeError(
+            "Could not import bnsl_ootp_roster_import.py. "
+            "Add that script to the same GitHub repo/deploy as admin_app.py."
+        ) from exc
+
+    with tempfile.TemporaryDirectory(prefix="bnsl_ootp_import_") as tmpdir_text:
+        tmpdir = Path(tmpdir_text)
+        bnsl_export = tmpdir / "roster_players.csv"
+        output_csv = tmpdir / "ootp_player_import_updated.csv"
+        id_map_output = tmpdir / "bns_ootp_id_map_generated.csv"
+        audit_output = tmpdir / "bns_ootp_audit_report.csv"
+
+        export_info = _write_roster_players_export_csv(bnsl_export)
+
+        argv = [
+            "--use-id-map",
+            "--input-id-map", str(input_id_map),
+            "--ootp-export", str(ootp_export),
+            "--bnsl-export", str(bnsl_export),
+            "--league-structure", str(league_structure),
+            "--output", str(output_csv),
+            "--id-map-output", str(id_map_output),
+            "--audit-output", str(audit_output),
+        ]
+
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+        with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+            return_code = ootp_import_main(argv)
+
+        if return_code not in (0, None):
+            raise RuntimeError(f"BNSL→OOTP importer exited with code {return_code}: {stderr.getvalue() or stdout.getvalue()}")
+        if not output_csv.exists():
+            raise RuntimeError("BNSL→OOTP importer finished but did not create the OOTP import CSV")
+
+        audit_rows = 0
+        if audit_output.exists():
+            with audit_output.open("r", newline="", encoding="utf-8", errors="replace") as f:
+                audit_rows = max(sum(1 for _ in f) - 1, 0)
+
+        stamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+        return {
+            "filename": f"ootp_player_import_updated_{stamp}.csv",
+            "data": output_csv.read_bytes(),
+            "row_count": export_info["row_count"],
+            "audit_rows": audit_rows,
+            "stdout": stdout.getvalue(),
+            "stderr": stderr.getvalue(),
+            "ootp_dir": str(ootp_dir),
+        }
 
 def get_draft_conn() -> sqlite3.Connection:
     conn = sqlite3.connect(current_app.config["DRAFT_DB_PATH"], timeout=30)
@@ -1041,6 +1164,14 @@ ADMIN_HTML = """
         </div>
 
         <div class="card">
+          <h2>OOTP27 Roster Import</h2>
+          <p class="muted">Builds an OOTP player import CSV from the live <b>roster.db</b> table plus the fixed files in <b>{{ ootp27_dir }}</b>: <code>bns_ootp_id_map.csv</code>, <code>mlb_rosters.csv</code>, and <code>league_structure.xml</code>.</p>
+          <form method="post" action="generate-ootp-import" onsubmit="return confirm('Generate a fresh OOTP import CSV from the current roster.db?');">
+            <button class="btn primary" type="submit">Download BNSL → OOTP import CSV</button>
+          </form>
+        </div>
+
+        <div class="card">
           <h2>Set QO</h2>
           <p class="muted">Creates a standard one-year qualifying-offer FA bid at <b>$22.773M</b>. If FA is locked, the bid is created immediately but will not start its 48-hour clock until FA is unlocked.</p>
           <form method="post" action="set-qo">
@@ -1524,6 +1655,8 @@ def index():
         today=today,
         roster_locked=_is_roster_locked() if is_admin_authed() else False,
         fa_locked=_fa_locked() if is_admin_authed() else False,
+        ootp27_dir=str(_ootp27_dir()) if is_admin_authed() else "",
+
         draft_time_choices=_draft_pick_choices() if is_admin_authed() else {"draft": [], "rulev": []},
         blacklisted_fa_players=_active_blacklisted_fa_players() if is_admin_authed() else [],
         logs=admin_logs() if is_admin_authed() else [],
@@ -1776,6 +1909,33 @@ def sync_fa_roster():
         current_app.logger.exception("Manual FA roster sync failed")
         return redirect_with(error=str(e))
 
+
+
+
+@admin_bp.post("/generate-ootp-import")
+def generate_ootp_import():
+    require_admin()
+    try:
+        result = _build_bnsl_ootp_import_download()
+        log_action(
+            "generate_ootp_import",
+            f"Generated OOTP import CSV from {result['row_count']} roster rows; audit rows: {result['audit_rows']}",
+            {
+                "row_count": result["row_count"],
+                "audit_rows": result["audit_rows"],
+                "ootp_dir": result["ootp_dir"],
+                "stdout": result["stdout"][-4000:],
+                "stderr": result["stderr"][-4000:],
+            },
+        )
+        return current_app.response_class(
+            result["data"],
+            mimetype="text/csv",
+            headers={"Content-Disposition": f"attachment; filename={result['filename']}"},
+        )
+    except Exception as e:
+        current_app.logger.exception("Admin BNSL→OOTP import generation failed")
+        return redirect_with(error=str(e))
 
 @admin_bp.post("/set-qo")
 def set_qo():
