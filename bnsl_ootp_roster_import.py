@@ -11,7 +11,7 @@ Inputs
 Outputs
 -------
 1) Updated OOTP player import CSV with team_id, ML service, 40-man service,
-   and options used overwritten for successfully matched BNSL players.
+   options used, and contract salary years overwritten for successfully matched BNSL players.
 2) BNSL id -> OOTP id mapping CSV for future runs.
 3) Audit CSV listing low-quality matches, ambiguous matches, duplicate targets,
    missing franchises/affiliates, bad service/options inputs, and OOTP players
@@ -48,6 +48,8 @@ from typing import Dict, Iterable, List, Optional, Tuple
 USE_ID_MAP = False
 MATCH_THRESHOLD = 3
 SERVICE_DAYS_PER_YEAR = 172
+CURRENT_YEAR = 2026
+MAX_CONTRACT_YEARS = 10
 
 # BNSL abbreviations that differ from OOTP/XML abbreviations.
 FRANCHISE_ALIASES = {
@@ -267,6 +269,9 @@ class MatchResult:
     target_team_id: str = ""
     service_days: str = ""
     options_used: str = ""
+    contract_salary: str = ""
+    contract_years_set: str = ""
+    contract_detail: str = ""
 
     @property
     def score(self) -> int:
@@ -569,6 +574,120 @@ def options_remaining_to_used(value: str) -> Tuple[Optional[int], Optional[str]]
     return used, None
 
 
+
+def parse_money_to_int_string(value: str) -> Tuple[Optional[str], Optional[str]]:
+    """Convert BNSL salary text to an OOTP-friendly integer-dollar string."""
+    raw = (value or "").strip()
+    if raw == "":
+        return "0", "blank salary; using 0"
+    cleaned = raw.replace("$", "").replace(",", "").strip()
+    try:
+        amount = float(cleaned)
+    except ValueError:
+        return None, f"invalid salary {raw!r}"
+    if amount < 0:
+        return None, f"negative salary {raw!r}"
+    # BNSL salaries are dollar values but often exported as e.g. 4000000.0.
+    return str(int(round(amount))), None
+
+
+def contract_type_for_bns(bns: PlayerIdentity) -> str:
+    return (bns.row.get("contract_type") or "").strip().upper()
+
+
+def is_active_bns_roster(bns: PlayerIdentity) -> bool:
+    roster_status = (bns.row.get("roster_status") or "").strip().lower()
+    active_roster = (bns.row.get("active_roster") or "").strip()
+    return active_roster == "1" or roster_status == "active"
+
+
+def contract_years_to_set_for_bns(
+    bns: PlayerIdentity,
+    current_year: int,
+    max_contract_years: int = MAX_CONTRACT_YEARS,
+) -> Tuple[int, Optional[str]]:
+    """Return how many contract yN columns should be filled from BNSL salary.
+
+    Rules requested:
+      * Active roster: all contract types get salary. R/A get y1 only; FA/X are fixed through expiration.
+      * Reserve/40-man: only A/FA/X get salary. R gets no salary columns.
+      * Unrostered: no salary columns.
+      * FA/X: y1 is salary; y2+ are salary through contract_expires relative to current_year.
+    """
+    row = bns.row
+    ctype = contract_type_for_bns(bns)
+    roster_status = (row.get("roster_status") or "").strip().lower()
+    active = is_active_bns_roster(bns)
+    franchised = bool((row.get("franchise") or "").strip())
+
+    if not franchised:
+        return 0, None
+
+    if active:
+        should_have_salary = bool(ctype)
+    elif roster_status in {"reserve", "40-man"}:
+        should_have_salary = ctype in {"A", "FA", "X"}
+    else:
+        return 0, None
+
+    if not should_have_salary:
+        return 0, None
+
+    if ctype in {"FA", "X"}:
+        raw_expires = (row.get("contract_expires") or "").strip()
+        if raw_expires == "":
+            return 1, None
+        expires = parse_int(raw_expires)
+        if expires is None:
+            return 1, f"FA/X contract has invalid contract_expires {raw_expires!r}; using y1 only"
+        years = expires - current_year + 1
+        if years < 1:
+            return 1, f"FA/X contract_expires {expires} is before/current-year window; using y1 only"
+        if years > max_contract_years:
+            return max_contract_years, f"FA/X contract length {years} exceeds y{max_contract_years}; truncated"
+        return years, None
+
+    # A contracts, and R contracts on the active roster, only need current-year salary.
+    return 1, None
+
+
+def clear_contract_columns(row: List[str], colmap: Dict[str, int], width: int) -> None:
+    for year_idx in range(1, MAX_CONTRACT_YEARS + 1):
+        key = f"contract y{year_idx}"
+        if key in colmap:
+            set_row_value(row, colmap, key, "0", width)
+    current_year_key = "contract current year (0 = first year)"
+    if current_year_key in colmap:
+        set_row_value(row, colmap, current_year_key, "0", width)
+
+
+def apply_contract_columns(
+    row: List[str],
+    colmap: Dict[str, int],
+    width: int,
+    bns: PlayerIdentity,
+    current_year: int,
+) -> Tuple[str, str, Optional[str]]:
+    """Clear then apply BNSL contract salary years. Returns salary, years_set, warning/error detail."""
+    clear_contract_columns(row, colmap, width)
+    years_to_set, years_detail = contract_years_to_set_for_bns(bns, current_year)
+    if years_to_set <= 0:
+        return "", "0", years_detail
+
+    salary, salary_problem = parse_money_to_int_string(bns.row.get("salary", ""))
+    if salary is None:
+        return "", "0", salary_problem
+
+    for year_idx in range(1, min(years_to_set, MAX_CONTRACT_YEARS) + 1):
+        set_row_value(row, colmap, f"contract y{year_idx}", salary, width)
+
+    details = []
+    if salary_problem:
+        details.append(salary_problem)
+    if years_detail:
+        details.append(years_detail)
+    return salary, str(years_to_set), "; ".join(details) if details else None
+
 def target_team_for_bns(bns: PlayerIdentity, franchises: Dict[str, Dict[str, object]]) -> Tuple[Optional[str], Optional[str]]:
     row = bns.row
     franchise_raw = (row.get("franchise") or "").strip()
@@ -666,7 +785,7 @@ def write_map(path: Path, matches: List[MatchResult]) -> None:
         "bns_last", "ootp_last", "bns_bbref_id", "ootp_bbref_id", "bns_bbrefminors_id",
         "ootp_bbrefminors_id", "first_match", "last_match", "dob_match", "bbref_id_match",
         "bbrefminors_id_match", "bns_franchise", "bns_roster_status", "target_team_id",
-        "service_days", "options_used", "details",
+        "service_days", "options_used", "contract_salary", "contract_years_set", "contract_detail", "details",
     ]
     with path.open("w", newline="", encoding="utf-8") as f:
         writer = csv.DictWriter(f, fieldnames=fields)
@@ -697,6 +816,9 @@ def write_map(path: Path, matches: List[MatchResult]) -> None:
                 "target_team_id": m.target_team_id,
                 "service_days": m.service_days,
                 "options_used": m.options_used,
+                "contract_salary": m.contract_salary,
+                "contract_years_set": m.contract_years_set,
+                "contract_detail": m.contract_detail,
                 "details": m.detail,
             }
             row.update(m.features.as_dict())
@@ -734,9 +856,18 @@ def audit_unmatched_ootp_clear_row(ootp: PlayerIdentity, original_team_id: str) 
         "franchise": "",
         "roster_status": "",
         "target_team_id": "0",
-        "details": f"OOTP player had team_id={original_team_id} but was not successfully matched to any BNSL player; cleared to team_id=0",
+        "details": f"OOTP player had team_id={original_team_id} but was not successfully matched to any BNSL player; cleared to team_id=0 and contract salary years cleared",
     }
 
+
+
+def is_auditworthy_contract_detail(detail: str) -> bool:
+    lowered = (detail or "").lower()
+    return any(token in lowered for token in ["invalid", "negative", "truncated", "before/current-year"])
+
+
+def audit_contract_issue_row(m: MatchResult, detail: str) -> Dict[str, str]:
+    return audit_row(m, "WARN", code="CONTRACT_INFO_NOTE", detail=detail)
 
 def main(argv: Optional[List[str]] = None) -> int:
     parser = argparse.ArgumentParser(description="Create an OOTP roster import from a BNSL roster export.")
@@ -749,6 +880,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser.add_argument("--input-id-map", default=None, type=Path)
     parser.add_argument("--use-id-map", action="store_true", default=USE_ID_MAP)
     parser.add_argument("--match-threshold", default=MATCH_THRESHOLD, type=int)
+    parser.add_argument("--current-year", default=CURRENT_YEAR, type=int, help="current contract year; default 2026")
     parser.add_argument("--dry-run", action="store_true", help="write map/audit only; do not write updated OOTP import")
     parser.add_argument("--no-clear-unmatched-franchised", dest="clear_unmatched_franchised", action="store_false", default=True, help="do not clear OOTP players with team_id>0 who were not matched to BNSL")
     args = parser.parse_args(argv)
@@ -759,13 +891,14 @@ def main(argv: Optional[List[str]] = None) -> int:
     required_cols = [
         "id", "team_id", "lastname", "firstname", "dayob", "monthob", "yearob",
         "ml service", "40 man roster service", "options used", "bbref_id", "bbrefminors_id",
-    ]
+        "contract current year (0 = first year)",
+    ] + [f"contract y{i}" for i in range(1, MAX_CONTRACT_YEARS + 1)]
     missing = [c for c in required_cols if c not in colmap]
     if missing:
         raise RuntimeError(f"OOTP export missing required columns: {missing}")
 
     _, bns_rows = read_dict_csv(args.bnsl_export)
-    for col in ["id", "name", "date_of_birth", "franchise", "roster_status", "service_time", "options_remaining"]:
+    for col in ["id", "name", "date_of_birth", "franchise", "roster_status", "active_roster", "service_time", "options_remaining", "contract_type", "salary", "contract_expires"]:
         if bns_rows and col not in bns_rows[0]:
             raise RuntimeError(f"BNSL export missing required column: {col}")
 
@@ -803,6 +936,9 @@ def main(argv: Optional[List[str]] = None) -> int:
         team_id, team_problem = target_team_for_bns(bns, franchises)
         service_days, service_problem = service_years_to_days(bns.row.get("service_time", ""))
         options_used, options_problem = options_remaining_to_used(bns.row.get("options_remaining", ""))
+        if contract_type_for_bns(bns) in {"FA", "X"}:
+            # Requested override: FA/X players should import as having all options used.
+            options_used = 3
 
         if team_id is not None:
             m.target_team_id = str(team_id)
@@ -851,6 +987,13 @@ def main(argv: Optional[List[str]] = None) -> int:
         set_row_value(row, colmap, "ml service", m.service_days, width)
         set_row_value(row, colmap, "40 man roster service", m.service_days, width)
         set_row_value(row, colmap, "options used", m.options_used, width)
+        contract_salary, contract_years_set, contract_problem = apply_contract_columns(row, colmap, width, m.bns, args.current_year)
+        m.contract_salary = contract_salary
+        m.contract_years_set = contract_years_set
+        if contract_problem:
+            m.contract_detail = contract_problem
+            if is_auditworthy_contract_detail(contract_problem):
+                audit.append(audit_contract_issue_row(m, contract_problem))
         updated_count += 1
 
     # Cleanup step: remove OOTP players from organizations if BNSL did not claim them.
@@ -867,6 +1010,7 @@ def main(argv: Optional[List[str]] = None) -> int:
             team_id_int = parse_int(current_team_id, default=0)
             if team_id_int is not None and team_id_int > 0:
                 set_row_value(row, colmap, "team_id", "0", width)
+                clear_contract_columns(row, colmap, width)
                 audit.append(audit_unmatched_ootp_clear_row(p, current_team_id))
                 cleared_unmatched_count += 1
 
