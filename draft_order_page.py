@@ -1,8 +1,9 @@
 # draft_order_page.py
 from __future__ import annotations
 import math
+import os
 import sqlite3
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta, timezone, date
 from typing import List, Dict, Any, Optional
 from ui_skin import BNSL_GAME_CSS
 from flask import Blueprint, current_app, request, jsonify, render_template_string
@@ -13,7 +14,21 @@ EASTERN = ZoneInfo("America/New_York")
 
 
 # ===== Time rules =====
-DRAFT_START = datetime(2025, 10, 20, 9, 0, 0, tzinfo=EASTERN)
+DRAFT_YEAR = int(os.environ.get("BNSL_DRAFT_YEAR", "2026"))
+
+def _load_draft_start() -> datetime:
+    raw = os.environ.get("BNSL_DRAFT_START")
+    if raw:
+        try:
+            dt = datetime.fromisoformat(raw)
+            if dt.tzinfo is None:
+                return dt.replace(tzinfo=EASTERN)
+            return dt.astimezone(EASTERN)
+        except Exception:
+            pass
+    return datetime(DRAFT_YEAR, 10, 20, 9, 0, 0, tzinfo=EASTERN)
+
+DRAFT_START = _load_draft_start()
 
 # Draft window: 9am..6pm inclusive (10 normal picks/day), then the "end-of-day miss slot" at 7pm
 DAY_FIRST_HOUR = 9
@@ -43,11 +58,12 @@ __BNSL_GAME_CSS__
   <div class="page">
     <div class="brand">
       <div>
-        <h1>DRAFT ORDER</h1>
+        <h1>{{ draft_year }} DRAFT ORDER</h1>
         <div class="sub">Times shown in ET • Missed picks roll to the end of the day (7:00 PM). If that is missed, they roll to the end of the next day, and so on.</div>
       </div>
       <div class="right">
         <a class="btn" href="/draft/">← Back</a>
+        <a class="btn" href="/draft/archive">Archived Drafts</a>
         <a class="btn" href="/draft/pick-stock">Future Picks</a>
         <span class="badge">SCHEDULE</span>
       </div>
@@ -482,7 +498,7 @@ def get_current_pick_info(now: Optional[datetime] = None) -> Optional[Dict[str, 
         return None
 
     rec = picks[best_idx]
-    lbl = f"{rec['round']}.{rec['pick']}"
+    lbl = rec["label"] or f"{rec['round']}.{rec['pick']}"
     sched = (scheduled_time.get(best_idx, designated[best_idx])).astimezone(EASTERN)
 
     if best_idx + 1 < len(picks):
@@ -676,7 +692,7 @@ def set_pick_and_following_times(round_num: int, pick_num: int, start_dt: dateti
     conn.close()
     return {
         "draft_kind": "draft",
-        "draft_name": "Amateur Draft",
+        "draft_name": f"{DRAFT_YEAR} Amateur Draft",
         "round": int(round_num),
         "pick": int(pick_num),
         "pick_label": target["label"] or f"{int(round_num)}.{int(pick_num):02d}",
@@ -730,7 +746,7 @@ def mark_draft_pick_skipped(round_num: int, pick_num: int, when: Optional[dateti
     conn.close()
     return {
         "draft_kind": "draft",
-        "draft_name": "Amateur Draft",
+        "draft_name": f"{DRAFT_YEAR} Amateur Draft",
         "round": int(round_num),
         "pick": int(pick_num),
         "pick_label": target["label"] or f"{int(round_num)}.{int(pick_num):02d}",
@@ -784,7 +800,7 @@ def order_page():
         rows=page_rows,
         page=page, per=per, pages=pages,
         prev_page=page - 1, next_page=page + 1,
-        teams=teams, team=team
+        teams=teams, team=team, draft_year=DRAFT_YEAR
     )
 
 
@@ -818,6 +834,7 @@ def api_order():
     start = (page - 1) * per
     end = start + per
     return jsonify({
+        "draft_year": DRAFT_YEAR,
         "page": page,
         "per": per,
         "pages": pages,
@@ -827,6 +844,185 @@ def api_order():
         "teams": get_all_teams(),
     })
 
+
+
+
+# --------- Archived completed draft routes ----------
+# The active draft_order table should represent the current draft.  Completed
+# drafts are snapshotted here before the active player pool is replaced.
+
+ARCHIVE_HTML = r"""
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Archived Drafts</title>
+  __BNSL_GAME_CSS__
+  <style>
+    .controls { display:flex; gap:12px; align-items:center; flex-wrap:wrap; margin: 12px 0; }
+  </style>
+</head>
+<body>
+  <div class="page">
+    <div class="brand">
+      <div>
+        <h1>ARCHIVED DRAFTS</h1>
+        <div class="sub">Completed draft results preserved separately from the current active draft pool.</div>
+      </div>
+      <div class="right">
+        <a class="btn" href="/draft/order">← Back to {{ draft_year }} Order</a>
+        <span class="badge">ARCHIVE</span>
+      </div>
+    </div>
+
+    <div class="panel pad">
+      <form class="controls" method="get" action="/draft/archive">
+        <label class="pill" style="background: rgba(0,0,0,.16);">
+          <span style="margin-right:8px;">Year:</span>
+          <select name="year" onchange="this.form.submit()">
+            <option value="">All years</option>
+            {% for y in years %}
+              <option value="{{ y }}" {% if selected_year == y|string %}selected{% endif %}>{{ y }}</option>
+            {% endfor %}
+          </select>
+        </label>
+      </form>
+
+      <hr class="sep"/>
+
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th style="width:8%;">Year</th>
+              <th style="width:10%;">Pick</th>
+              <th style="width:22%;">Team</th>
+              <th style="width:28%;">Player</th>
+              <th style="width:8%;">Pos</th>
+              <th style="width:12%;">DOB</th>
+              <th style="width:12%;">Drafted At</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for row in rows %}
+            <tr class="row-hover">
+              <td><b>{{ row.draft_year }}</b></td>
+              <td><b>{{ row.label or (row.round|string ~ '.' ~ row.pick|string) }}</b></td>
+              <td>{{ row.team }}</td>
+              <td>{{ row.player_name or '—' }}</td>
+              <td>{{ row.player_position or '' }}</td>
+              <td>{{ row.player_dob or '' }}</td>
+              <td class="muted">{{ row.drafted_at or '' }}</td>
+            </tr>
+            {% endfor %}
+            {% if not rows %}
+              <tr><td colspan="7" class="muted">No archived draft rows found yet. Run the draft-pool migration script with --archive-year 2025 before replacing the active player pool.</td></tr>
+            {% endif %}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+</body>
+</html>
+""".replace("__BNSL_GAME_CSS__", BNSL_GAME_CSS)
+
+
+def _ensure_draft_archive_tables(conn: sqlite3.Connection) -> None:
+    cur = conn.cursor()
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS draft_archive_meta (
+            draft_year INTEGER PRIMARY KEY,
+            archived_at TEXT NOT NULL,
+            picks_archived INTEGER NOT NULL DEFAULT 0,
+            players_archived INTEGER NOT NULL DEFAULT 0,
+            note TEXT
+        )
+    """)
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS draft_pick_archive (
+            draft_year INTEGER NOT NULL,
+            original_draft_order_id INTEGER NOT NULL,
+            round INTEGER NOT NULL,
+            pick INTEGER NOT NULL,
+            label TEXT,
+            team TEXT NOT NULL,
+            player_id INTEGER,
+            drafted_at TEXT,
+            player_name TEXT,
+            player_dob TEXT,
+            player_position TEXT,
+            player_mlbamid INTEGER,
+            player_first TEXT,
+            player_last TEXT,
+            player_bats TEXT,
+            player_throws TEXT,
+            player_mlb_org TEXT,
+            fg_30 INTEGER,
+            fg_fv INTEGER,
+            mlb_30 INTEGER,
+            mlb_fv INTEGER,
+            fg100 INTEGER,
+            mlb100 INTEGER,
+            archived_at TEXT NOT NULL,
+            PRIMARY KEY (draft_year, original_draft_order_id)
+        )
+    """)
+    conn.commit()
+
+
+def _archive_years() -> list[int]:
+    conn = get_conn()
+    _ensure_draft_archive_tables(conn)
+    cur = conn.cursor()
+    cur.execute("SELECT DISTINCT draft_year FROM draft_pick_archive ORDER BY draft_year DESC")
+    years = [int(r[0]) for r in cur.fetchall()]
+    conn.close()
+    return years
+
+
+def _query_draft_archive(year: str = ""):
+    conn = get_conn()
+    _ensure_draft_archive_tables(conn)
+    cur = conn.cursor()
+    params = []
+    where = ""
+    if year:
+        where = "WHERE draft_year = ?"
+        params.append(int(year))
+    cur.execute(
+        f"""
+        SELECT *
+        FROM draft_pick_archive
+        {where}
+        ORDER BY draft_year DESC, round ASC, pick ASC
+        """,
+        params,
+    )
+    rows = cur.fetchall()
+    conn.close()
+    return rows
+
+
+@order_bp.get("/archive")
+def archived_drafts_page():
+    selected_year = (request.args.get("year") or "").strip()
+    rows = _query_draft_archive(selected_year)
+    return render_template_string(
+        ARCHIVE_HTML,
+        rows=rows,
+        years=_archive_years(),
+        selected_year=selected_year,
+        draft_year=DRAFT_YEAR,
+    )
+
+
+@order_bp.get("/api/archive")
+def api_archived_drafts():
+    selected_year = (request.args.get("year") or "").strip()
+    rows = [dict(r) for r in _query_draft_archive(selected_year)]
+    return jsonify({"rows": rows, "years": _archive_years()})
 
 
 # --------- Future draft-pick stock routes ----------
@@ -852,10 +1048,10 @@ PICK_STOCK_HTML = r"""
     <div class="brand">
       <div>
         <h1>FUTURE DRAFT PICKS</h1>
-        <div class="sub">Current 2026+ 12-round draft-pick stock reconstructed from the trade log.</div>
+        <div class="sub">Current {{ next_pick_stock_year }}+ 12-round draft-pick stock reconstructed from the trade log.</div>
       </div>
       <div class="right">
-        <a class="btn" href="/draft/order">← Back to 2025 Order</a>
+        <a class="btn" href="/draft/order">← Back to {{ draft_year }} Order</a>
         <a class="btn" href="/trades/">Trades</a>
         <span class="badge">PICK STOCK</span>
       </div>
@@ -1012,6 +1208,8 @@ def future_pick_stock_page():
         selected_owner=selected_owner,
         display_team=display_team,
         team_label=team_label,
+        draft_year=DRAFT_YEAR,
+        next_pick_stock_year=DRAFT_YEAR + 1,
     )
 
 

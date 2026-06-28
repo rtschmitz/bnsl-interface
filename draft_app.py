@@ -267,7 +267,15 @@ APP_DIR = Path(__file__).resolve().parent
 DB_PATH = Path(os.environ.get("DRAFT_DB_PATH") or os.environ.get("DB_PATH") or str(db_path("draft.db")))
 DB_PATH.parent.mkdir(parents=True, exist_ok=True)
 
-PLAYERS_CSV = Path(os.environ.get("BNSL_PLAYERS_CSV", str(input_path("players.csv"))))
+_DEFAULT_PLAYERS_CSV = Path(input_path("players.csv"))
+_DEFAULT_WITH_MLB_FA_CSV = Path(input_path("With MLB FA.csv"))
+
+# Prefer the explicit env var. Otherwise, support the new 2026 pool filename while
+# retaining the old players.csv fallback for older deploys.
+PLAYERS_CSV = Path(
+    os.environ.get("BNSL_PLAYERS_CSV")
+    or (_DEFAULT_WITH_MLB_FA_CSV if _DEFAULT_WITH_MLB_FA_CSV.exists() else _DEFAULT_PLAYERS_CSV)
+)
 DRAFT_ORDER_CSV = Path(os.environ.get("BNSL_DRAFT_ORDER_CSV", str(input_path("draft_order.csv"))))
 
 from flask import Blueprint
@@ -878,12 +886,87 @@ def ensure_player_unique_indexes():
     conn.close()
 
 
+def _csv_value(row: dict, *names: str) -> str:
+    """Case/underscore/punctuation tolerant CSV lookup."""
+    norm = {
+        str(k).strip().lower().replace("_", " ").replace(".", ""): v
+        for k, v in (row or {}).items()
+    }
+    for name in names:
+        key = str(name).strip().lower().replace("_", " ").replace(".", "")
+        if key in norm and norm[key] is not None:
+            return str(norm[key]).strip()
+    return ""
+
+
+def _int_or_none(x):
+    try:
+        s = str(x).strip()
+        if not s or s.lower() in {"nan", "none", "null"}:
+            return None
+        return int(float(s))
+    except Exception:
+        return None
+
+
+def _parse_playerlist_row(row: dict) -> dict | None:
+    """Parse either the old playerlist.csv format or the new 'With MLB FA.csv' format."""
+    mlbamid = _int_or_none(_csv_value(row, "MLBAMID", "mlbam_id", "mlbamid"))
+    first = _csv_value(row, "First")
+    last = _csv_value(row, "Last")
+    name = (
+        _csv_value(row, "Name", "Player name", "Player")
+        or _csv_value(row, "bnsl_name")
+        or f"{first} {last}".strip()
+    )
+    if not name:
+        return None
+
+    dob_m = _int_or_none(_csv_value(row, "DOB_Month", "Month"))
+    dob_d = _int_or_none(_csv_value(row, "DOB_Day", "Day"))
+    dob_y = _int_or_none(_csv_value(row, "DOB_Year", "Year"))
+    dob = None
+    if dob_y and dob_m and dob_d:
+        dob = f"{dob_y:04d}-{dob_m:02d}-{dob_d:02d}"
+    else:
+        dob = _csv_value(row, "DOB", "Date of birth") or None
+
+    return {
+        "mlbamid": mlbamid if mlbamid and mlbamid > 0 else None,
+        "name": name,
+        "first": first,
+        "last": last,
+        "dob": dob,
+        "position": (_csv_value(row, "Position", "Pos") or "").upper(),
+        "franchise": "",
+        "eligible": 1,
+        "bats": _csv_value(row, "Bats", "B"),
+        "throws": _csv_value(row, "Throws", "T"),
+        "dob_month": dob_m,
+        "dob_day": dob_d,
+        "dob_year": dob_y,
+        "mlb_org": _csv_value(row, "MLB org", "MLB org.", "MLB_org", "MLB Organization"),
+        "fg_30": _int_or_none(_csv_value(row, "FG_30", "FG30")),
+        "fg_fv": _int_or_none(_csv_value(row, "FG_FV", "FGFV")),
+        "mlb_30": _int_or_none(_csv_value(row, "MLB_30", "MLB30")),
+        "mlb_fv": _int_or_none(_csv_value(row, "MLB_FV", "MLBFV")),
+        "fg100": _int_or_none(_csv_value(row, "FG100")),
+        "mlb100": _int_or_none(_csv_value(row, "MLB100")),
+    }
+
+
 def import_players_from_playerlist(path: Path):
     """
-    Idempotent import w/o SQLite UPSERT:
-      - If MLBAMID > 0 -> upsert on mlbamid
-      - Else           -> upsert on (name, dob)
-    Never overwrites an existing franchise or eligible.
+    Idempotent import for the draft player pool.
+
+    Supports both:
+      - old playerlist.csv columns: MLBAMID, Name, Position, DOB_Month, ...
+      - new With MLB FA.csv columns: mlbam_id, Player, First, Last, Pos, B, T, MLB_org, Year/Month/Day
+
+    This import is intentionally conservative on an existing DB: it updates biographical
+    fields but does not clobber franchise or eligible. For a new draft year, use the
+    migration script to archive the completed draft, clear old active picks, and replace
+    the active pool in one transaction.
     """
     if not path.exists():
         return
@@ -891,22 +974,20 @@ def import_players_from_playerlist(path: Path):
     cur = conn.cursor()
 
     def safe_update(existing_row, values):
-        # preserve franchise/eligible if already set
-        keep_franchise = existing_row["franchise"]
-        keep_eligible  = int(existing_row["eligible"] or 0)
-
+        keep_eligible = int(existing_row["eligible"] or 0)
         cur.execute("""
             UPDATE players
                SET name      = ?,
                    dob       = ?,
                    position  = ?,
+                   first     = ?,
+                   last      = ?,
                    bats      = ?,
                    throws    = ?,
                    dob_month = ?,
                    dob_day   = ?,
                    dob_year  = ?,
                    mlb_org   = ?,
-                   franchise = COALESCE(NULLIF(?, ''), franchise),
                    eligible  = ?,
                    fg_30     = ?,
                    fg_fv     = ?,
@@ -917,82 +998,24 @@ def import_players_from_playerlist(path: Path):
              WHERE id = ?
         """, (
             values["name"], values["dob"], values["position"],
-            values["bats"], values["throws"],
+            values["first"], values["last"], values["bats"], values["throws"],
             values["dob_month"], values["dob_day"], values["dob_year"], values["mlb_org"],
-            "",                    # don't clobber franchise during import
-            keep_eligible,         # preserve eligible flag
+            keep_eligible,
             values["fg_30"], values["fg_fv"], values["mlb_30"], values["mlb_fv"], values["fg100"], values["mlb100"],
             existing_row["id"],
         ))
 
-    with path.open(newline='', encoding='utf-8') as f:
-        r = csv.DictReader(f)
-        for row in r:
-            mlbamid = int(row.get("MLBAMID") or 0)
-            name    = (row.get("Name") or "").strip()
-            bats    = (row.get("Bats") or "").strip()
-            throws  = (row.get("Throws") or "").strip()
-            pos     = (row.get("Position") or "").strip()
-            dob_m   = int(row.get("DOB_Month") or 0)
-            dob_d   = int(row.get("DOB_Day") or 0)
-            dob_y   = int(row.get("DOB_Year") or 0)
-            org     = (row.get("MLB org.") or "").strip()
-            fg_30  = row.get("FG_30")   or row.get("FG30")   or ""
-            fg_fv  = row.get("FG_FV")   or row.get("FGFV")   or ""
-            mlb_30 = row.get("MLB_30")  or row.get("MLB30")  or ""
-            mlb_fv = row.get("MLB_FV")  or row.get("MLBFV")  or ""
-            fg100  = row.get("FG100")   or ""
-            mlb100 = row.get("MLB100")  or ""
-
-            def _int_or_none(x):
-                try:
-                    x = str(x).strip()
-                    return int(x) if x != "" else None
-                except Exception:
-                    return None
-
-            dob = ""
-            if dob_y and dob_m and dob_d:
-                dob = f"{dob_y:04d}-{dob_m:02d}-{dob_d:02d}"
-
-            values = {
-                "mlbamid": mlbamid if mlbamid > 0 else None,
-                "name": name,
-                "dob": dob or None,
-                "position": pos,
-                "bats": bats,
-                "throws": throws,
-                "dob_month": dob_m or None,
-                "dob_day": dob_d or None,
-                "dob_year": dob_y or None,
-                "mlb_org": org,
-            }
-            values.update({
-               "fg_30":  _int_or_none(fg_30),
-               "fg_fv":  _int_or_none(fg_fv),
-               "mlb_30": _int_or_none(mlb_30),
-               "mlb_fv": _int_or_none(mlb_fv),
-               "fg100":  _int_or_none(fg100),
-               "mlb100": _int_or_none(mlb100),
-            })
-
+    with path.open(newline='', encoding='utf-8-sig') as f:
+        reader = csv.DictReader(f)
+        for raw in reader:
+            values = _parse_playerlist_row(raw)
+            if not values:
+                continue
+            mlbamid = values["mlbamid"] or 0
             if mlbamid > 0:
-                # Upsert on mlbamid
                 cur.execute("SELECT id, franchise, eligible FROM players WHERE mlbamid = ?", (mlbamid,))
                 existing = cur.fetchone()
-                if existing:
-                    safe_update(existing, values)
-                else:
-                    cur.execute("""
-                        INSERT INTO players
-                          (mlbamid, name, dob, position, franchise, eligible,
-                           bats, throws, dob_month, dob_day, dob_year, mlb_org, fg_30, fg_fv, mlb_30, mlb_fv, fg100, mlb100)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    """, (values["mlbamid"], values["name"], values["dob"], values["position"],
-                          "", 1, values["bats"], values["throws"],
-                          values["dob_month"], values["dob_day"], values["dob_year"], values["mlb_org"],values["fg_30"], values["fg_fv"], values["mlb_30"], values["mlb_fv"], values["fg100"], values["mlb100"]))
             else:
-                # Upsert on (name, dob) when no mlbamid
                 cur.execute("""
                     SELECT id, franchise, eligible FROM players
                      WHERE (mlbamid IS NULL OR mlbamid = 0)
@@ -1000,17 +1023,20 @@ def import_players_from_playerlist(path: Path):
                        AND ((dob IS NULL AND ? IS NULL) OR dob = ?)
                 """, (values["name"], values["dob"], values["dob"]))
                 existing = cur.fetchone()
-                if existing:
-                    safe_update(existing, values)
-                else:
-                    cur.execute("""
-                        INSERT INTO players
-                          (mlbamid, name, dob, position, franchise, eligible,
-                           bats, throws, dob_month, dob_day, dob_year, mlb_org, fg_30, fg_fv, mlb_30, mlb_fv, fg100, mlb100)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    """, (None, values["name"], values["dob"], values["position"],
-                          "", 1, values["bats"], values["throws"],
-                          values["dob_month"], values["dob_day"], values["dob_year"], values["mlb_org"],values["fg_30"], values["fg_fv"], values["mlb_30"], values["mlb_fv"], values["fg100"], values["mlb100"]))
+
+            if existing:
+                safe_update(existing, values)
+            else:
+                cur.execute("""
+                    INSERT INTO players
+                      (mlbamid, name, dob, position, franchise, eligible,
+                       first, last, bats, throws, dob_month, dob_day, dob_year, mlb_org,
+                       fg_30, fg_fv, mlb_30, mlb_fv, fg100, mlb100)
+                    VALUES
+                      (:mlbamid, :name, :dob, :position, :franchise, :eligible,
+                       :first, :last, :bats, :throws, :dob_month, :dob_day, :dob_year, :mlb_org,
+                       :fg_30, :fg_fv, :mlb_30, :mlb_fv, :fg100, :mlb100)
+                """, values)
 
     conn.commit()
     conn.close()
