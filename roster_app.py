@@ -606,6 +606,11 @@ def ensure_roster_identifier_columns(conn: sqlite3.Connection) -> None:
 def row_service_time(row: sqlite3.Row) -> float:
     return as_float(row_value(row, "service_time"), 0.0)
 
+def is_optionless_ra_contract(row: sqlite3.Row) -> bool:
+    contract_type = str(row_value(row, "contract_type", "") or "").strip().upper()
+    return contract_type in {"R", "A"} and as_int(row_value(row, "options_remaining", 0), 0) <= 0
+
+
 
 def normalize_roster_contract_types(conn: sqlite3.Connection) -> None:
     """Promote pre-arb R contracts to arbitration A contracts at 3.000+ service."""
@@ -1576,17 +1581,20 @@ def api_update_player():
     waiver_reason = ""
     should_waive = False
     options_remaining = int(row["options_remaining"] or 0)
+    contract_type = str(row_value(row, "contract_type", "") or "").strip().upper()
+    optionless_ra = contract_type in {"R", "A"} and options_remaining <= 0
     is_rulev_player = bool(int(row_value(row, "rulev_status", 0) or 0))
+
+    if new_status == "40-man" and old_status != "40-man" and optionless_ra:
+        conn.close()
+        return ("R/A-contract players with 0 options remaining cannot be placed on the 40-man roster. Use Active or Reserve.", 409)
 
     if is_rulev_player and old_status == "Active" and new_status != "Active":
         should_waive = True
         waiver_reason = "Rule V player removed from active roster"
-    elif old_status == "Active" and new_status == "40-man" and options_remaining <= 0:
-        should_waive = True
-        waiver_reason = "Out of options: active player sent to minors/40-man"
     elif old_on_40 and not new_on_40:
         should_waive = True
-        waiver_reason = "Removed from 40-man roster"
+        waiver_reason = "Out of options: R/A player sent to reserve" if optionless_ra else "Removed from 40-man roster"
 
     waiver_id = None
     if should_waive:
@@ -1595,7 +1603,7 @@ def api_update_player():
             conn,
             row,
             waived_from_team=team,
-            pre_waiver_status=old_status,
+            pre_waiver_status="Active" if optionless_ra else old_status,
             desired_status=new_status,
             waiver_reason=waiver_reason,
         )
@@ -1967,10 +1975,13 @@ async function fetchPlayers() {
       const selActive = p.roster_status === "Active" ? "selected" : "";
       const sel40 = p.roster_status === "40-man" ? "selected" : "";
       const selRes = p.roster_status === "Reserve" ? "selected" : "";
+      const optionlessRA = ["R", "A"].includes(String(p.contract_type || "").toUpperCase()) && Number(p.options_remaining || 0) <= 0;
+      const disable40 = optionlessRA && p.roster_status !== "40-man" ? "disabled" : "";
+      const optionlessTitle = optionlessRA ? ' title="R/A players with 0 options cannot be placed on the 40-man; use Active or Reserve."' : '';
       statusHtml =
-        '<select class="status-edit" data-player-id="' + p.id + '" data-current-status="' + esc(p.roster_status || "") + '" data-options-remaining="' + p.options_remaining + '">' +
+        '<select class="status-edit" data-player-id="' + p.id + '" data-current-status="' + esc(p.roster_status || "") + '" data-contract-type="' + esc(p.contract_type || "") + '" data-options-remaining="' + p.options_remaining + '"' + optionlessTitle + '>' +
           '<option value="Active" ' + selActive + '>Active</option>' +
-          '<option value="40-man" ' + sel40 + '>40-man</option>' +
+          '<option value="40-man" ' + sel40 + ' ' + disable40 + '>40-man</option>' +
           '<option value="Reserve" ' + selRes + '>Reserve</option>' +
         '</select>';
     }
@@ -2006,14 +2017,21 @@ async function fetchPlayers() {
       const playerId = sel.dataset.playerId;
       const oldStatus = sel.dataset.currentStatus || "";
       const optionsRemaining = Number(sel.dataset.optionsRemaining || 0);
+      const contractType = String(sel.dataset.contractType || "").toUpperCase();
+      const optionlessRA = ["R", "A"].includes(contractType) && optionsRemaining <= 0;
       const newStatus = sel.value;
       const oldOn40 = oldStatus === "Active" || oldStatus === "40-man";
       const newOn40 = newStatus === "Active" || newStatus === "40-man";
+      if (newStatus === "40-man" && oldStatus !== "40-man" && optionlessRA) {
+        alert("R/A-contract players with 0 options remaining cannot be placed on the 40-man roster. Use Active or Reserve.");
+        sel.value = oldStatus;
+        return;
+      }
       let confirmMessage = "";
-      if (oldStatus === "Active" && newStatus === "40-man" && optionsRemaining <= 0) {
-        confirmMessage = "This player is out of options, so this move will place him on waivers. Continue?";
-      } else if (oldOn40 && !newOn40) {
-        confirmMessage = "Removing this player from the 40-man roster will place him on waivers. Continue?";
+      if (oldOn40 && !newOn40) {
+        confirmMessage = optionlessRA
+          ? "This optionless R/A player will be placed on waivers. If claimed, he must go to the claiming team's active roster. Continue?"
+          : "Removing this player from the 40-man roster will place him on waivers. Continue?";
       }
       if (confirmMessage && !confirm(confirmMessage)) {
         sel.value = oldStatus;

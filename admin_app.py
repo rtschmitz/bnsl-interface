@@ -563,6 +563,267 @@ def _set_custom_waiver_date(run_at_utc: datetime) -> dict[str, Any]:
     return {"run_at": run_iso, "active_waivers_updated": active_updated}
 
 
+OUT_OF_OPTIONS_BULK_WAIVER_REASON = "Out of options: 40-man R/A player sent to reserve by admin bulk action"
+OUT_OF_OPTIONS_CLAIM_RESTORE_STATUS = "Active"
+OUT_OF_OPTIONS_UNCLAIMED_STATUS = "Reserve"
+
+
+def _target_out_of_options_where_clause() -> str:
+    return """
+        UPPER(COALESCE(contract_type, '')) IN ('R', 'A')
+        AND COALESCE(roster_status, '') = '40-man'
+        AND COALESCE(active_roster, 0) = 0
+        AND COALESCE(options_remaining, 0) = 0
+        AND COALESCE(franchise, '') != ''
+    """
+
+
+def _out_of_options_bulk_preview(limit: int = 20) -> dict[str, Any]:
+    conn = get_roster_conn()
+    try:
+        cur = conn.cursor()
+        where_clause = _target_out_of_options_where_clause()
+        cur.execute(f"SELECT COUNT(*) AS n FROM roster_players WHERE {where_clause}")
+        count = int(cur.fetchone()["n"] or 0)
+        cur.execute(
+            f"""
+            SELECT franchise, COUNT(*) AS n
+            FROM roster_players
+            WHERE {where_clause}
+            GROUP BY franchise
+            ORDER BY franchise COLLATE NOCASE ASC
+            """
+        )
+        by_team = [dict(r) for r in cur.fetchall()]
+        cur.execute(
+            f"""
+            SELECT id, name, franchise, position, contract_type, options_remaining
+            FROM roster_players
+            WHERE {where_clause}
+            ORDER BY franchise COLLATE NOCASE ASC, unaccent(name) COLLATE NOCASE ASC, id ASC
+            LIMIT ?
+            """,
+            (int(limit),),
+        )
+        sample = [dict(r) for r in cur.fetchall()]
+        return {"count": count, "by_team": by_team, "sample": sample, "sample_limit": int(limit)}
+    finally:
+        conn.close()
+
+
+def _bulk_optionless_40man_to_reserve_waivers(*, notify_created: bool = False) -> dict[str, Any]:
+    """
+    Move all optionless R/A players from 40-man-only status to Reserve and
+    create or reset active waiver entries.
+
+    Selection rule:
+      * contract_type is R or A, not FA/X
+      * roster_status is exactly 40-man and active_roster is false
+      * options_remaining is exactly 0
+      * player is currently owned by a franchise
+
+    Waiver convention for this special case:
+      * if unclaimed, the player remains/lands on Reserve
+      * if claimed, the player must be restored to Active, not 40-man
+    """
+    from roster_app import sync_after_roster_mutation
+    from waivers_app import ensure_waiver_schema, format_et, iso, next_waiver_run_at, utcnow
+
+    def rv(row: sqlite3.Row, key: str, default: Any = None) -> Any:
+        return row[key] if key in row.keys() else default
+
+    conn = get_roster_conn()
+    try:
+        ensure_waiver_schema(conn)
+        conn.commit()
+        now = utcnow()
+        waived_at_iso = iso(now)
+        run_at_iso = iso(next_waiver_run_at(now))
+
+        cur = conn.cursor()
+        where_clause = _target_out_of_options_where_clause()
+        cur.execute(
+            f"""
+            SELECT *
+            FROM roster_players
+            WHERE {where_clause}
+            ORDER BY franchise COLLATE NOCASE ASC, unaccent(name) COLLATE NOCASE ASC, id ASC
+            """
+        )
+        rows = cur.fetchall()
+        if not rows:
+            conn.close()
+            return {
+                "matched": 0,
+                "moved_to_reserve": 0,
+                "waivers_created": 0,
+                "already_on_active_waivers": 0,
+                "waivers_reset": 0,
+                "players": [],
+            }
+
+        cur.execute("PRAGMA table_info(roster_players)")
+        roster_cols = {r[1] for r in cur.fetchall()}
+
+        players: list[dict[str, Any]] = []
+        waiver_ids_to_notify: list[int] = []
+        already_on_active_waivers = 0
+        waivers_reset = 0
+        moved_to_reserve = 0
+
+        for row in rows:
+            player_id = int(row["id"])
+            cur.execute(
+                "SELECT id FROM waiver_entries WHERE player_id=? AND status='active'",
+                (player_id,),
+            )
+            existing_waiver = cur.fetchone()
+            had_active_waiver = existing_waiver is not None
+            if had_active_waiver:
+                already_on_active_waivers += 1
+
+            waiver_payload = (
+                str(rv(row, "name", "") or ""),
+                rv(row, "position", ""),
+                rv(row, "date_of_birth", ""),
+                rv(row, "bats", ""),
+                rv(row, "throws", ""),
+                float(rv(row, "salary", 0.0) or 0.0),
+                rv(row, "contract_type", ""),
+                rv(row, "contract_initial_season", None),
+                rv(row, "contract_length", None),
+                int(rv(row, "contract_option", 0) or 0),
+                rv(row, "contract_expires", ""),
+                float(rv(row, "service_time", 0.0) or 0.0),
+                float(rv(row, "previous_service_time", 0.0) or 0.0),
+                float(rv(row, "service_time_2025", 0.0) or 0.0),
+                int(rv(row, "options_remaining", 0) or 0),
+                rv(row, "fa_class", ""),
+                rv(row, "fangraphs_id", ""),
+                rv(row, "mlbam_id", None),
+                canonical_team_abbr(rv(row, "franchise", "") or ""),
+                OUT_OF_OPTIONS_CLAIM_RESTORE_STATUS,
+                OUT_OF_OPTIONS_UNCLAIMED_STATUS,
+                OUT_OF_OPTIONS_BULK_WAIVER_REASON,
+                waived_at_iso,
+                run_at_iso,
+                1 if int(rv(row, "rulev_status", 0) or 0) else 0,
+                canonical_team_abbr(rv(row, "rulev_original_team", "") or ""),
+                canonical_team_abbr(rv(row, "rulev_selected_by", "") or ""),
+                rv(row, "rulev_selected_at", "") or "",
+            )
+
+            if existing_waiver:
+                waiver_id = int(existing_waiver["id"])
+                cur.execute(
+                    """
+                    UPDATE waiver_entries
+                    SET player_name=?, position=?, date_of_birth=?, bats=?, throws=?,
+                        salary=?, contract_type=?, contract_initial_season=?, contract_length=?,
+                        contract_option=?, contract_expires=?, service_time=?, previous_service_time=?,
+                        service_time_2025=?, options_remaining=?, fa_class=?, fangraphs_id=?, mlbam_id=?,
+                        waived_from_team=?, pre_waiver_status=?, desired_status=?, waiver_reason=?,
+                        waived_at=?, run_at=?, status='active', claimed_by_team=NULL, processed_at=NULL,
+                        rulev_status=?, rulev_original_team=?, rulev_selected_by=?, rulev_selected_at=?
+                    WHERE id=? AND status='active'
+                    """,
+                    (*waiver_payload, waiver_id),
+                )
+                waivers_reset += int(cur.rowcount or 0)
+            else:
+                cur.execute(
+                    """
+                    INSERT INTO waiver_entries(
+                        player_id, player_name, position, date_of_birth, bats, throws,
+                        salary, contract_type, contract_initial_season, contract_length,
+                        contract_option, contract_expires, service_time, previous_service_time,
+                        service_time_2025, options_remaining, fa_class, fangraphs_id, mlbam_id,
+                        waived_from_team, pre_waiver_status, desired_status, waiver_reason,
+                        waived_at, run_at, status,
+                        rulev_status, rulev_original_team, rulev_selected_by, rulev_selected_at
+                    ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?, 'active', ?,?,?,?)
+                    """,
+                    (player_id, *waiver_payload),
+                )
+                waiver_id = int(cur.lastrowid)
+                waiver_ids_to_notify.append(waiver_id)
+
+            assignments = ["roster_status=?", "active_roster=0"]
+            params: list[Any] = [OUT_OF_OPTIONS_UNCLAIMED_STATUS]
+            # Some historical imports had an expanded_roster boolean column.
+            # The current three-bucket roster model is driven by roster_status,
+            # but clear this flag too if it exists.
+            if "expanded_roster" in roster_cols:
+                assignments.append("expanded_roster=0")
+            params.append(player_id)
+            cur.execute(
+                f"UPDATE roster_players SET {', '.join(assignments)} WHERE id=?",
+                params,
+            )
+            moved_to_reserve += int(cur.rowcount or 0)
+
+            cur.execute("SELECT run_at, pre_waiver_status, desired_status FROM waiver_entries WHERE id=?", (int(waiver_id),))
+            waiver_row = cur.fetchone()
+            players.append({
+                "id": player_id,
+                "name": str(row["name"] or ""),
+                "team": canonical_team_abbr(row["franchise"] or ""),
+                "position": row["position"] if "position" in row.keys() else "",
+                "contract_type": row["contract_type"],
+                "options_remaining": row["options_remaining"],
+                "waiver_id": int(waiver_id) if waiver_id else None,
+                "waiver_run": format_et(waiver_row["run_at"]) if waiver_row else "",
+                "claim_restore_status": waiver_row["pre_waiver_status"] if waiver_row else OUT_OF_OPTIONS_CLAIM_RESTORE_STATUS,
+                "desired_status": waiver_row["desired_status"] if waiver_row else OUT_OF_OPTIONS_UNCLAIMED_STATUS,
+                "already_on_active_waivers": had_active_waiver,
+            })
+
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        conn.close()
+        raise
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+
+    # Keep the same lightweight post-mutation hook used by roster moves.
+    try:
+        sync_after_roster_mutation()
+    except Exception:
+        current_app.logger.exception("Bulk out-of-options waiver action: post-mutation sync failed")
+
+    # Optional: bulk moves can otherwise generate many Discord messages.
+    # Reset existing active waivers are never re-announced.
+    notified = 0
+    if notify_created:
+        try:
+            from waivers_app import notify_waiver_created
+            for waiver_id in waiver_ids_to_notify:
+                notify_waiver_created(waiver_id)
+                notified += 1
+        except Exception:
+            current_app.logger.exception("Bulk out-of-options waiver action: waiver notification failed")
+
+    by_team: dict[str, int] = {}
+    for player in players:
+        team = player.get("team") or ""
+        by_team[team] = by_team.get(team, 0) + 1
+
+    return {
+        "matched": len(rows),
+        "moved_to_reserve": moved_to_reserve,
+        "waivers_created": len(waiver_ids_to_notify),
+        "already_on_active_waivers": already_on_active_waivers,
+        "waivers_reset": waivers_reset,
+        "notifications_requested": bool(notify_created),
+        "notifications_sent": notified,
+        "by_team": by_team,
+        "players": players,
+    }
+
 def _parse_nonnegative_int(value: Any, *, field: str, default: int = 0) -> int:
     text = str(value if value is not None else "").strip()
     if text == "":
@@ -767,6 +1028,18 @@ def _update_player_fields(player_id: int, updates: dict[str, Any]) -> dict[str, 
             clean["option_decision_at"] = ""
         if "fa_class" in row.keys():
             clean["fa_class"] = ""
+
+    if not release_to_fa:
+        final_contract_type = str(clean.get("contract_type", row["contract_type"] if "contract_type" in row.keys() else "") or "").strip().upper()
+        final_roster_status = str(clean.get("roster_status", row["roster_status"] if "roster_status" in row.keys() else "") or "").strip()
+        final_options_remaining = _parse_nonnegative_int(
+            clean.get("options_remaining", row["options_remaining"] if "options_remaining" in row.keys() else 0),
+            field="Player options",
+            default=0,
+        )
+        if final_roster_status == "40-man" and final_contract_type in {"R", "A"} and final_options_remaining <= 0:
+            conn.close()
+            raise ValueError("R/A-contract players with 0 options remaining cannot be placed on the 40-man roster. Use Active or Reserve.")
 
     if not clean:
         conn.close()
@@ -1315,6 +1588,37 @@ ADMIN_HTML = """
           </form>
         </div>
 
+
+        <div class="card">
+          <h2>Optionless 40-man Waivers</h2>
+          <p class="muted">Moves every rostered R/A-contract player who is on the 40-man but not active, and has 0 options remaining, to Reserve and creates/resets a waiver entry. Claims restore these players to Active; unclaimed players remain Reserve.</p>
+          <div class="pill" style="display:inline-block; margin-bottom:10px;">Currently matching: <b>{{ bulk_optionless_preview.count }}</b></div>
+          {% if bulk_optionless_preview.by_team %}
+            <p class="muted" style="margin-top:0;">By team: {% for row in bulk_optionless_preview.by_team %}<b>{{ row.franchise }}</b> {{ row.n }}{% if not loop.last %} · {% endif %}{% endfor %}</p>
+          {% endif %}
+          {% if bulk_optionless_preview.sample %}
+            <details style="margin: 8px 0 12px;">
+              <summary class="muted">Preview first {{ bulk_optionless_preview.sample|length }} player(s)</summary>
+              <div class="table-wrap" style="margin-top:8px;">
+                <table>
+                  <thead><tr><th>Team</th><th>Player</th><th>Pos</th><th>Contract</th><th>Options</th></tr></thead>
+                  <tbody>
+                    {% for p in bulk_optionless_preview.sample %}
+                      <tr><td>{{ p.franchise }}</td><td>{{ p.name }}</td><td>{{ p.position or '' }}</td><td>{{ p.contract_type }}</td><td>{{ p.options_remaining }}</td></tr>
+                    {% endfor %}
+                  </tbody>
+                </table>
+              </div>
+            </details>
+          {% endif %}
+          <form method="post" action="bulk-optionless-40man-waivers" onsubmit="return confirm('Move all matching R/A optionless 40-man players to Reserve and place them on waivers? This cannot be bulk-undone from this page.');">
+            <label style="display:flex; gap:8px; align-items:center; margin:8px 0 12px;">
+              <input name="notify_waivers" type="checkbox" value="1" style="width:auto; margin:0;"> Send individual waiver Discord notifications for newly-created waiver entries
+            </label>
+            <button class="btn primary" type="submit" {% if bulk_optionless_preview.count == 0 %}disabled{% endif %}>Move matching players to Reserve + waivers</button>
+          </form>
+        </div>
+
         <div class="card">
           <h2>Set Draft Pick Time</h2>
           <p class="muted">Choose Amateur Draft or Rule V, then either set a new ET start time or mark one pick as skipped. Time changes can apply to only the selected pick or to that pick plus every later pick.</p>
@@ -1384,7 +1688,7 @@ const playerOptions = document.getElementById('player-options');
 const playerExpires = document.getElementById('player-expires');
 const playerServiceTime = document.getElementById('player-service-time');
 const playerContractOption = document.getElementById('player-contract-option');
-function esc(s){ return String(s ?? '').replace(/[&<>\"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','\"':'&quot;',"'":'&#39;'}[c])); }
+function esc(s){ return String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
 function setSelectValue(select, value){
   if (!select) return;
   const wanted = String(value || '');
@@ -1656,6 +1960,7 @@ def index():
         roster_locked=_is_roster_locked() if is_admin_authed() else False,
         fa_locked=_fa_locked() if is_admin_authed() else False,
         ootp27_dir=str(_ootp27_dir()) if is_admin_authed() else "",
+        bulk_optionless_preview=_out_of_options_bulk_preview() if is_admin_authed() else {"count": 0, "by_team": [], "sample": [], "sample_limit": 0},
 
         draft_time_choices=_draft_pick_choices() if is_admin_authed() else {"draft": [], "rulev": []},
         blacklisted_fa_players=_active_blacklisted_fa_players() if is_admin_authed() else [],
@@ -1910,6 +2215,36 @@ def sync_fa_roster():
         return redirect_with(error=str(e))
 
 
+
+
+
+@admin_bp.post("/bulk-optionless-40man-waivers")
+def bulk_optionless_40man_waivers():
+    require_admin()
+    try:
+        notify_waivers = _bool_from_form(request.form.get("notify_waivers")) == 1
+        result = _bulk_optionless_40man_to_reserve_waivers(notify_created=notify_waivers)
+        log_action(
+            "bulk_optionless_40man_waivers",
+            (
+                f"Moved {result['moved_to_reserve']} optionless 40-man R/A player(s) "
+                f"to Reserve; created {result['waivers_created']} new waiver entries; "
+                f"reset {result.get('waivers_reset', 0)} existing active waiver entries so claims restore to Active; "
+                f"{result['already_on_active_waivers']} already had active waivers"
+            ),
+            result,
+        )
+        return redirect_with(
+            (
+                f"Moved {result['moved_to_reserve']} player(s) to Reserve and placed them on waivers. "
+                f"New waiver entries: {result['waivers_created']}; reset existing waiver entries: {result.get('waivers_reset', 0)}; "
+                f"already active: {result['already_on_active_waivers']}. Claims restore to Active; unclaimed players remain Reserve."
+            ),
+            refresh=["roster", "waivers", "rulev"],
+        )
+    except Exception as e:
+        current_app.logger.exception("Admin bulk optionless 40-man waivers failed")
+        return redirect_with(error=str(e))
 
 
 @admin_bp.post("/generate-ootp-import")

@@ -338,6 +338,23 @@ def format_et(value: str | None) -> str:
         return str(value)
 
 
+def optionless_ra_claim_restore_status(row: sqlite3.Row | dict[str, Any]) -> str:
+    """Return the roster status a claimed player should receive.
+
+    Normal waivers restore to the pre-waiver status.  Special BNSL roster rule:
+    an R/A-contract player with 0 options remaining may not be stashed on the
+    40-man, so any successful claim must place him on the Active roster.
+    """
+    contract_type = str(_row_value(row, "contract_type", "") or "").strip().upper()
+    try:
+        options_remaining = int(float(_row_value(row, "options_remaining", 0) or 0))
+    except Exception:
+        options_remaining = 0
+    if contract_type in {"R", "A"} and options_remaining <= 0:
+        return "Active"
+    return str(_row_value(row, "pre_waiver_status", "") or "Reserve")
+
+
 def notify_waiver_created(waiver_id: int) -> None:
     """Notify #waivers that a player has been placed on waivers."""
     conn = get_roster_conn()
@@ -383,7 +400,7 @@ def notify_waiver_claimed(payload: dict[str, Any]) -> None:
     player = payload.get("player_name") or "Unknown player"
     claimed_by = canonical_team_abbr(payload.get("claimed_by_team") or "")
     waived_from = canonical_team_abbr(payload.get("waived_from_team") or "")
-    restored = payload.get("pre_waiver_status") or "Reserve"
+    restored = payload.get("claim_restore_status") or payload.get("pre_waiver_status") or "Reserve"
     run_at = format_et(payload.get("run_at"))
     content = (
         f"**Waiver claim awarded:** {claimed_by} claimed {player} from {waived_from}.\n"
@@ -546,7 +563,37 @@ def create_waiver_from_roster_row(
     cur.execute("SELECT id FROM waiver_entries WHERE player_id=? AND status='active'", (player_id,))
     existing = cur.fetchone()
     if existing:
-        return int(existing["id"])
+        waiver_id = int(existing["id"])
+        # If an already-active waiver exists for an optionless R/A player, keep
+        # the same waiver/claims but fix the restore metadata to match the new
+        # roster rule: claims restore to Active; unclaimed players cannot be
+        # assigned to 40-man.
+        if optionless_ra_claim_restore_status(player_row) == "Active":
+            clean_desired_status = "Reserve" if desired_status == "40-man" else desired_status
+            cur.execute(
+                """
+                UPDATE waiver_entries
+                SET pre_waiver_status='Active',
+                    desired_status=?,
+                    waiver_reason=?,
+                    contract_type=?,
+                    options_remaining=?
+                WHERE id=? AND status='active'
+                """,
+                (
+                    clean_desired_status,
+                    waiver_reason,
+                    _row_value(player_row, "contract_type", ""),
+                    int(_row_value(player_row, "options_remaining", 0) or 0),
+                    waiver_id,
+                ),
+            )
+        return waiver_id
+
+    if optionless_ra_claim_restore_status(player_row) == "Active":
+        pre_waiver_status = "Active"
+        if desired_status == "40-man":
+            desired_status = "Reserve"
 
     now = utcnow()
     run_at = next_waiver_run_at(now)
@@ -604,7 +651,7 @@ def _priority_index(team: str, priority: list[str]) -> int:
 
 def _restore_claimed_player(cur: sqlite3.Cursor, waiver: sqlite3.Row, claiming_team: str) -> None:
     claiming_team = canonical_team_abbr(claiming_team)
-    restore_status = waiver["pre_waiver_status"] or "Reserve"
+    restore_status = optionless_ra_claim_restore_status(waiver)
     cur.execute("""
         UPDATE roster_players
         SET signed=1,
@@ -755,6 +802,7 @@ def process_due_waivers() -> dict[str, int]:
                 "claimed_by_team": winner_team,
                 "waived_from_team": waiver["waived_from_team"],
                 "pre_waiver_status": waiver["pre_waiver_status"],
+                "claim_restore_status": optionless_ra_claim_restore_status(waiver),
                 "run_at": waiver["run_at"],
                 "rulev_status": bool(int(_row_value(waiver, "rulev_status", 0) or 0)),
                 "rulev_original_team": _row_value(waiver, "rulev_original_team", "") or "",
@@ -853,7 +901,7 @@ def waiver_to_dict(row: sqlite3.Row, authed_team: str = "", claims_by_waiver: di
         "options_remaining": int(row["options_remaining"] or 0),
         "status": row["status"],
         "desired_status": row["desired_status"] or "",
-        "claim_restore_status": row["pre_waiver_status"] or "",
+        "claim_restore_status": optionless_ra_claim_restore_status(row),
         "reason": row["waiver_reason"] or "",
         "waived_at": row["waived_at"],
         "waived_at_et": format_et(row["waived_at"]),
@@ -1022,7 +1070,7 @@ def api_my_claims():
             "position": row["position"] or "",
             "waived_from_team": canonical_team_abbr(row["waived_from_team"]),
             "salary_m": round(float(row["salary"] or 0.0) / 1_000_000.0, 3),
-            "restore_status": row["pre_waiver_status"] or "",
+            "restore_status": optionless_ra_claim_restore_status(row),
             "run_at_et": format_et(row["run_at"]),
         })
     conn.close()
