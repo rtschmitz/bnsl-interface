@@ -563,7 +563,7 @@ def _set_custom_waiver_date(run_at_utc: datetime) -> dict[str, Any]:
     return {"run_at": run_iso, "active_waivers_updated": active_updated}
 
 
-OUT_OF_OPTIONS_BULK_WAIVER_REASON = "Out of options: 40-man R/A player sent to reserve by admin bulk action"
+OUT_OF_OPTIONS_BULK_WAIVER_REASON = "Out of options: 40-man R/A player sent to reserve"
 OUT_OF_OPTIONS_CLAIM_RESTORE_STATUS = "Active"
 OUT_OF_OPTIONS_UNCLAIMED_STATUS = "Reserve"
 
