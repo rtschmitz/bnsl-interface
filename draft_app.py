@@ -1075,8 +1075,9 @@ def parse_round_pick_token(token: str) -> dict:
 
 def import_draft_order_from_pickorder(path: Path, reset: bool = False):
     """
-    pickorder.csv columns:
-      Overall Pick,Round/Pick,Slot,Owner,Day,Time,Date
+    Supported draft-order CSV layouts:
+      - Overall Pick,Round/Pick,Slot,Owner,Day,Time,Date
+      - Pick,Team,Time/Player,Scheduled
 
     If reset=False (default): upsert rows without touching drafted picks.
     If reset=True: clear the table first (use only when you truly want to reset a draft).
@@ -1093,8 +1094,8 @@ def import_draft_order_from_pickorder(path: Path, reset: bool = False):
     with path.open(newline='', encoding='utf-8') as f:
         r = csv.DictReader(f)
         for row in r:
-            token = row.get("Round/Pick") or ""
-            owner = row.get("Owner") or row.get("Slot") or ""
+            token = row.get("Round/Pick") or row.get("Pick") or ""
+            owner = row.get("Owner") or row.get("Team") or row.get("Slot") or ""
             parsed = parse_round_pick_token(token)  # you already have this
             rnd, pks, label = parsed["round"], parsed["pick_sort"], parsed["label"]
             team = normalize_team(owner)
@@ -2678,4 +2679,3 @@ if __name__ == "__main__":
 
     port = int(os.environ.get("PORT", "5000"))  # Render sets PORT
     app.run(host="0.0.0.0", port=port, debug=False)  # bind to all interfaces
-

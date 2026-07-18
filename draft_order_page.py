@@ -26,6 +26,10 @@ def _load_draft_start() -> datetime:
             return dt.astimezone(EASTERN)
         except Exception:
             pass
+    # The published 2026 schedule begins Monday, July 27 at 9:00 AM ET.
+    # BNSL_DRAFT_START still takes precedence for deployment-time overrides.
+    if DRAFT_YEAR == 2026:
+        return datetime(2026, 7, 27, 9, 0, 0, tzinfo=EASTERN)
     return datetime(DRAFT_YEAR, 10, 20, 9, 0, 0, tzinfo=EASTERN)
 
 DRAFT_START = _load_draft_start()
