@@ -1110,7 +1110,6 @@ def _picks_for_team(conn: sqlite3.Connection, team: str, limit: int = 500) -> li
                (CAST(pick_year AS TEXT) || ' ' || CAST(pick_round AS TEXT) || '.' || original_team_abbr) AS pick_label
         FROM draft_pick_stock
         WHERE current_owner_abbr = ?
-          AND pick_round != 1
         ORDER BY pick_year ASC, pick_round ASC, original_team_abbr ASC
         LIMIT ?
         """,
