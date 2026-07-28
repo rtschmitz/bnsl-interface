@@ -1141,17 +1141,6 @@ def _pick_counts(conn: sqlite3.Connection) -> dict[tuple[str, int], int]:
 
 def _validate_pick_limits(conn: sqlite3.Connection, pick_transfers: list[dict[str, Any]]) -> list[str]:
     errors: list[str] = []
-    for item in pick_transfers:
-        try:
-            round_no = int(item.get("pick_round") or 0)
-        except Exception:
-            round_no = 0
-        if round_no == 1:
-            label = item.get("pick_label") or f"{item.get('pick_year')} {item.get('pick_round')}.{item.get('original_team_abbr')}"
-            errors.append(f"{label} is a 1st-round pick; 1st-round picks cannot be traded.")
-    if errors:
-        return errors
-
     counts = _pick_counts(conn)
     touched: set[tuple[str, int]] = set()
     for item in pick_transfers:
@@ -1414,9 +1403,6 @@ def _build_items_and_payments(conn: sqlite3.Connection, proposer: str, target: s
             errors.append("Invalid draft pick year/round.")
             return
         original = str(raw.get("original_team_abbr") or "").strip().upper()
-        if round_no == 1:
-            errors.append(f"1st-round picks cannot be traded ({year} {round_no}.{original}).")
-            return
         row = _pick_for_owner(conn, side_team, year, round_no, original)
         if not row:
             errors.append(f"{side_team} does not currently own {year} {round_no}.{original}.")
