@@ -50,6 +50,7 @@ To reset: delete `draft.db` and restart the app (it will re-import CSVs / regene
 from __future__ import annotations
 from datetime import datetime, timedelta   # add timedelta
 import csv
+import io
 import os
 import sqlite3
 from datetime import datetime
@@ -253,7 +254,7 @@ SORTABLE_TABLES_ASSETS = r"""
 
 import unicodedata
 from flask import (
-    Flask, request, jsonify, session, redirect, url_for, render_template_string, abort
+    Flask, request, jsonify, session, redirect, url_for, render_template_string, abort, Response
 )
 import logging
 
@@ -1809,6 +1810,20 @@ __BNSL_GAME_CSS__
   /* Draft-only additions */
   th.sortable { cursor: pointer; user-select: none; }
   th.sortable .sort-ind { opacity: 0.75; margin-left: 6px; font-size: 11px; }
+  .pagination-bar {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 8px;
+    margin: 12px 0;
+  }
+  .pagination-bar .page-summary {
+    min-width: 230px;
+    text-align: center;
+  }
+  .pagination-bar select {
+    margin-left: 6px;
+  }
 </style>
 
 </head>
@@ -1840,6 +1855,7 @@ __BNSL_GAME_CSS__
 
   <button id="login-btn" class="btn" style="margin-left:4px;">Login</button>
   <a id="queue-link" class="btn" href="/draft/queue" style="margin-left:4px; display:none;">View Draft Queue</a>
+  <a class="btn" href="/draft/export/players.csv" style="margin-left:4px;">Export Player Pool CSV</a>
 
   <label class="pill">
     <input type="checkbox" id="hide-owned" /> Hide owned players
@@ -1855,8 +1871,23 @@ __BNSL_GAME_CSS__
     <span id="login-status">🔒 Not logged in</span>
   </div>
 
+  <div class="pagination-bar" aria-label="Player table pagination">
+    <label class="pill">Players per page:
+      <select id="page-size">
+        <option value="25">25</option>
+        <option value="50" selected>50</option>
+        <option value="100">100</option>
+        <option value="250">250</option>
+      </select>
+    </label>
+    <span id="page-summary-top" class="pill page-summary">Loading players…</span>
+    <div class="right">
+      <button id="prev-page-top" class="btn" type="button">← Previous</button>
+      <button id="next-page-top" class="btn" type="button">Next →</button>
+    </div>
+  </div>
 
-  <table>
+  <table id="players-table">
 <thead>
   <tr>
     <th class="sortable" data-col="mlbamid"   style="width:7%;">MLBAMID</th>
@@ -1879,6 +1910,13 @@ __BNSL_GAME_CSS__
 <tbody id="players-body"></tbody>
   </table>
 
+  <div class="pagination-bar" aria-label="Player table pagination">
+    <span id="page-summary-bottom" class="pill page-summary">Loading players…</span>
+    <div class="right">
+      <button id="prev-page-bottom" class="btn" type="button">← Previous</button>
+      <button id="next-page-bottom" class="btn" type="button">Next →</button>
+    </div>
+  </div>
 
 
 <script>
@@ -1891,6 +1929,19 @@ const loginBtn = document.getElementById('login-btn');   // NEW
 const currentPickSpan = document.getElementById('current-pick');
 const picksProgress = document.getElementById('picks-progress');
 const queueLink = document.getElementById('queue-link');
+const pageSizeSelect = document.getElementById('page-size');
+const pageSummaries = [
+  document.getElementById('page-summary-top'),
+  document.getElementById('page-summary-bottom')
+];
+const prevPageButtons = [
+  document.getElementById('prev-page-top'),
+  document.getElementById('prev-page-bottom')
+];
+const nextPageButtons = [
+  document.getElementById('next-page-top'),
+  document.getElementById('next-page-bottom')
+];
 
 
 let state = {
@@ -1900,7 +1951,10 @@ let state = {
   currentPick: null,
   authedForSelected: false,
   authedEmail: '',
-  sort: { key: null, dir: 'asc' }
+  sort: { key: null, dir: 'asc' },
+  players: [],
+  page: 1,
+  pageSize: 50
 };
 
 function setHeaderIndicators() {
@@ -1929,8 +1983,8 @@ tableHead.addEventListener('click', (e) => {
     state.sort.key = key;
     state.sort.dir = 'asc';
   }
-  // re-fetch (keeps results current) then render with sorting
-  fetchPlayers();
+  state.page = 1;
+  renderPlayers();
   setHeaderIndicators();
 });
 
@@ -1995,14 +2049,17 @@ async function fetchDraftStatus() {
 }
 
 
-async function fetchPlayers() {
+async function fetchPlayers(resetPage = false) {
   const params = new URLSearchParams({
     search: state.search,
     hide_owned: state.hideOwned ? '1' : '0',
   });
   const res = await fetch('/draft/api/players?' + params.toString());
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
   const data = await res.json();
-  renderPlayers(data.players);
+  state.players = Array.isArray(data.players) ? data.players : [];
+  if (resetPage) state.page = 1;
+  renderPlayers();
 }
 
 
@@ -2099,19 +2156,39 @@ function applySort(arr) {
 
 
 
-function renderPlayers(players) {
+function updatePagination(totalPlayers, totalPages, startIndex, visibleCount) {
+  const first = totalPlayers ? startIndex + 1 : 0;
+  const last = startIndex + visibleCount;
+  const summary = `${first.toLocaleString()}–${last.toLocaleString()} of ${totalPlayers.toLocaleString()} players · Page ${state.page.toLocaleString()} of ${totalPages.toLocaleString()}`;
+  pageSummaries.forEach(el => { el.textContent = summary; });
+  prevPageButtons.forEach(btn => { btn.disabled = state.page <= 1; });
+  nextPageButtons.forEach(btn => { btn.disabled = state.page >= totalPages; });
+}
+
+function renderPlayers(players = state.players) {
   playersBody.innerHTML = '';
   players = applySort(players);
+
+  const totalPlayers = players.length;
+  const totalPages = Math.max(1, Math.ceil(totalPlayers / state.pageSize));
+  state.page = Math.min(Math.max(1, state.page), totalPages);
+  const startIndex = (state.page - 1) * state.pageSize;
+  const pagePlayers = players.slice(startIndex, startIndex + state.pageSize);
+  updatePagination(totalPlayers, totalPages, startIndex, pagePlayers.length);
 
   const canDraftNow = state.currentPick 
     && state.myTeam 
     && state.currentPick.team === state.myTeam
     && state.authedForSelected; // must be logged in for that team
 
+  if (!pagePlayers.length) {
+    const tr = document.createElement('tr');
+    tr.innerHTML = '<td colspan="14" class="muted" style="text-align:center; padding:24px;">No players match the current filters.</td>';
+    playersBody.appendChild(tr);
+    return;
+  }
 
-
-
-  for (const p of players) {
+  for (const p of pagePlayers) {
     const tr = document.createElement('tr');
     tr.className = 'row-hover' + (p.franchise ? ' owned' : '');
 
@@ -2215,10 +2292,31 @@ function debounce(fn, ms) {
   let t; return function(...args){ clearTimeout(t); t = setTimeout(() => fn.apply(this, args), ms); };
 }
 
-const debouncedFetch = debounce(() => { state.search = searchInput.value; fetchPlayers(); }, 120);
+const debouncedFetch = debounce(() => {
+  state.search = searchInput.value;
+  fetchPlayers(true);
+}, 120);
 searchInput.addEventListener('input', debouncedFetch);
 
-hideOwned.addEventListener('change', () => { state.hideOwned = hideOwned.checked; fetchPlayers(); });
+hideOwned.addEventListener('change', () => {
+  state.hideOwned = hideOwned.checked;
+  fetchPlayers(true);
+});
+
+pageSizeSelect.addEventListener('change', () => {
+  const requestedSize = Number(pageSizeSelect.value);
+  state.pageSize = Number.isFinite(requestedSize) && requestedSize > 0 ? requestedSize : 50;
+  state.page = 1;
+  renderPlayers();
+});
+
+function changePage(delta) {
+  state.page += delta;
+  renderPlayers();
+  document.getElementById('players-table').scrollIntoView({ block: 'start' });
+}
+prevPageButtons.forEach(btn => btn.addEventListener('click', () => changePage(-1)));
+nextPageButtons.forEach(btn => btn.addEventListener('click', () => changePage(1)));
 
 teamSelect.addEventListener('change', async () => {
   const t = teamSelect.value || '';
@@ -2259,7 +2357,7 @@ loginBtn.addEventListener('click', async () => {
 async function boot() {
   await fetchDraftStatus().catch(() => {});
   updateLoginButtonState();
-  await fetchPlayers().catch((e) => console.error('fetchPlayers failed:', e));
+  await fetchPlayers(true).catch((e) => console.error('fetchPlayers failed:', e));
   setHeaderIndicators();
 }
 
@@ -2277,6 +2375,105 @@ INDEX_HTML = INDEX_HTML.replace("__BNSL_GAME_CSS__", BNSL_GAME_CSS + SORTABLE_TA
 @draft_bp.route("/")
 def index():
     return render_template_string(INDEX_HTML)
+
+@draft_bp.get("/export/players.csv")
+def export_players_csv():
+    """Download the complete current player pool, including draft status."""
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("""
+        SELECT
+            p.id,
+            p.mlbamid,
+            p.name,
+            p.first,
+            p.last,
+            p.dob,
+            p.position,
+            p.bats,
+            p.throws,
+            p.mlb_org,
+            p.franchise,
+            p.eligible,
+            p.fg_30,
+            p.fg_fv,
+            p.mlb_30,
+            p.mlb_fv,
+            p.fg100,
+            p.mlb100,
+            d.id AS draft_order_id,
+            d.label AS draft_pick,
+            d.team AS drafted_by,
+            d.drafted_at
+        FROM players p
+        LEFT JOIN draft_order d ON d.player_id = p.id
+        ORDER BY unaccent(p.name) COLLATE NOCASE ASC, p.id ASC
+    """)
+    rows = cur.fetchall()
+    conn.close()
+
+    output = io.StringIO(newline="")
+    writer = csv.writer(output)
+    writer.writerow([
+        "Player ID",
+        "MLBAM ID",
+        "Name",
+        "First",
+        "Last",
+        "DOB",
+        "Position",
+        "Bats",
+        "Throws",
+        "MLB Org",
+        "BNSL Franchise",
+        "Eligible",
+        "Drafted",
+        "Draft Pick",
+        "Drafted By",
+        "Drafted At",
+        "FG Team Rank",
+        "FG FV",
+        "MLB Team Rank",
+        "MLB FV",
+        "FG100",
+        "MLB100",
+    ])
+
+    def csv_value(value):
+        return "" if value is None else value
+
+    for row in rows:
+        writer.writerow([
+            row["id"],
+            csv_value(row["mlbamid"]),
+            csv_value(row["name"]),
+            csv_value(row["first"]),
+            csv_value(row["last"]),
+            csv_value(row["dob"]),
+            csv_value(row["position"]),
+            csv_value(row["bats"]),
+            csv_value(row["throws"]),
+            csv_value(row["mlb_org"]),
+            csv_value(row["franchise"]),
+            "Yes" if int(row["eligible"] or 0) == 1 else "No",
+            "Yes" if row["draft_order_id"] is not None else "No",
+            csv_value(row["draft_pick"]),
+            csv_value(row["drafted_by"]),
+            csv_value(row["drafted_at"]),
+            csv_value(row["fg_30"]),
+            csv_value(row["fg_fv"]),
+            csv_value(row["mlb_30"]),
+            csv_value(row["mlb_fv"]),
+            csv_value(row["fg100"]),
+            csv_value(row["mlb100"]),
+        ])
+
+    filename = f"bnsl_draft_pool_{datetime.now(tz=EASTERN):%Y%m%d}.csv"
+    return Response(
+        "\ufeff" + output.getvalue(),
+        mimetype="text/csv",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
 
 def _require_authed_team():
     team = session.get("authed_team")
