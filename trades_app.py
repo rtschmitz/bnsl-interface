@@ -4,6 +4,7 @@ from dataclasses import dataclass, field
 from datetime import date, datetime
 from pathlib import Path
 from typing import Any, Optional
+import csv
 import re
 import sqlite3
 
@@ -247,6 +248,20 @@ MIN_PICKS_PER_YEAR = 9
 MAX_PICKS_PER_YEAR = 15
 SALARY_CONTRACT_TYPES = {"A", "X", "FA"}
 
+# Original 2026 live-draft slots. These identify picks by their original team;
+# ownership changes must never be used to infer the slot because one club can
+# own multiple picks in the same round.
+LIVE_DRAFT_2026_ROUND_1 = (
+    "TEX", "MIL", "TB", "PIT", "KC", "SEA", "TOR", "STL", "ATL", "WAS",
+    "BAL", "CIN", "LAA", "BOS", "LAD", "HOU", "SF", "SD", "NYY", "CLE",
+    "CHW", "OAK", "MIN", "ARI", "NYM", "COL", "CHC", "PHI", "DET", "MIA",
+)
+LIVE_DRAFT_2026_LATER_ROUNDS = (
+    "STL", "TB", "MIL", "TEX", "SEA", "PIT", "KC", "TOR", "ATL", "WAS",
+    "BAL", "CIN", "LAA", "BOS", "LAD", "NYY", "HOU", "CLE", "CHW", "OAK",
+    "MIN", "SF", "ARI", "SD", "NYM", "COL", "CHC", "PHI", "DET", "MIA",
+)
+
 
 @dataclass
 class TradeLeg:
@@ -284,6 +299,20 @@ def get_draft_stock_db_path() -> Path:
     return Path(_safe_config("DRAFT_STOCK_DB_PATH") or db_path("draft_stock.db"))
 
 
+def get_live_draft_db_path() -> Path:
+    """Return the database used by the live draft app."""
+    return Path(_safe_config("DRAFT_DB_PATH") or db_path("draft.db"))
+
+
+def get_live_draft_order_csv_path() -> Path:
+    """Optional original-order CSV used to support later draft years."""
+    return Path(
+        _safe_config("DRAFT_ORDER_CSV_PATH")
+        or _safe_config("DRAFT_ORDER_CSV")
+        or input_path("draft_order.csv")
+    )
+
+
 def get_roster_db_path() -> Path:
     return Path(_safe_config("ROSTER_DB_PATH") or db_path("roster.db"))
 
@@ -300,6 +329,191 @@ def connect_roster_db() -> sqlite3.Connection:
     conn = sqlite3.connect(get_roster_db_path())
     conn.row_factory = sqlite3.Row
     return conn
+
+
+class LiveDraftSyncError(RuntimeError):
+    """Raised before acceptance when a current draft pick cannot be synced safely."""
+
+
+def _current_live_draft_year(conn: sqlite3.Connection) -> int:
+    cur = conn.cursor()
+    try:
+        cur.execute("SELECT value FROM app_meta WHERE key='current_draft_year'")
+        row = cur.fetchone()
+    except sqlite3.Error as exc:
+        raise LiveDraftSyncError("Live draft database is missing app_meta.current_draft_year.") from exc
+    if not row:
+        raise LiveDraftSyncError("Live draft database does not define current_draft_year.")
+    try:
+        return int(row[0])
+    except (TypeError, ValueError) as exc:
+        raise LiveDraftSyncError("Live draft database has an invalid current_draft_year.") from exc
+
+
+def _origin_map_from_order_csv() -> dict[tuple[int, str], int]:
+    """
+    Return {(round, original_team_abbr): pick_in_round} from the original order CSV.
+
+    The embedded 2026 order below remains the fallback, so current operation does
+    not depend on the CSV continuing to exist after the draft database is seeded.
+    """
+    path = get_live_draft_order_csv_path()
+    if not path.exists():
+        return {}
+
+    mapping: dict[tuple[int, str], int] = {}
+    try:
+        with path.open(newline="", encoding="utf-8-sig") as handle:
+            for row in csv.DictReader(handle):
+                normalized = {
+                    str(key or "").strip().lower(): str(value or "").strip()
+                    for key, value in row.items()
+                }
+                team_text = (
+                    normalized.get("team")
+                    or normalized.get("original team")
+                    or normalized.get("original_team")
+                    or ""
+                )
+                original = FULL_TO_ABBR.get(team_text) or canonical_team_abbr(team_text)
+                if original not in ABBR_TO_FULL:
+                    continue
+
+                pick_text = normalized.get("pick") or normalized.get("label") or ""
+                round_text = normalized.get("round") or ""
+                round_no: int | None = None
+                pick_no: int | None = None
+                match = re.fullmatch(r"(\d{1,2})\.(\d{1,2})", pick_text)
+                if match:
+                    round_no, pick_no = int(match.group(1)), int(match.group(2))
+                elif round_text.isdigit() and pick_text.isdigit():
+                    round_no, pick_no = int(round_text), int(pick_text)
+
+                if round_no and pick_no and 1 <= pick_no <= 30:
+                    mapping[(round_no, original)] = pick_no
+    except (OSError, csv.Error):
+        return {}
+    return mapping
+
+
+def _embedded_live_pick_number(year: int, round_no: int, original_team: str) -> int | None:
+    if year != 2026 or not 1 <= round_no <= 12:
+        return None
+    order = LIVE_DRAFT_2026_ROUND_1 if round_no == 1 else LIVE_DRAFT_2026_LATER_ROUNDS
+    try:
+        return order.index(original_team) + 1
+    except ValueError:
+        return None
+
+
+def _prepare_live_draft_pick_updates(
+    items: list[dict[str, Any]],
+) -> tuple[Path, int | None, list[dict[str, Any]]]:
+    """
+    Resolve current-year pick assets to live draft_order rows before acceptance.
+
+    This is deliberately read-only. The resolved rows are updated later through
+    SQLite ATTACH so proposal acceptance and live ownership change commit together.
+    """
+    pick_items = [item for item in items if item.get("asset_type") == "pick"]
+    if not pick_items:
+        return get_live_draft_db_path(), None, []
+
+    draft_path = get_live_draft_db_path()
+    if not draft_path.exists():
+        if any(int(item["pick_year"]) == date.today().year for item in pick_items):
+            raise LiveDraftSyncError(f"Live draft database not found at {draft_path}.")
+        return draft_path, None, []
+
+    conn = sqlite3.connect(draft_path)
+    conn.row_factory = sqlite3.Row
+    try:
+        draft_year = _current_live_draft_year(conn)
+        current_items = [item for item in pick_items if int(item["pick_year"]) == draft_year]
+        if not current_items:
+            return draft_path, draft_year, []
+
+        csv_origins = _origin_map_from_order_csv()
+        updates: list[dict[str, Any]] = []
+        seen: set[tuple[int, int, str]] = set()
+        cur = conn.cursor()
+        for item in current_items:
+            round_no = int(item["pick_round"])
+            original = canonical_team_abbr(str(item.get("original_team_abbr") or ""))
+            receiving = canonical_team_abbr(str(item.get("receiving_team_abbr") or ""))
+            key = (draft_year, round_no, original)
+            if key in seen:
+                raise LiveDraftSyncError(
+                    f"Proposal contains the same current-year pick more than once: "
+                    f"{draft_year} {round_no}.{original}."
+                )
+            seen.add(key)
+
+            pick_no = csv_origins.get((round_no, original))
+            if pick_no is None:
+                pick_no = _embedded_live_pick_number(draft_year, round_no, original)
+            if pick_no is None:
+                raise LiveDraftSyncError(
+                    f"Cannot map {draft_year} {round_no}.{original} to the live draft order."
+                )
+            new_owner = ABBR_TO_FULL.get(receiving)
+            if not new_owner:
+                raise LiveDraftSyncError(f"Unknown receiving team {receiving}.")
+
+            cur.execute(
+                """
+                SELECT id, label, team, player_id
+                FROM draft_order
+                WHERE round=? AND pick=?
+                """,
+                (round_no, pick_no),
+            )
+            rows = cur.fetchall()
+            if len(rows) != 1:
+                raise LiveDraftSyncError(
+                    f"Live draft slot {round_no}.{pick_no:02d} was not found uniquely."
+                )
+            row = rows[0]
+            if row["player_id"] is not None:
+                label = row["label"] or f"{round_no}.{pick_no:02d}"
+                raise LiveDraftSyncError(
+                    f"Pick {label} has already been used in the live draft and cannot be traded."
+                )
+            updates.append(
+                {
+                    "draft_order_id": int(row["id"]),
+                    "label": row["label"] or f"{round_no}.{pick_no:02d}",
+                    "old_owner": row["team"] or "",
+                    "new_owner": new_owner,
+                }
+            )
+        return draft_path, draft_year, updates
+    finally:
+        conn.close()
+
+
+def _attach_and_apply_live_draft_updates(
+    cur: sqlite3.Cursor,
+    *,
+    draft_path: Path,
+    updates: list[dict[str, Any]],
+) -> None:
+    if not updates:
+        return
+    cur.execute("ATTACH DATABASE ? AS live_draft", (str(draft_path),))
+    for update in updates:
+        cur.execute(
+            """
+            UPDATE live_draft.draft_order
+            SET team=?
+            WHERE id=? AND player_id IS NULL
+            """,
+            (update["new_owner"], update["draft_order_id"]),
+        )
+        if cur.rowcount != 1:
+            raise LiveDraftSyncError(
+                f"Live draft pick {update['label']} changed while the trade was being accepted."
+            )
 
 
 def display_team(abbr: str | None) -> str:
@@ -1139,6 +1353,47 @@ def _pick_counts(conn: sqlite3.Connection) -> dict[tuple[str, int], int]:
     return {(r["current_owner_abbr"], int(r["pick_year"])): int(r["n"] or 0) for r in cur.fetchall()}
 
 
+def _validate_pick_items_current(
+    conn: sqlite3.Connection,
+    pick_transfers: list[dict[str, Any]],
+) -> list[str]:
+    """Reject proposals whose picks changed owners after the proposal was submitted."""
+    errors: list[str] = []
+    cur = conn.cursor()
+    seen: set[tuple[int, int, str]] = set()
+    for item in pick_transfers:
+        year = int(item["pick_year"])
+        round_no = int(item["pick_round"])
+        original = canonical_team_abbr(str(item.get("original_team_abbr") or ""))
+        offered_by = canonical_team_abbr(str(item.get("side_team_abbr") or ""))
+        key = (year, round_no, original)
+        label = item.get("pick_label") or f"{year} {round_no}.{original}"
+        if key in seen:
+            errors.append(f"{label} appears more than once in the proposal.")
+            continue
+        seen.add(key)
+
+        cur.execute(
+            """
+            SELECT current_owner_abbr
+            FROM draft_pick_stock
+            WHERE pick_year=? AND pick_round=? AND original_team_abbr=?
+            """,
+            key,
+        )
+        row = cur.fetchone()
+        if not row:
+            errors.append(f"{label} is not present in draft stock.")
+            continue
+        current_owner = canonical_team_abbr(row["current_owner_abbr"])
+        if current_owner != offered_by:
+            errors.append(
+                f"{label} is now owned by {current_owner}, not {offered_by}; "
+                "the proposal must be resubmitted."
+            )
+    return errors
+
+
 def _validate_pick_limits(conn: sqlite3.Connection, pick_transfers: list[dict[str, Any]]) -> list[str]:
     errors: list[str] = []
     counts = _pick_counts(conn)
@@ -1158,6 +1413,99 @@ def _validate_pick_limits(conn: sqlite3.Connection, pick_transfers: list[dict[st
         if n > MAX_PICKS_PER_YEAR:
             errors.append(f"{team} would have {n} picks in {year}; maximum is {MAX_PICKS_PER_YEAR}.")
     return errors
+
+
+def _apply_pick_stock_transfers_in_transaction(
+    cur: sqlite3.Cursor,
+    *,
+    proposal_id: int,
+    trade_date: str,
+    pick_transfers: list[dict[str, Any]],
+) -> None:
+    """
+    Update stock immediately in the acceptance transaction.
+
+    refresh_from_log() still rebuilds the canonical movement history afterward,
+    but this prevents an accepted proposal from ever committing with stale stock.
+    """
+    if not pick_transfers:
+        return
+
+    cur.execute("SELECT COALESCE(MAX(process_order), 0) FROM draft_pick_movements")
+    process_order = int(cur.fetchone()[0] or 0)
+    title = f"Accepted Trade Proposal #{proposal_id}"
+
+    for item in pick_transfers:
+        year = int(item["pick_year"])
+        round_no = int(item["pick_round"])
+        original = canonical_team_abbr(str(item.get("original_team_abbr") or ""))
+        previous_owner = canonical_team_abbr(str(item.get("side_team_abbr") or ""))
+        new_owner = canonical_team_abbr(str(item.get("receiving_team_abbr") or ""))
+        label = item.get("pick_label") or f"{year} {round_no}.{original}"
+
+        cur.execute(
+            """
+            SELECT current_owner_abbr
+            FROM draft_pick_stock
+            WHERE pick_year=? AND pick_round=? AND original_team_abbr=?
+            """,
+            (year, round_no, original),
+        )
+        row = cur.fetchone()
+        actual_owner = canonical_team_abbr(row["current_owner_abbr"]) if row else ""
+        if actual_owner != previous_owner:
+            raise LiveDraftSyncError(
+                f"{label} changed owners while the proposal was being accepted."
+            )
+
+        process_order += 1
+        cur.execute(
+            """
+            INSERT INTO draft_pick_movements(
+                trade_event_id, process_order, trade_date, title,
+                from_team_abbr, to_team_abbr,
+                pick_year, pick_round, original_team_abbr,
+                previous_owner_abbr, new_owner_abbr, owner_chain_ok, pick_label
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?)
+            """,
+            (
+                -proposal_id,
+                process_order,
+                trade_date,
+                title,
+                previous_owner,
+                new_owner,
+                year,
+                round_no,
+                original,
+                previous_owner,
+                new_owner,
+                label,
+            ),
+        )
+        cur.execute(
+            """
+            UPDATE draft_pick_stock
+            SET current_owner_abbr=?,
+                last_acquired_from_abbr=?,
+                last_trade_event_id=?,
+                last_trade_date=?,
+                last_trade_title=?
+            WHERE pick_year=? AND pick_round=? AND original_team_abbr=?
+            """,
+            (
+                new_owner,
+                previous_owner,
+                -proposal_id,
+                trade_date,
+                title,
+                year,
+                round_no,
+                original,
+            ),
+        )
+        if cur.rowcount != 1:
+            raise LiveDraftSyncError(f"Could not update draft stock for {label}.")
 
 
 def _accepted_proposal_trade_rows(conn: sqlite3.Connection, q: str = "", limit: int = 200) -> list[dict[str, Any]]:
@@ -2065,43 +2413,71 @@ def api_accept_proposal(proposal_id: int):
     cur = conn.cursor()
     cur.execute("SELECT * FROM trade_proposal_items WHERE proposal_id=?", (proposal_id,))
     items = [dict(r) for r in cur.fetchall()]
-    errors = _validate_pick_limits(conn, [i for i in items if i.get("asset_type") == "pick"])
+    pick_items = [i for i in items if i.get("asset_type") == "pick"]
+    errors = _validate_pick_items_current(conn, pick_items)
+    errors.extend(_validate_pick_limits(conn, pick_items))
     errors.extend(_validate_player_items_current(items))
     if errors:
         conn.close()
         return ("Cannot accept: " + "; ".join(errors), 400)
 
+    try:
+        draft_path, draft_year, live_draft_updates = _prepare_live_draft_pick_updates(items)
+    except LiveDraftSyncError as exc:
+        conn.close()
+        return (f"Cannot accept: {exc}", 409)
+
     now = _now_iso()
-    cur.execute(
-        """
-        UPDATE trade_proposals
-        SET status='accepted', updated_at=?, accepted_at=?, acted_by_team_abbr=?
-        WHERE id=?
-        """,
-        (now, now, team, proposal_id),
-    )
-    cur.execute("UPDATE trade_proposal_payments SET status='posted' WHERE proposal_id=?", (proposal_id,))
-    cur.execute("SELECT * FROM trade_proposal_payments WHERE proposal_id=?", (proposal_id,))
-    payments = [dict(r) for r in cur.fetchall()]
-    for p in payments:
+    try:
+        _attach_and_apply_live_draft_updates(
+            cur,
+            draft_path=draft_path,
+            updates=live_draft_updates,
+        )
         cur.execute(
             """
-            INSERT OR IGNORE INTO finance_payments(
-                source_type, source_id, created_at, effective_date,
-                payer_team_abbr, receiver_team_abbr, amount, description, status
-            ) VALUES ('trade_proposal', ?, ?, ?, ?, ?, ?, ?, 'posted')
+            UPDATE trade_proposals
+            SET status='accepted', updated_at=?, accepted_at=?, acted_by_team_abbr=?
+            WHERE id=?
             """,
-            (
-                proposal_id,
-                now,
-                proposal["trade_date"],
-                p["payer_team_abbr"],
-                p["receiver_team_abbr"],
-                float(p["amount"] or 0.0),
-                f"Accepted trade proposal #{proposal_id}: {p['reason']}",
-            ),
+            (now, now, team, proposal_id),
         )
-    conn.commit()
+        cur.execute("UPDATE trade_proposal_payments SET status='posted' WHERE proposal_id=?", (proposal_id,))
+        cur.execute("SELECT * FROM trade_proposal_payments WHERE proposal_id=?", (proposal_id,))
+        payments = [dict(r) for r in cur.fetchall()]
+        for p in payments:
+            cur.execute(
+                """
+                INSERT OR IGNORE INTO finance_payments(
+                    source_type, source_id, created_at, effective_date,
+                    payer_team_abbr, receiver_team_abbr, amount, description, status
+                ) VALUES ('trade_proposal', ?, ?, ?, ?, ?, ?, ?, 'posted')
+                """,
+                (
+                    proposal_id,
+                    now,
+                    proposal["trade_date"],
+                    p["payer_team_abbr"],
+                    p["receiver_team_abbr"],
+                    float(p["amount"] or 0.0),
+                    f"Accepted trade proposal #{proposal_id}: {p['reason']}",
+                ),
+            )
+        _apply_pick_stock_transfers_in_transaction(
+            cur,
+            proposal_id=proposal_id,
+            trade_date=proposal["trade_date"],
+            pick_transfers=pick_items,
+        )
+        conn.commit()
+    except (LiveDraftSyncError, sqlite3.Error) as exc:
+        conn.rollback()
+        conn.close()
+        try:
+            current_app.logger.exception("Trade acceptance rolled back during draft-pick sync")
+        except Exception:
+            pass
+        return (f"Cannot accept: draft-pick synchronization failed: {exc}", 409)
     conn.close()
 
     moved_players = _apply_accepted_proposal_players(items)
@@ -2112,7 +2488,13 @@ def api_accept_proposal(proposal_id: int):
         notify_trade_accepted(proposal_dict, items, payments)
     except Exception:
         current_app.logger.exception("Failed to post accepted-trade Discord notification")
-    return jsonify({"id": proposal_id, "status": "accepted", "players_moved": moved_players})
+    return jsonify({
+        "id": proposal_id,
+        "status": "accepted",
+        "players_moved": moved_players,
+        "current_draft_year": draft_year,
+        "live_draft_picks_updated": len(live_draft_updates),
+    })
 
 
 @trades_bp.post("/api/proposals/<int:proposal_id>/decline")
