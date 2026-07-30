@@ -32,7 +32,7 @@ TEAM_EMAILS = {
     "Toronto Blue Jays": "daniele.defeo@gmail.com",
     "New York Yankees": "dmsund66@gmail.com",
     "Boston Red Sox": "chris_lawrence@sbcglobal.net",
-    "Tampa Bay Rays": "smith.mark.louis@gmail.com",
+    "Tampa Bay Rays": "michaelrogner@yahoo.com",
     "Baltimore Orioles": "bsweis@ptd.net",
 
     "Detroit Tigers": "brianorr@live.com",
